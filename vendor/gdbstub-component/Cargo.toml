@@ -1,0 +1,28 @@
+# Vendored from wasmtime crates/gdbstub-component (+ crates/debugger/wit),
+# repackaged as a standalone crate so we can adapt the debuggee bridge to RDP.
+# Upstream dependency versions are pinned to wasmtime's workspace at vendor time.
+[package]
+name = "firefox-lldb-gdbstub-component"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 WITH LLVM-exception"
+description = "gdbstub debug-component adapter (vendored from wasmtime), built to a wasm32-wasip2 component"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = { version = "0.58.0", default-features = false, features = ["macros"] }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+wstd = "0.6.5"
+wasip2 = "1.0"
+futures = "0.3"
+gdbstub = "0.7.10"
+gdbstub_arch = "0.3.3"
+log = "0.4"
+env_logger = "0.11"
+
+[profile.release]
+opt-level = "s"
