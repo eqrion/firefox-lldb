@@ -32,3 +32,38 @@ component-transpile:
 
 # Rebuild and re-transpile the vendored component in one step
 component: component-build component-transpile
+
+# Transpile with JSPI so the RDP-backed debuggee methods can be async.
+# The generated module must run under Node >=24 with --experimental-wasm-jspi.
+# Validated: an async frame.get-locals correctly serves qWasmLocal.
+iface := "bytecodealliance:wasmtime/debuggee@44.0.0"
+export := "bytecodealliance:wasmtime/debugger@44.0.0"
+component-transpile-jspi:
+    npx jco transpile \
+        vendor/gdbstub-component/target/wasm32-wasip2/release/firefox_lldb_gdbstub_component.wasm \
+        -o src/gdb/generated --name gdbstub --instantiation async --async-mode jspi \
+        --async-exports "{{export}}#debug" \
+        --async-imports \
+            "{{iface}}#[method]debuggee.all-modules" \
+            "{{iface}}#[method]debuggee.all-instances" \
+            "{{iface}}#[method]debuggee.exit-frames" \
+            "{{iface}}#[method]debuggee.continue" \
+            "{{iface}}#[method]debuggee.single-step" \
+            "{{iface}}#[static]event-future.finish" \
+            "{{iface}}#[method]frame.get-instance" \
+            "{{iface}}#[method]frame.get-func-index" \
+            "{{iface}}#[method]frame.get-pc" \
+            "{{iface}}#[method]frame.get-locals" \
+            "{{iface}}#[method]frame.get-stack" \
+            "{{iface}}#[method]frame.parent-frame" \
+            "{{iface}}#[method]instance.get-module" \
+            "{{iface}}#[method]instance.get-memory" \
+            "{{iface}}#[method]instance.get-global" \
+            "{{iface}}#[method]module.bytecode" \
+            "{{iface}}#[method]module.add-breakpoint" \
+            "{{iface}}#[method]module.remove-breakpoint" \
+            "{{iface}}#[method]memory.get-bytes" \
+            "{{iface}}#[method]memory.set-bytes" \
+            "{{iface}}#[method]memory.size-bytes" \
+            "{{iface}}#[method]global.get" \
+            "{{iface}}#[method]global.set"
