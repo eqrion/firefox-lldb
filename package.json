@@ -1,0 +1,23 @@
+{
+  "name": "firefox-lldb",
+  "version": "0.1.0",
+  "description": "LLDB platform server and GDB remote stub for debugging WebAssembly running inside Firefox",
+  "type": "module",
+  "license": "MPL-2.0",
+  "bin": {
+    "firefox-lldb-platform": "./dist/cli/platform.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test 'src/**/*.test.ts'",
+    "platform": "tsx src/cli/platform.ts"
+  },
+  "devDependencies": {
+    "@bytecodealliance/jco": "^1.24.0",
+    "@bytecodealliance/preview2-shim": "^0.18.1",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}
