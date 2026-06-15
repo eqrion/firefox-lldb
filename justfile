@@ -41,6 +41,18 @@ component: component-build component-transpile-jspi
 proto-worker:
     node --experimental-wasm-jspi --import tsx src/gdb/worker/proto-host.mjs
 
+# Run the wasm debugging bridge: connects to Firefox (RDP) and serves the gdbstub
+# component for LLDB on PORT. Requires Node >=24 (for --experimental-wasm-jspi)
+# and a Firefox started with --start-debugger-server RDP_PORT.
+bridge PORT="8123" RDP_PORT="6080":
+    node --experimental-wasm-jspi --import tsx src/cli/wasm-debug.ts --port {{PORT}} --rdp-port {{RDP_PORT}}
+
+# Full-pipeline integration test: live Firefox (RDP) -> RdpDebuggee -> gdbstub
+# component -> raw GDB client. Needs a Firefox on RDP_PORT and the simple wasm
+# page served (see examples/). Requires Node >=24.
+integration RDP_PORT="6080":
+    node --experimental-wasm-jspi --import tsx src/gdb/rdp-integration.ts {{RDP_PORT}}
+
 # Transpile with JSPI so the RDP-backed debuggee methods can be async.
 # The generated module must run under Node >=24 with --experimental-wasm-jspi.
 # Validated: an async frame.get-locals correctly serves qWasmLocal.

@@ -127,5 +127,7 @@ const root = await instantiate(
 const dbg = root["debugger"] ?? root["bytecodealliance:wasmtime/debugger@44.0.0"];
 
 parentPort.postMessage({ ready: true });
-dbg.debug(new Debuggee(), ["gdbstub", `127.0.0.1:${workerData.port}`, "-v"]);
+const debugArgs = ["gdbstub", `127.0.0.1:${workerData.port}`];
+if (workerData.verbose) debugArgs.push("-v");
+dbg.debug(new Debuggee(), debugArgs);
 parentPort.postMessage({ done: true });
