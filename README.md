@@ -1,222 +1,197 @@
 # firefox-lldb
 
-Work in progress.
-
-This project implements an LLDB platform server and GDB remote stub that let a
-stock LLDB client debug WebAssembly running inside Firefox. It bridges two
-protocols: LLDB's [GDB remote serial protocol](https://lldb.llvm.org/resources/lldbgdbremote.html)
+Debug WebAssembly running inside Firefox with a stock upstream LLDB. This bridge
+sits between two protocols: LLDB's
+[GDB remote serial protocol](https://lldb.llvm.org/resources/lldbgdbremote.html)
 (RSP, including the LLDB wasm extensions) and the Firefox
 [Remote Debug Protocol](https://firefox-source-docs.mozilla.org/devtools/backend/protocol.html)
 (RDP).
 
-Implementation: TypeScript on Node, with the
+It is TypeScript on Node. The RSP/wasm protocol engine is the
 [wasmtime gdbstub-component](https://github.com/bytecodealliance/wasmtime/tree/main/crates/gdbstub-component)
-transpiled to JS via [jco](https://github.com/bytecodealliance/jco) providing
-the RSP/wasm state machine. We implement its "debuggee" interface on top of RDP.
+(vendored under `vendor/`, transpiled to JS via [jco](https://github.com/bytecodealliance/jco));
+we implement its WIT `debuggee` interface on top of RDP.
+
+## Status
+
+End-to-end working and validated against a **real upstream lldb** built from
+`../llvm-project` (Apple's `/usr/bin/lldb` has no wasm process plugin):
+
+```
+(lldb) process connect --plugin wasm connect://127.0.0.1:8123
+* thread #1, stop reason = signal SIGTRAP
+    frame #0: wasm-0`compute_factorial(n=...) at math.cpp:23
+```
+
+| Milestone | State |
+|-----------|-------|
+| **M1 — platform server** | Done. Full platform packet set; validated live against Apple `lldb-1700` (`platform connect`, process list, `platform shell`, `vFile`). 16 unit tests. |
+| **M2 — module loading + call stack** | Done. `qXfer:libraries:read`, module bytes, `qWasmCallStack`; LLDB resolves the wasm stack to source via embedded DWARF. Validated with real lldb against live Firefox. |
+| **M3 — breakpoints + continue/step** | Working. `Z0/z0` → `thread.setBreakpoint`; `vCont;c`/`s` → `thread.resume`; stop replies via the RDP `paused` event. |
+| **M4 — locals / globals / memory** | Component+protocol plumbing done and validated by the lldb test suite (locals `a=1,b=2` via `qWasmLocal` + linear-memory reads). The **RDP-backed path is still stubbed** (`RdpDebuggee` returns `[]`); next step is wiring it to the RDP environment actor + linear memory. |
+| **M5 — operand stack** | Not available (`qWasmStackValue` → empty); SpiderMonkey does not expose the wasm value stack yet. |
 
 ## Architecture
 
-The bridge has two layers:
+Two layers.
 
-### 1. Platform server (the browser)
+### 1. Platform server (the browser as an LLDB platform)
 
-Models the entire browser as an LLDB platform:
-- Tabs = processes
-- A localhost HTTP server = the remote filesystem
-- `qLaunchGDBServer` spawns a per-tab GDB server (below)
+`src/platform/` — models the browser as an LLDB platform: tabs are processes, a
+filesystem backend stands in for the remote host's files, and `qLaunchGDBServer`
+spawns a per-tab GDB server. Implements the platform packet set from
+`lldbplatformpackets.md`. Reachable directly via `connect://`. (Wire-format note:
+`triple` and process `name` are hex-encoded on the wire even though the protocol
+docs render them plain — verified against `GDBRemoteCommunicationClient.cpp`.)
 
-This layer is built first because it is the test harness: LLDB's own platform
-testsuite can be run against it directly, giving us conformance coverage without
-writing our own tests.
+### 2. GDB server (per-tab), backed by the gdbstub component over RDP
 
-### 2. GDB server (per-tab)
+The per-tab GDB server is the vendored wasmtime gdbstub-component. It embeds the
+Rust `gdbstub` state machine, handles all RSP framing and the wasm packets
+(`qWasmCallStack`/`Local`/`Global`/`StackValue`, breakpoints, libraries XML,
+memory-map, host/process info), opens its own TCP listener for LLDB, and
+**imports a WIT `debuggee` interface that we implement** — that is the only part
+we write.
 
-Speaks RSP to LLDB over a TCP port, translating to RDP. LLDB connects using the
-`wasm` process plugin. For bring-up and isolated testing the GDB server can also
-be reached directly via `connect://localhost:<port>` without going through the
-platform layer.
+Bridging the synchronous WIT `debuggee` to async RDP:
+
+```
+LLDB ──RSP──► gdbstub component (Worker thread)
+                      │  synchronous debuggee calls
+                      ▼
+              SharedArrayBuffer RPC (Atomics)
+                      │
+                      ▼
+   main thread: RdpDebuggee → RdpWasmSession ──RDP──► live Firefox
+```
+
+- The component runs on a **Worker thread** (`src/gdb/worker/`). Its WASI poll /
+  socket blocking happens on the worker, so the main event loop stays free.
+- Each synchronous `debuggee` call is forwarded to the main thread over a
+  SharedArrayBuffer (the worker blocks on `Atomics.wait`); the main thread
+  services it asynchronously (an RDP round-trip) and wakes the worker.
+- Because the worker blocks synchronously, the debuggee imports are synchronous
+  and **JSPI is not needed** — the bridge runs on plain Node.
+
+Key modules:
+- `src/rdp/transport.ts`, `client.ts` — RDP transport + request/reply/events.
+- `src/rdp/session.ts` (`RdpWasmSession`) — the validated wasm-debug RDP flow.
+- `src/gdb/rdp-debuggee.ts` (`RdpDebuggee`) — the WIT `debuggee` impl over RDP.
+- `src/gdb/worker/host.mjs`, `component-worker.mjs`, `wire.mjs` — the worker +
+  SAB RPC bridge.
+- `src/cli/wasm-debug.ts` — the bridge entry point (`just bridge`).
+
+### Enabling wasm debugging in Firefox (the `observeWasm` timing problem)
+
+SpiderMonkey only baseline-compiles a wasm module with debug support if the
+debugger's `allowUnobservedWasm` is already `false` when the module compiles.
+DevTools defaults it to `true`, so observation must be turned on **before the
+page's wasm loads**. The working sequence (no Firefox patch needed):
+
+1. `getWatcher` with **`isServerTargetSwitchingEnabled: true`** — so the watcher
+   instantiates server-side targets itself and applies thread-config session
+   data at target creation (before page scripts run). Without this flag the
+   top-level target comes from the legacy `getTarget` path, which never receives
+   the config.
+2. `thread-configuration.updateConfiguration({ observeWasm: true, observeAsmJS: true })`.
+3. `watchTargets("frame")` + `watchResources(["source"])`.
+4. Navigate; the new target's wasm is debuggable.
 
 ### Launching Firefox
 
 ```
-firefox --headless --start-debugger-server <port>
+firefox --headless --no-remote --profile <dir> --start-debugger-server <port> about:blank
 ```
-
-Required prefs: `devtools.debugger.remote-enabled=true`,
-`devtools.chrome.enabled=true`.
-
-RDP transport: length-prefixed JSON (`<byte-length>:<json>`,
-`devtools/shared/transport/packets.js`). WebSocket is also supported
-(`ws:<port>`).
-
-**Critical**: the thread must be attached with `observeWasm: true`
-(`allowUnobservedWasm=false`) **before any wasm module loads**. SpiderMonkey
-only baseline-compiles a module with debug support if the debugger is already
-active at instantiation time; wasm loaded before attachment is not debuggable.
-
-### Firefox-side RDP surface
-
-Most of what the GDB server needs is already exposed by existing RDP actors. We
-add as little as possible:
-
-| Need | RDP source |
-|------|-----------|
-| wasm binary | Source actor `source` request returns `text/wasm` content |
-| Breakpoints | Thread/source/breakpoint actors; wasm offset as location `column` (`columnBase=0`) |
-| Stack frames | `threadFront.getFrames` returns interleaved `wasmcall`/`call` frames |
-| Locals | Existing environment actor (`frame.js:109` `getEnvironment`), function env bindings |
-| Globals | Same environment actor, enclosing module environment bindings |
-| Linear memory reads | Likely needs a small new RDP method; spike during M4 |
-
-The environment actor enumerates bindings via `this.obj.names()`/`getVariable()`
-(`environment.js:137`); the Node server converts the value grip to little-endian
-bytes for LLDB.
+Required prefs (in the profile): `devtools.debugger.remote-enabled=true`,
+`devtools.chrome.enabled=true`, `devtools.debugger.prompt-connection=false`.
+RDP transport is length-prefixed JSON (`<byte-length>:<json>`).
 
 ## Protocol mapping
 
-LLDB's wasm client (in `lldb/source/Plugins/Process/wasm/`) talks to our GDB
-server. The minimal packet set is documented by the reference mock in
-`llvm-project/lldb/test/API/functionalities/gdb_remote_client/TestWasm.py` and
-the spec in `lldb/docs/resources/lldbgdbremote.md` (§ Wasm Packets).
-
 ### Address encoding (`wasm_addr_t`)
 
-All wasm addresses are 64-bit little-endian:
+64-bit little-endian: `type[63:62] | module_id[61:32] | offset[31:0]`, where
+type `0x00` = linear memory and `0x01` = object (code/data). Each module's code
+section is mapped at `(module_id << 32)`.
 
+### Firefox-side RDP surface
+
+| Need | RDP source |
+|------|-----------|
+| wasm module list | `thread.sources` (filter `introductionType === "wasm"`) |
+| wasm module bytes | **HTTP fetch of the source URL** — the source actor cannot serve wasm binary; LLDB reads DWARF from the fetched bytes |
+| Stack frames | `thread.frames` returns interleaved `wasmcall`/`call` frames |
+| wasm PC | a `wasmcall` frame's `where.line` is the byte offset (column is always 1; **not** column as the original design assumed) |
+| Breakpoints | `thread.setBreakpoint` at `{ sourceUrl, line: <offset>, column: 1 }` (use the *thread* actor, not the watcher breakpoint-list) |
+| Continue / step | `thread.resume()` / `thread.resume({type:"step"})`; stop via the `paused` event |
+| Locals / globals | Environment actor (`frame.getEnvironment` bindings) — *to be implemented in `RdpDebuggee`* |
+| Linear memory | a new/dedicated RDP read — *to be implemented* |
+
+## Build & run
+
+```sh
+just install            # npm install
+just test               # unit tests (protocol + platform server)
+just component          # (re)build the vendored component + transpile (+patch); needs `rustup target add wasm32-wasip2`
+just platform           # run the M1 platform server
+just bridge             # run the wasm bridge (connects to Firefox, serves LLDB)
 ```
-type[63:62] | module_id[61:32] | offset[31:0]
-```
 
-| type | Meaning |
-|------|---------|
-| 0x00 | Linear memory |
-| 0x01 | Object (code/data section) |
-
-Each loaded module is assigned an ID; its code section is mapped at
-`(module_id << 32)`.
-
-### Required GDB server packets
-
-| Packet | Response | RDP source |
-|--------|----------|-----------|
-| `qSupported` | Advertise `qXfer:libraries:read+`, `qWasmCallStack+`, `qWasmLocal+`, `qWasmGlobal+`, `swbreak+`, etc. | — |
-| `qProcessInfo` | `triple:wasm32-unknown-unknown-wasm;ptrsize:4` | — |
-| `qRegisterInfo0` | Single 64-bit `pc` register | — |
-| `qfThreadInfo` | Thread list | RDP thread actors |
-| Stop reply `T05` | `thread:<tid>;threads:<list>;` + expedited `pc` | RDP paused event |
-| `qXfer:libraries:read` | `<library-list>` with `wasm_addr_t` load addresses | `threadFront.getSources` |
-| `m`/`x` (Object addr) | Module bytes | Source actor `source` request |
-| `m`/`x` (Memory addr) | Linear memory range | New RDP method (M4) |
-| `Z0`/`z0` | Breakpoint set/remove | RDP breakpoint actor; wasm offset as `column` |
-| `vCont;c` / `vCont;s` | Continue / step | `threadFront.resume` / `.resume({type:"step"})` |
-| `interrupt` | Halt | `threadFront.interrupt` |
-| `qWasmCallStack` | Hex LE array of 64-bit PCs | `threadFront.getFrames` (`wasmcall` frames) |
-| `qWasmLocal:<frame>;<idx>` | LE bytes | Environment actor, function env |
-| `qWasmGlobal:<frame>;<idx>` | LE bytes | Environment actor, module env |
-| `qWasmStackValue` | LE bytes | **Not available** (M5, see below) |
-
-**Breakpoint PC round-trip**: the RDP stop offset can differ by a few bytes from
-the `Z0` address because `setBreakpoint` snaps to the nearest valid position.
-Map the stop offset back to the nearest `Z0` address so LLDB classifies the stop
-as a breakpoint hit.
-
-**Interleaved JS/wasm stacks**: `threadFront.getFrames` returns `wasmcall` and
-`call` frames interleaved on a single chain. For `qWasmCallStack` we emit only
-wasm PCs, inserting a synthetic `[host]` sentinel module for JS gaps between
-wasm regions so LLDB sees a contiguous-looking wasm stack (tier 2 of 3;
-tier 3 would synthesize DWARF per JS script).
-
-## Milestones
-
-**M1 — platform server**: implement the platform packet set
-(`lldb/docs/resources/lldbplatformpackets.md`). Launch headless Firefox, model
-tabs as processes, HTTP server as filesystem, `qLaunchGDBServer`/
-`qQueryGDBServer` to spawn per-tab GDB servers. Validation: run LLDB's platform
-testsuite (`lldbsuite/test/tools/lldb-server/`) against our server.
-
-**M2 — GDB server, stack only**: module loading (`qXfer:libraries:read`), wasm
-call stack (`qWasmCallStack`), PC-to-source resolved by LLDB via DWARF embedded
-in the wasm binary. No locals yet. Reachable via M1 or directly via
-`connect://`.
-
-**M3 — breakpoints and stepping**: `Z0`/`z0`, `vCont;c`/`vCont;s`/interrupt
-over the RDP breakpoint and thread actors.
-
-**M4 — locals, globals, memory**: `qWasmLocal`/`qWasmGlobal` via the existing
-environment actor (grip-to-LE-bytes in the Node server). Spike whether existing
-actors cover linear-memory reads before adding a new RDP method.
-
-**M5 (deferred) — operand stack**: `qWasmStackValue` requires SpiderMonkey to
-expose the wasm value stack through the Debugger API, which it does not yet do.
-A SpiderMonkey + RDP extension is in scope if needed. Get as far as possible
-without it.
+`just component` builds `vendor/gdbstub-component` to a `wasm32-wasip2`
+component, transpiles it with jco, and applies one post-transpile patch (see
+**Vendoring** below). The generated output is committed, so a plain checkout
+runs without Rust/jco.
 
 ## Testing
 
-Primary strategy: run LLDB's own test suites against our server rather than
-writing our own.
+Primary strategy (per the original design): run LLDB's own test suites rather
+than writing our own.
 
-- **Platform conformance** (drives M1): `lldbsuite/test/tools/lldb-server/`
-  (`lldbgdbserverutils.py`, `gdbremote_testcase.py`).
-- **GDB/wasm client semantics**: `lldbsuite/test/gdbclientutils.py` +
-  `lldbgdbclient.py` mock-responder framework; reference is `TestWasm.py`.
+- **Unit tests** (`npm test`) cover the protocol layer and the platform server.
+- **lldb API suite** — build lldb from `../llvm-project` with
+  `LLDB_ENABLE_PYTHON=ON` + `LLDB_INCLUDE_TESTS=ON` (needs SWIG). `TestWasm.py`
+  (LLVM's wasm spec) passes as a baseline.
+- **End-to-end TDD** — `test/lldb/TestRdpBridge.py` is an lldb API test (modeled
+  on `TestWasm.py`) that drives a real lldb against our actual gdbstub component,
+  backed by a deterministic `FakeDebuggee` (`src/gdb/fake-debuggee.ts`,
+  `src/cli/fake-wasm-server.ts`) — no Firefox required, so it is a fast,
+  reproducible loop. Symlink it into
+  `llvm-project/lldb/test/API/functionalities/gdb_remote_client/` and run:
+  ```sh
+  build/bin/lldb-dotest -p TestRdpBridge.py <that dir>
+  ```
+  Passing: wasm call stack + DWARF symbolication, and locals (`a=1`, `b=2`).
+- **Live Firefox** — `src/gdb/rdp-integration.ts` (`just integration`) runs the
+  full pipeline against a running Firefox and the served `examples/` page.
 
-## Key sources
+## Repo layout
 
-### LLDB (in `./llvm-project`)
+```
+src/protocol/   RSP packet framing, hex, generic TCP server
+src/platform/   M1 platform server (filesystem, process list, qLaunchGDBServer)
+src/rdp/        RDP client + RdpWasmSession
+src/gdb/        RdpDebuggee, FakeDebuggee, worker host + SAB RPC, generated/ (jco output)
+src/cli/        entry points (platform, wasm-debug, fake-wasm-server)
+test/lldb/      lldb API test + simple.wasm asset
+vendor/         the vendored wasmtime gdbstub-component (+ MODIFICATIONS.md)
+scripts/        patch-generated.mjs (post-transpile jco patch)
+```
 
-- `lldb/docs/resources/lldbgdbremote.md` — full RSP extension reference including
-  § Wasm Packets
-- `lldb/docs/resources/lldbplatformpackets.md` — platform packet list
-- `lldb/source/Plugins/Process/wasm/` — `ProcessWasm`, `ThreadWasm`,
-  `UnwindWasm`, `RegisterContextWasm`
-- `lldb/source/Plugins/ObjectFile/wasm/ObjectFileWasm.cpp` — `wasm_addr_t`
-  layout, section loading
-- `lldb/source/Plugins/Platform/WebAssembly/PlatformWasm.cpp`
-- `lldb/tools/lldb-server/lldb-platform.cpp` — platform server entry point
-- `lldb/source/Plugins/Process/gdb-remote/GDBRemoteCommunicationServerPlatform.cpp`
-- `lldb/test/API/functionalities/gdb_remote_client/TestWasm.py` — reference mock
+## Vendoring & patches
 
-### Firefox RDP (in `./firefox`)
-
-- `devtools/docs/contributor/backend/protocol.md` — RDP spec
-- `devtools/shared/transport/packets.js` — length-prefixed framing
-- `devtools/startup/DevToolsStartup.sys.mjs` — `--start-debugger-server` flag
-- `devtools/server/actors/thread.js` — `observeWasm`, frame walking
-- `devtools/server/actors/source.js` — wasm binary, `columnBase=0` convention
-- `devtools/server/actors/frame.js:109` — `getEnvironment`, not gated on `wasmcall`
-- `devtools/server/actors/environment.js:137` — binding enumeration
-
-### Prior attempt
-
-`~/src/firefox/gdb-wasm/devtools/server/gdb-wasm-stub/` — an earlier
-embedded-in-devtools approach that never fully worked but solved several
-non-obvious problems:
-
-- `gdb-wasm-stub.js` — hand-written RSP state machine (reference and fallback if
-  the gdbstub-component proves awkward); all-stop multi-thread, `[host]`
-  sentinel, breakpoint PC fixup
-- `rdp-backend.js` — RDP glue with a custom `wasmInspect` actor; reference for
-  what locals/globals/memory reads look like over RDP
-- `wasm-addr.js` — `wasm_addr_t` codec
-- `protocol-reference.md` — validated LLDB-side packet spec
-
-## Open questions
-
-1. **Operand stack (M5)**: when and whether to add SpiderMonkey Debugger API +
-   RDP support for `qWasmStackValue`.
-
-2. **Linear memory reads (M4)**: do existing RDP actors expose
-   `WebAssembly.Memory` range reads, or does a small new method need to be
-   added?
-
-3. **`observeWasm` timing**: how to reliably attach the thread before any wasm
-   loads when using the platform layer (tab-creation / navigation-start hook).
-
-4. **JS/wasm stacks, tier 3**: eventually synthesize DWARF per JS script so
-   `call` frames show source; start with the `[host]` sentinel (tier 2).
+See `vendor/gdbstub-component/MODIFICATIONS.md`. In short: the vendored Rust
+edits are committed source (never auto-clobbered); the single jco-generated
+patch (a jco 1.24 `currentSubtask` codegen bug) is reapplied idempotently by
+`scripts/patch-generated.mjs`, wired into `just component-transpile`.
 
 ## Known limitations
 
-- No multithreading initially (gdbstub-component does not support it).
-- Wasm operand stack not inspectable until SpiderMonkey/RDP extension lands (M5).
+- No multithreading initially (gdbstub-component is single-thread).
+- Operand stack (`qWasmStackValue`) unavailable until SpiderMonkey exposes it.
+- `RdpDebuggee` locals/globals/memory are stubbed (component side validated via
+  the TDD harness; RDP wiring is the next step).
+- Interleaved JS/wasm stacks currently surface only wasm frames (the upstream
+  component is wasm-centric; a synthetic `[host]` sentinel for JS gaps is a
+  possible enhancement).
+- The vendored lldb build at `../llvm-project/build` was relocated from an older
+  path; it is made to resolve via symlinks (see the project notes).
