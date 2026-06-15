@@ -29,7 +29,14 @@ function rpc(type, id, method, args) {
   const len = Atomics.load(ctrl, CTRL_LEN);
   const resp = decode(data.subarray(0, len));
   Atomics.store(ctrl, CTRL_STATE, STATE_IDLE);
-  if (!resp.ok) throw new Error(resp.error || "rpc error");
+  if (!resp.ok) {
+    // jco lifts a thrown error into a WIT `result` Err only via `.payload`
+    // (which must be the error enum's tag, e.g. "out-of-bounds"); a bare Error
+    // is re-thrown. Attach payload so debuggee methods can signal Err.
+    const err = new Error(resp.error || "rpc error");
+    err.payload = resp.error;
+    throw err;
+  }
   return wrap(resp.value);
 }
 

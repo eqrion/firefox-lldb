@@ -15,8 +15,9 @@ export interface FakeConfig {
   callStack: number[];
   /** Locals per frame index: frameLocals[frame][localIndex] = i32 value. */
   frameLocals?: number[][];
-  /** Linear memory: base address + bytes (for shadow-stack locals). */
-  memory?: { base: number; bytes: Uint8Array };
+  /** Linear memory: `bytes` live starting at `base`; `size` is the reported
+   *  total linear-memory size (so the engine's bounds check passes). */
+  memory?: { base: number; size: number; bytes: Uint8Array };
 }
 
 type Ref = { $res: string; id: number };
@@ -73,15 +74,20 @@ export class FakeDebuggee {
           ? { $res: "Memory", id: 3 }
           : Promise.reject(new Error("out-of-bounds"));
 
+      case "Memory.uniqueId":
+        return 3n;
       case "Memory.sizeBytes":
-        return BigInt(this.#cfg.memory ? this.#cfg.memory.bytes.length : 0);
+        return BigInt(this.#cfg.memory ? this.#cfg.memory.size : 0);
       case "Memory.getBytes": {
         const addr = Number(args[0] as bigint);
         const len = Number(args[1] as bigint);
         const m = this.#cfg.memory!;
         const off = addr - m.base;
-        if (off < 0 || off + len > m.bytes.length) throw new Error("out-of-bounds");
-        return m.bytes.subarray(off, off + len);
+        const out = new Uint8Array(len); // zero-filled outside the stored window
+        for (let i = 0; i < len; i++) {
+          if (off + i >= 0 && off + i < m.bytes.length) out[i] = m.bytes[off + i];
+        }
+        return out;
       }
 
       case "Frame.getInstance":

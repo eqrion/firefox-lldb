@@ -20,7 +20,7 @@ from lldbsuite.test.decorators import *
 # can't locate the repo). Override with FIREFOX_LLDB_REPO if needed.
 REPO = os.environ.get("FIREFOX_LLDB_REPO", "/Users/ryanhunt/src/wasm-debug/firefox-lldb")
 WASM_DEBUG = os.path.abspath(os.path.join(REPO, ".."))
-NODE = os.environ.get("FIREFOX_LLDB_NODE", os.path.expanduser("~/.nvm/versions/node/v24.14.0/bin/node"))
+NODE = os.environ.get("FIREFOX_LLDB_NODE", "node")
 MATH_WASM = os.path.join(WASM_DEBUG, "examples", "simple", "math.wasm")
 
 
@@ -41,7 +41,7 @@ class TestRdpBridge(TestBase):
         with open(cfg_path, "w") as f:
             json.dump(config, f)
         proc = subprocess.Popen(
-            [NODE, "--experimental-wasm-jspi", "--import", "tsx",
+            [NODE, "--import", "tsx",
              os.path.join(REPO, "src", "cli", "fake-wasm-server.ts"),
              "--config", cfg_path, "--port", str(port)],
             cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
@@ -85,3 +85,30 @@ class TestRdpBridge(TestBase):
         self.assertIn("compute_factorial", frame0.GetFunctionName())
         line_entry = frame0.GetLineEntry()
         self.assertEqual(line_entry.GetFileSpec().GetFilename(), "math.cpp")
+
+    @skipIfAsan
+    @skipIfXmlSupportMissing
+    def test_wasm_locals(self):
+        """lldb resolves local variables: qWasmLocal gives the shadow-stack
+        pointer and lldb reads the value from linear memory. Uses llvm's
+        simple.wasm (functions add/main; a=1, b=2). Mirrors TestWasm.py."""
+        WASM_LOCAL_ADDR = 0x103E0
+        local_bytes = "0000000000000000020000000100000000000000020000000100000000000000"
+        port = self._start_server({
+            "modulePath": os.path.join(REPO, "test", "lldb", "simple.wasm"),
+            "callStack": [0x019C, 0x01E5, 0x01FE],  # add, main, _start
+            "frameLocals": [[0, 0, WASM_LOCAL_ADDR]],  # frame0 local index 2 = SP
+            "memory": {"base": WASM_LOCAL_ADDR, "size": 0x20000, "bytesHex": local_bytes},
+        })
+        target, process = self._connect(port)
+
+        thread = process.GetThreadAtIndex(0)
+        frame0 = thread.GetFrameAtIndex(0)
+        self.assertIn("add", frame0.GetFunctionName())
+
+        a = frame0.FindVariable("a")
+        self.assertTrue(a.IsValid(), "FindVariable('a')")
+        self.assertEqual(a.GetValueAsUnsigned(), 1)
+        b = frame0.FindVariable("b")
+        self.assertTrue(b.IsValid(), "FindVariable('b')")
+        self.assertEqual(b.GetValueAsUnsigned(), 2)

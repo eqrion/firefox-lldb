@@ -25,7 +25,7 @@ async function main(): Promise<void> {
     modulePath: string;
     callStack: number[];
     frameLocals?: number[][];
-    memory?: { base: number; bytesHex: string };
+    memory?: { base: number; size: number; bytesHex: string };
   };
 
   const fake: FakeConfig = {
@@ -33,7 +33,11 @@ async function main(): Promise<void> {
     callStack: cfg.callStack,
     frameLocals: cfg.frameLocals,
     memory: cfg.memory
-      ? { base: cfg.memory.base, bytes: Uint8Array.from(Buffer.from(cfg.memory.bytesHex, "hex")) }
+      ? {
+          base: cfg.memory.base,
+          size: cfg.memory.size,
+          bytes: Uint8Array.from(Buffer.from(cfg.memory.bytesHex, "hex")),
+        }
       : undefined,
   };
 

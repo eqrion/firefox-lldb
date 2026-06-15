@@ -1,5 +1,6 @@
 "use components";
 export function instantiate(getCoreModule, imports, instantiateCore = WebAssembly.instantiate) {
+  let currentSubtask; // jco-patch
   
   function promiseWithResolvers() {
     if (Promise.withResolvers) {
@@ -4800,7 +4801,7 @@ let gen = (function* _initGenerator () {
   
   HANDLE_TABLES[7] = handleTable7;
   
-  const _trampoline16 = async function(arg0, arg1) {
+  const _trampoline16 = function(arg0, arg1) {
     var handle1 = arg0;
     
     var rep2 = handleTable4[(handle1 << 1) + 1] & ~T_FLAG;
@@ -4865,21 +4866,12 @@ let gen = (function* _initGenerator () {
       }
     }
     
-    
-    const started = await task.enter({ isHost: hostProvided });
-    if (!started) {
-      _debugLog('[Instruction::CallInterface] failed to enter task', {
-        taskID: task.id(),
-        subtaskID: currentSubtask?.id(),
-      });
-      throw new Error("failed to enter task");
-    }
-    
+    const started = task.enterSync();
     
     let ret;
     
     try {
-      ret = await  _withGlobalCurrentTaskMetaAsync({
+      ret = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
         fn: () => rsc0.sizeBytes(rsc3),
@@ -4887,7 +4879,7 @@ let gen = (function* _initGenerator () {
       ;
     } catch (err) {
       
-      _debugLog('[Instruction::CallInterface] error during async call', {
+      _debugLog('[Instruction::CallInterface] error during sync call', {
         taskID: task.id(),
         subtaskID: currentSubtask?.id(),
         err,
@@ -4895,7 +4887,7 @@ let gen = (function* _initGenerator () {
       task.setErrored(err);
       task.reject(err);
       task.exit();
-      return task.completionPromise();
+      throw err;
       
     }
     
@@ -4914,7 +4906,6 @@ let gen = (function* _initGenerator () {
     return toUint64(ret);
   }
   _trampoline16.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#sizeBytes';
-  _trampoline16.manuallyAsync = true;
   
   const _trampoline17 = function(arg0) {
     var handle1 = arg0;
@@ -5336,7 +5327,7 @@ let gen = (function* _initGenerator () {
   
   HANDLE_TABLES[8] = handleTable8;
   
-  const _trampoline21 = async function(arg0, arg1) {
+  const _trampoline21 = function(arg0, arg1) {
     var handle1 = arg0;
     
     var rep2 = handleTable8[(handle1 << 1) + 1] & ~T_FLAG;
@@ -5401,21 +5392,12 @@ let gen = (function* _initGenerator () {
       }
     }
     
-    
-    const started = await task.enter({ isHost: hostProvided });
-    if (!started) {
-      _debugLog('[Instruction::CallInterface] failed to enter task', {
-        taskID: task.id(),
-        subtaskID: currentSubtask?.id(),
-      });
-      throw new Error("failed to enter task");
-    }
-    
+    const started = task.enterSync();
     
     let ret;
     
     try {
-      ret = await  _withGlobalCurrentTaskMetaAsync({
+      ret = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
         fn: () => rsc0.getModule(rsc3),
@@ -5423,7 +5405,7 @@ let gen = (function* _initGenerator () {
       ;
     } catch (err) {
       
-      _debugLog('[Instruction::CallInterface] error during async call', {
+      _debugLog('[Instruction::CallInterface] error during sync call', {
         taskID: task.id(),
         subtaskID: currentSubtask?.id(),
         err,
@@ -5431,7 +5413,7 @@ let gen = (function* _initGenerator () {
       task.setErrored(err);
       task.reject(err);
       task.exit();
-      return task.completionPromise();
+      throw err;
       
     }
     
@@ -5461,7 +5443,6 @@ let gen = (function* _initGenerator () {
     return handle6;
   }
   _trampoline21.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#getModule';
-  _trampoline21.manuallyAsync = true;
   
   const _trampoline22 = function(arg0) {
     var handle1 = arg0;
@@ -7982,7 +7963,7 @@ let captureCnt5= 0;
 
 HANDLE_TABLES[5] = handleTable5;
 
-const _trampoline47 = async function(arg0, arg1, arg2) {
+const _trampoline47 = function(arg0, arg1, arg2) {
   var handle1 = arg0;
   
   var rep2 = handleTable5[(handle1 << 1) + 1] & ~T_FLAG;
@@ -8047,20 +8028,11 @@ const _trampoline47 = async function(arg0, arg1, arg2) {
     }
   }
   
-  
-  const started = await task.enter({ isHost: hostProvided });
-  if (!started) {
-    _debugLog('[Instruction::CallInterface] failed to enter task', {
-      taskID: task.id(),
-      subtaskID: currentSubtask?.id(),
-    });
-    throw new Error("failed to enter task");
-  }
-  
+  const started = task.enterSync();
   
   let ret;
   try {
-    ret = { tag: 'ok', val: await  _withGlobalCurrentTaskMetaAsync({
+    ret = { tag: 'ok', val: _withGlobalCurrentTaskMeta({
       componentIdx: task.componentIdx(),
       taskID: task.id(),
       fn: () => rsc0.getInstance(rsc3),
@@ -8175,7 +8147,6 @@ task.resolve([ret]);
 task.exit();
 }
 _trampoline47.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#getInstance';
-_trampoline47.manuallyAsync = true;
 
 const handleTable9 = [T_FLAG, 0];
 handleTable9._createdReps = new Set();
@@ -8186,7 +8157,7 @@ let captureCnt9= 0;
 
 HANDLE_TABLES[9] = handleTable9;
 
-const _trampoline48 = async function(arg0, arg1, arg2, arg3) {
+const _trampoline48 = function(arg0, arg1, arg2, arg3) {
   var handle1 = arg0;
   
   var rep2 = handleTable8[(handle1 << 1) + 1] & ~T_FLAG;
@@ -8251,20 +8222,11 @@ const _trampoline48 = async function(arg0, arg1, arg2, arg3) {
     }
   }
   
-  
-  const started = await task.enter({ isHost: hostProvided });
-  if (!started) {
-    _debugLog('[Instruction::CallInterface] failed to enter task', {
-      taskID: task.id(),
-      subtaskID: currentSubtask?.id(),
-    });
-    throw new Error("failed to enter task");
-  }
-  
+  const started = task.enterSync();
   
   let ret;
   try {
-    ret = { tag: 'ok', val: await  _withGlobalCurrentTaskMetaAsync({
+    ret = { tag: 'ok', val: _withGlobalCurrentTaskMeta({
       componentIdx: task.componentIdx(),
       taskID: task.id(),
       fn: () => rsc0.getGlobal(rsc3, arg2 >>> 0),
@@ -8379,9 +8341,8 @@ task.resolve([ret]);
 task.exit();
 }
 _trampoline48.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#getGlobal';
-_trampoline48.manuallyAsync = true;
 
-const _trampoline49 = async function(arg0, arg1, arg2) {
+const _trampoline49 = function(arg0, arg1, arg2) {
   var handle1 = arg0;
   
   var rep2 = handleTable9[(handle1 << 1) + 1] & ~T_FLAG;
@@ -8446,20 +8407,11 @@ const _trampoline49 = async function(arg0, arg1, arg2) {
     }
   }
   
-  
-  const started = await task.enter({ isHost: hostProvided });
-  if (!started) {
-    _debugLog('[Instruction::CallInterface] failed to enter task', {
-      taskID: task.id(),
-      subtaskID: currentSubtask?.id(),
-    });
-    throw new Error("failed to enter task");
-  }
-  
+  const started = task.enterSync();
   
   let ret;
   try {
-    ret = { tag: 'ok', val: await  _withGlobalCurrentTaskMetaAsync({
+    ret = { tag: 'ok', val: _withGlobalCurrentTaskMeta({
       componentIdx: task.componentIdx(),
       taskID: task.id(),
       fn: () => rsc0.get(rsc3),
@@ -8574,9 +8526,8 @@ task.resolve([ret]);
 task.exit();
 }
 _trampoline49.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#get';
-_trampoline49.manuallyAsync = true;
 
-const _trampoline50 = async function(arg0, arg1, arg2, arg3) {
+const _trampoline50 = function(arg0, arg1, arg2, arg3) {
   var handle1 = arg0;
   
   var rep2 = handleTable3[(handle1 << 1) + 1] & ~T_FLAG;
@@ -8641,20 +8592,11 @@ const _trampoline50 = async function(arg0, arg1, arg2, arg3) {
     }
   }
   
-  
-  const started = await task.enter({ isHost: hostProvided });
-  if (!started) {
-    _debugLog('[Instruction::CallInterface] failed to enter task', {
-      taskID: task.id(),
-      subtaskID: currentSubtask?.id(),
-    });
-    throw new Error("failed to enter task");
-  }
-  
+  const started = task.enterSync();
   
   let ret;
   try {
-    ret = { tag: 'ok', val: await  _withGlobalCurrentTaskMetaAsync({
+    ret = { tag: 'ok', val: _withGlobalCurrentTaskMeta({
       componentIdx: task.componentIdx(),
       taskID: task.id(),
       fn: () => rsc0.addBreakpoint(rsc3, arg2 >>> 0),
@@ -8757,9 +8699,8 @@ task.resolve([ret]);
 task.exit();
 }
 _trampoline50.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#addBreakpoint';
-_trampoline50.manuallyAsync = true;
 
-const _trampoline51 = async function(arg0, arg1, arg2, arg3) {
+const _trampoline51 = function(arg0, arg1, arg2, arg3) {
   var handle1 = arg0;
   
   var rep2 = handleTable3[(handle1 << 1) + 1] & ~T_FLAG;
@@ -8824,20 +8765,11 @@ const _trampoline51 = async function(arg0, arg1, arg2, arg3) {
     }
   }
   
-  
-  const started = await task.enter({ isHost: hostProvided });
-  if (!started) {
-    _debugLog('[Instruction::CallInterface] failed to enter task', {
-      taskID: task.id(),
-      subtaskID: currentSubtask?.id(),
-    });
-    throw new Error("failed to enter task");
-  }
-  
+  const started = task.enterSync();
   
   let ret;
   try {
-    ret = { tag: 'ok', val: await  _withGlobalCurrentTaskMetaAsync({
+    ret = { tag: 'ok', val: _withGlobalCurrentTaskMeta({
       componentIdx: task.componentIdx(),
       taskID: task.id(),
       fn: () => rsc0.removeBreakpoint(rsc3, arg2 >>> 0),
@@ -8940,9 +8872,8 @@ task.resolve([ret]);
 task.exit();
 }
 _trampoline51.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#removeBreakpoint';
-_trampoline51.manuallyAsync = true;
 
-const _trampoline52 = async function(arg0, arg1, arg2, arg3, arg4) {
+const _trampoline52 = function(arg0, arg1, arg2, arg3, arg4) {
   var handle1 = arg0;
   
   var rep2 = handleTable4[(handle1 << 1) + 1] & ~T_FLAG;
@@ -9007,20 +8938,11 @@ const _trampoline52 = async function(arg0, arg1, arg2, arg3, arg4) {
     }
   }
   
-  
-  const started = await task.enter({ isHost: hostProvided });
-  if (!started) {
-    _debugLog('[Instruction::CallInterface] failed to enter task', {
-      taskID: task.id(),
-      subtaskID: currentSubtask?.id(),
-    });
-    throw new Error("failed to enter task");
-  }
-  
+  const started = task.enterSync();
   
   let ret;
   try {
-    ret = { tag: 'ok', val: await  _withGlobalCurrentTaskMetaAsync({
+    ret = { tag: 'ok', val: _withGlobalCurrentTaskMeta({
       componentIdx: task.componentIdx(),
       taskID: task.id(),
       fn: () => rsc0.getBytes(rsc3, BigInt.asUintN(64, BigInt(arg2)), BigInt.asUintN(64, BigInt(arg3))),
@@ -9147,7 +9069,6 @@ task.resolve([ret]);
 task.exit();
 }
 _trampoline52.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#getBytes';
-_trampoline52.manuallyAsync = true;
 
 const _trampoline53 = function(arg0, arg1) {
   var handle1 = arg0;
@@ -9285,7 +9206,7 @@ let captureCnt1= 0;
 
 HANDLE_TABLES[1] = handleTable1;
 
-const _trampoline54 = async function(arg0, arg1, arg2) {
+const _trampoline54 = function(arg0, arg1, arg2) {
   var handle1 = arg0;
   
   var rep2 = handleTable2[(handle1 << 1) + 1] & ~T_FLAG;
@@ -9353,20 +9274,11 @@ const _trampoline54 = async function(arg0, arg1, arg2) {
     }
   }
   
-  
-  const started = await task.enter({ isHost: hostProvided });
-  if (!started) {
-    _debugLog('[Instruction::CallInterface] failed to enter task', {
-      taskID: task.id(),
-      subtaskID: currentSubtask?.id(),
-    });
-    throw new Error("failed to enter task");
-  }
-  
+  const started = task.enterSync();
   
   let ret;
   try {
-    ret = { tag: 'ok', val: await  _withGlobalCurrentTaskMetaAsync({
+    ret = { tag: 'ok', val: _withGlobalCurrentTaskMeta({
       componentIdx: task.componentIdx(),
       taskID: task.id(),
       fn: () => EventFuture.finish(rsc0, rsc3),
@@ -9533,9 +9445,8 @@ task.resolve([ret]);
 task.exit();
 }
 _trampoline54.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#EventFuture.finish';
-_trampoline54.manuallyAsync = true;
 
-const _trampoline55 = async function(arg0, arg1, arg2) {
+const _trampoline55 = function(arg0, arg1, arg2) {
   var handle1 = arg0;
   
   var rep2 = handleTable5[(handle1 << 1) + 1] & ~T_FLAG;
@@ -9600,20 +9511,11 @@ const _trampoline55 = async function(arg0, arg1, arg2) {
     }
   }
   
-  
-  const started = await task.enter({ isHost: hostProvided });
-  if (!started) {
-    _debugLog('[Instruction::CallInterface] failed to enter task', {
-      taskID: task.id(),
-      subtaskID: currentSubtask?.id(),
-    });
-    throw new Error("failed to enter task");
-  }
-  
+  const started = task.enterSync();
   
   let ret;
   try {
-    ret = { tag: 'ok', val: await  _withGlobalCurrentTaskMetaAsync({
+    ret = { tag: 'ok', val: _withGlobalCurrentTaskMeta({
       componentIdx: task.componentIdx(),
       taskID: task.id(),
       fn: () => rsc0.getLocals(rsc3),
@@ -9736,9 +9638,8 @@ task.resolve([ret]);
 task.exit();
 }
 _trampoline55.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#getLocals';
-_trampoline55.manuallyAsync = true;
 
-const _trampoline56 = async function(arg0, arg1, arg2) {
+const _trampoline56 = function(arg0, arg1, arg2) {
   var handle1 = arg0;
   
   var rep2 = handleTable5[(handle1 << 1) + 1] & ~T_FLAG;
@@ -9803,20 +9704,11 @@ const _trampoline56 = async function(arg0, arg1, arg2) {
     }
   }
   
-  
-  const started = await task.enter({ isHost: hostProvided });
-  if (!started) {
-    _debugLog('[Instruction::CallInterface] failed to enter task', {
-      taskID: task.id(),
-      subtaskID: currentSubtask?.id(),
-    });
-    throw new Error("failed to enter task");
-  }
-  
+  const started = task.enterSync();
   
   let ret;
   try {
-    ret = { tag: 'ok', val: await  _withGlobalCurrentTaskMetaAsync({
+    ret = { tag: 'ok', val: _withGlobalCurrentTaskMeta({
       componentIdx: task.componentIdx(),
       taskID: task.id(),
       fn: () => rsc0.parentFrame(rsc3),
@@ -9938,9 +9830,8 @@ task.resolve([ret]);
 task.exit();
 }
 _trampoline56.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#parentFrame';
-_trampoline56.manuallyAsync = true;
 
-const _trampoline57 = async function(arg0, arg1, arg2) {
+const _trampoline57 = function(arg0, arg1, arg2) {
   var handle1 = arg0;
   
   var rep2 = handleTable5[(handle1 << 1) + 1] & ~T_FLAG;
@@ -10005,20 +9896,11 @@ const _trampoline57 = async function(arg0, arg1, arg2) {
     }
   }
   
-  
-  const started = await task.enter({ isHost: hostProvided });
-  if (!started) {
-    _debugLog('[Instruction::CallInterface] failed to enter task', {
-      taskID: task.id(),
-      subtaskID: currentSubtask?.id(),
-    });
-    throw new Error("failed to enter task");
-  }
-  
+  const started = task.enterSync();
   
   let ret;
   try {
-    ret = { tag: 'ok', val: await  _withGlobalCurrentTaskMetaAsync({
+    ret = { tag: 'ok', val: _withGlobalCurrentTaskMeta({
       componentIdx: task.componentIdx(),
       taskID: task.id(),
       fn: () => rsc0.getPc(rsc3),
@@ -10122,9 +10004,8 @@ task.resolve([ret]);
 task.exit();
 }
 _trampoline57.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#getPc';
-_trampoline57.manuallyAsync = true;
 
-const _trampoline58 = async function(arg0, arg1, arg2) {
+const _trampoline58 = function(arg0, arg1, arg2) {
   var handle1 = arg0;
   
   var rep2 = handleTable5[(handle1 << 1) + 1] & ~T_FLAG;
@@ -10189,20 +10070,11 @@ const _trampoline58 = async function(arg0, arg1, arg2) {
     }
   }
   
-  
-  const started = await task.enter({ isHost: hostProvided });
-  if (!started) {
-    _debugLog('[Instruction::CallInterface] failed to enter task', {
-      taskID: task.id(),
-      subtaskID: currentSubtask?.id(),
-    });
-    throw new Error("failed to enter task");
-  }
-  
+  const started = task.enterSync();
   
   let ret;
   try {
-    ret = { tag: 'ok', val: await  _withGlobalCurrentTaskMetaAsync({
+    ret = { tag: 'ok', val: _withGlobalCurrentTaskMeta({
       componentIdx: task.componentIdx(),
       taskID: task.id(),
       fn: () => rsc0.getStack(rsc3),
@@ -10325,9 +10197,8 @@ task.resolve([ret]);
 task.exit();
 }
 _trampoline58.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#getStack';
-_trampoline58.manuallyAsync = true;
 
-const _trampoline59 = async function(arg0, arg1) {
+const _trampoline59 = function(arg0, arg1) {
   var handle1 = arg0;
   
   var rep2 = handleTable3[(handle1 << 1) + 1] & ~T_FLAG;
@@ -10381,21 +10252,12 @@ const _trampoline59 = async function(arg0, arg1) {
     }
   }
   
-  
-  const started = await task.enter({ isHost: hostProvided });
-  if (!started) {
-    _debugLog('[Instruction::CallInterface] failed to enter task', {
-      taskID: task.id(),
-      subtaskID: currentSubtask?.id(),
-    });
-    throw new Error("failed to enter task");
-  }
-  
+  const started = task.enterSync();
   
   let ret;
   
   try {
-    ret = await  _withGlobalCurrentTaskMetaAsync({
+    ret = _withGlobalCurrentTaskMeta({
       componentIdx: task.componentIdx(),
       taskID: task.id(),
       fn: () => rsc0.bytecode(),
@@ -10403,7 +10265,7 @@ const _trampoline59 = async function(arg0, arg1) {
     ;
   } catch (err) {
     
-    _debugLog('[Instruction::CallInterface] error during async call', {
+    _debugLog('[Instruction::CallInterface] error during sync call', {
       taskID: task.id(),
       subtaskID: currentSubtask?.id(),
       err,
@@ -10411,7 +10273,7 @@ const _trampoline59 = async function(arg0, arg1) {
     task.setErrored(err);
     task.reject(err);
     task.exit();
-    return task.completionPromise();
+    throw err;
     
   }
   
@@ -10460,9 +10322,8 @@ const _trampoline59 = async function(arg0, arg1) {
   task.exit();
 }
 _trampoline59.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#bytecode';
-_trampoline59.manuallyAsync = true;
 
-const _trampoline60 = async function(arg0, arg1) {
+const _trampoline60 = function(arg0, arg1) {
   var handle1 = arg0;
   
   var rep2 = handleTable7[(handle1 << 1) + 1] & ~T_FLAG;
@@ -10516,21 +10377,12 @@ const _trampoline60 = async function(arg0, arg1) {
     }
   }
   
-  
-  const started = await task.enter({ isHost: hostProvided });
-  if (!started) {
-    _debugLog('[Instruction::CallInterface] failed to enter task', {
-      taskID: task.id(),
-      subtaskID: currentSubtask?.id(),
-    });
-    throw new Error("failed to enter task");
-  }
-  
+  const started = task.enterSync();
   
   let ret;
   
   try {
-    ret = await  _withGlobalCurrentTaskMetaAsync({
+    ret = _withGlobalCurrentTaskMeta({
       componentIdx: task.componentIdx(),
       taskID: task.id(),
       fn: () => rsc0.allModules(),
@@ -10538,7 +10390,7 @@ const _trampoline60 = async function(arg0, arg1) {
     ;
   } catch (err) {
     
-    _debugLog('[Instruction::CallInterface] error during async call', {
+    _debugLog('[Instruction::CallInterface] error during sync call', {
       taskID: task.id(),
       subtaskID: currentSubtask?.id(),
       err,
@@ -10546,7 +10398,7 @@ const _trampoline60 = async function(arg0, arg1) {
     task.setErrored(err);
     task.reject(err);
     task.exit();
-    return task.completionPromise();
+    throw err;
     
   }
   
@@ -10584,9 +10436,8 @@ const _trampoline60 = async function(arg0, arg1) {
   task.exit();
 }
 _trampoline60.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#allModules';
-_trampoline60.manuallyAsync = true;
 
-const _trampoline61 = async function(arg0, arg1) {
+const _trampoline61 = function(arg0, arg1) {
   var handle1 = arg0;
   
   var rep2 = handleTable7[(handle1 << 1) + 1] & ~T_FLAG;
@@ -10640,21 +10491,12 @@ const _trampoline61 = async function(arg0, arg1) {
     }
   }
   
-  
-  const started = await task.enter({ isHost: hostProvided });
-  if (!started) {
-    _debugLog('[Instruction::CallInterface] failed to enter task', {
-      taskID: task.id(),
-      subtaskID: currentSubtask?.id(),
-    });
-    throw new Error("failed to enter task");
-  }
-  
+  const started = task.enterSync();
   
   let ret;
   
   try {
-    ret = await  _withGlobalCurrentTaskMetaAsync({
+    ret = _withGlobalCurrentTaskMeta({
       componentIdx: task.componentIdx(),
       taskID: task.id(),
       fn: () => rsc0.exitFrames(),
@@ -10662,7 +10504,7 @@ const _trampoline61 = async function(arg0, arg1) {
     ;
   } catch (err) {
     
-    _debugLog('[Instruction::CallInterface] error during async call', {
+    _debugLog('[Instruction::CallInterface] error during sync call', {
       taskID: task.id(),
       subtaskID: currentSubtask?.id(),
       err,
@@ -10670,7 +10512,7 @@ const _trampoline61 = async function(arg0, arg1) {
     task.setErrored(err);
     task.reject(err);
     task.exit();
-    return task.completionPromise();
+    throw err;
     
   }
   
@@ -10708,7 +10550,6 @@ const _trampoline61 = async function(arg0, arg1) {
   task.exit();
 }
 _trampoline61.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#exitFrames';
-_trampoline61.manuallyAsync = true;
 
 const handleTable10 = [T_FLAG, 0];
 handleTable10._createdReps = new Set();
@@ -10719,7 +10560,7 @@ let captureCnt10= 0;
 
 HANDLE_TABLES[10] = handleTable10;
 
-const _trampoline62 = async function(arg0, arg1, arg2, arg3, arg4) {
+const _trampoline62 = function(arg0, arg1, arg2, arg3, arg4) {
   var handle1 = arg0;
   
   var rep2 = handleTable7[(handle1 << 1) + 1] & ~T_FLAG;
@@ -10879,21 +10720,12 @@ const _trampoline62 = async function(arg0, arg1, arg2, arg3, arg4) {
     }
   }
   
-  
-  const started = await task.enter({ isHost: hostProvided });
-  if (!started) {
-    _debugLog('[Instruction::CallInterface] failed to enter task', {
-      taskID: task.id(),
-      subtaskID: currentSubtask?.id(),
-    });
-    throw new Error("failed to enter task");
-  }
-  
+  const started = task.enterSync();
   
   let ret;
   
   try {
-    ret = await  _withGlobalCurrentTaskMetaAsync({
+    ret = _withGlobalCurrentTaskMeta({
       componentIdx: task.componentIdx(),
       taskID: task.id(),
       fn: () => rsc0.singleStep(variant17),
@@ -10901,7 +10733,7 @@ const _trampoline62 = async function(arg0, arg1, arg2, arg3, arg4) {
     ;
   } catch (err) {
     
-    _debugLog('[Instruction::CallInterface] error during async call', {
+    _debugLog('[Instruction::CallInterface] error during sync call', {
       taskID: task.id(),
       subtaskID: currentSubtask?.id(),
       err,
@@ -10909,7 +10741,7 @@ const _trampoline62 = async function(arg0, arg1, arg2, arg3, arg4) {
     task.setErrored(err);
     task.reject(err);
     task.exit();
-    return task.completionPromise();
+    throw err;
     
   }
   
@@ -10939,9 +10771,8 @@ const _trampoline62 = async function(arg0, arg1, arg2, arg3, arg4) {
   return handle18;
 }
 _trampoline62.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#singleStep';
-_trampoline62.manuallyAsync = true;
 
-const _trampoline63 = async function(arg0, arg1) {
+const _trampoline63 = function(arg0, arg1) {
   var handle1 = arg0;
   
   var rep2 = handleTable7[(handle1 << 1) + 1] & ~T_FLAG;
@@ -10995,21 +10826,12 @@ const _trampoline63 = async function(arg0, arg1) {
     }
   }
   
-  
-  const started = await task.enter({ isHost: hostProvided });
-  if (!started) {
-    _debugLog('[Instruction::CallInterface] failed to enter task', {
-      taskID: task.id(),
-      subtaskID: currentSubtask?.id(),
-    });
-    throw new Error("failed to enter task");
-  }
-  
+  const started = task.enterSync();
   
   let ret;
   
   try {
-    ret = await  _withGlobalCurrentTaskMetaAsync({
+    ret = _withGlobalCurrentTaskMeta({
       componentIdx: task.componentIdx(),
       taskID: task.id(),
       fn: () => rsc0.allInstances(),
@@ -11017,7 +10839,7 @@ const _trampoline63 = async function(arg0, arg1) {
     ;
   } catch (err) {
     
-    _debugLog('[Instruction::CallInterface] error during async call', {
+    _debugLog('[Instruction::CallInterface] error during sync call', {
       taskID: task.id(),
       subtaskID: currentSubtask?.id(),
       err,
@@ -11025,7 +10847,7 @@ const _trampoline63 = async function(arg0, arg1) {
     task.setErrored(err);
     task.reject(err);
     task.exit();
-    return task.completionPromise();
+    throw err;
     
   }
   
@@ -11063,9 +10885,8 @@ const _trampoline63 = async function(arg0, arg1) {
   task.exit();
 }
 _trampoline63.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#allInstances';
-_trampoline63.manuallyAsync = true;
 
-const _trampoline64 = async function(arg0, arg1, arg2, arg3, arg4) {
+const _trampoline64 = function(arg0, arg1, arg2, arg3, arg4) {
   var handle1 = arg0;
   
   var rep2 = handleTable7[(handle1 << 1) + 1] & ~T_FLAG;
@@ -11225,21 +11046,12 @@ const _trampoline64 = async function(arg0, arg1, arg2, arg3, arg4) {
     }
   }
   
-  
-  const started = await task.enter({ isHost: hostProvided });
-  if (!started) {
-    _debugLog('[Instruction::CallInterface] failed to enter task', {
-      taskID: task.id(),
-      subtaskID: currentSubtask?.id(),
-    });
-    throw new Error("failed to enter task");
-  }
-  
+  const started = task.enterSync();
   
   let ret;
   
   try {
-    ret = await  _withGlobalCurrentTaskMetaAsync({
+    ret = _withGlobalCurrentTaskMeta({
       componentIdx: task.componentIdx(),
       taskID: task.id(),
       fn: () => rsc0.continue(variant17),
@@ -11247,7 +11059,7 @@ const _trampoline64 = async function(arg0, arg1, arg2, arg3, arg4) {
     ;
   } catch (err) {
     
-    _debugLog('[Instruction::CallInterface] error during async call', {
+    _debugLog('[Instruction::CallInterface] error during sync call', {
       taskID: task.id(),
       subtaskID: currentSubtask?.id(),
       err,
@@ -11255,7 +11067,7 @@ const _trampoline64 = async function(arg0, arg1, arg2, arg3, arg4) {
     task.setErrored(err);
     task.reject(err);
     task.exit();
-    return task.completionPromise();
+    throw err;
     
   }
   
@@ -11285,9 +11097,8 @@ const _trampoline64 = async function(arg0, arg1, arg2, arg3, arg4) {
   return handle18;
 }
 _trampoline64.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#continue';
-_trampoline64.manuallyAsync = true;
 
-const _trampoline65 = async function(arg0, arg1, arg2, arg3) {
+const _trampoline65 = function(arg0, arg1, arg2, arg3) {
   var handle1 = arg0;
   
   var rep2 = handleTable8[(handle1 << 1) + 1] & ~T_FLAG;
@@ -11352,20 +11163,11 @@ const _trampoline65 = async function(arg0, arg1, arg2, arg3) {
     }
   }
   
-  
-  const started = await task.enter({ isHost: hostProvided });
-  if (!started) {
-    _debugLog('[Instruction::CallInterface] failed to enter task', {
-      taskID: task.id(),
-      subtaskID: currentSubtask?.id(),
-    });
-    throw new Error("failed to enter task");
-  }
-  
+  const started = task.enterSync();
   
   let ret;
   try {
-    ret = { tag: 'ok', val: await  _withGlobalCurrentTaskMetaAsync({
+    ret = { tag: 'ok', val: _withGlobalCurrentTaskMeta({
       componentIdx: task.componentIdx(),
       taskID: task.id(),
       fn: () => rsc0.getMemory(rsc3, arg2 >>> 0),
@@ -11480,7 +11282,6 @@ task.resolve([ret]);
 task.exit();
 }
 _trampoline65.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#getMemory';
-_trampoline65.manuallyAsync = true;
 
 const handleTable11 = [T_FLAG, 0];
 handleTable11._createdReps = new Set();
@@ -13053,7 +12854,7 @@ _trampoline78.fnName = 'wasi:cli/terminal-stderr@0.2.12#getTerminalStderr';
 let exports2;
 let debugger4400Debug;
 
-async function debug(arg0, arg1) {
+function debug(arg0, arg1) {
   
   if (!(arg0 instanceof Debuggee)) {
     throw new TypeError('Resource error: Not a valid \"Debuggee\" resource.');
@@ -13089,7 +12890,7 @@ async function debug(arg0, arg1) {
   const [task, _wasm_call_currentTaskID] = createNewCurrentTask({
     componentIdx: 0,
     isAsync: false,
-    isManualAsync: true,
+    isManualAsync: false,
     entryFnName: 'debugger4400Debug',
     getCallbackFn: () => null,
     callbackFnName: null,
@@ -13097,16 +12898,7 @@ async function debug(arg0, arg1) {
     callingWasmExport: true,
   });
   
-  
-  const started = await task.enter();
-  if (!started) {
-    _debugLog('[Instruction::AsyncTaskReturn] failed to enter task', {
-      taskID: task.id(),
-      subtaskID: currentSubtask?.id(),
-    });
-    throw new Error("failed to enter task");
-  }
-  
+  const started = task.enterSync();
   
   if (0!== null) {
     task.setReturnMemoryIdx(0);
@@ -13117,21 +12909,21 @@ async function debug(arg0, arg1) {
   let ret;
   
   try {
-    await  _withGlobalCurrentTaskMetaAsync({
+    _withGlobalCurrentTaskMeta({
       taskID: task.id(),
       componentIdx: task.componentIdx(),
       fn: () => debugger4400Debug(handle0, result2, len2),
     });
   } catch (err) {
     
-    _debugLog('[Instruction::CallWasm] error during async call', {
+    _debugLog('[Instruction::CallWasm] error during sync call', {
       taskID: task.id(),
       err,
     });
     task.setErrored(err);
     task.reject(err);
     task.exit();
-    return task.completionPromise();
+    throw err;
     
   }
   
@@ -18847,7 +18639,7 @@ try {
     '9': trampoline49,
   },
 }));
-debugger4400Debug = WebAssembly.promising(exports1['bytecodealliance:wasmtime/debugger@44.0.0#debug']);
+debugger4400Debug = exports1['bytecodealliance:wasmtime/debugger@44.0.0#debug'];
 const debugger4400 = {
   debug: debug,
   
