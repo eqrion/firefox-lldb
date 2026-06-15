@@ -42,6 +42,12 @@ const { ready, stop } = startGdbServer({
 });
 await ready;
 
+// "hold" mode: keep serving (paused in wasm) so an external LLDB can attach.
+if (process.argv.includes("hold")) {
+  console.log(`\nHOLDING. Attach: process connect --plugin wasm connect://127.0.0.1:${LLDB_PORT}`);
+  await new Promise(() => {}); // never resolves
+}
+
 // --- raw GDB client ---
 function cksum(s: string) { let n = 0; for (const c of s) n = (n + c.charCodeAt(0)) & 0xff; return n.toString(16).padStart(2, "0"); }
 const pkt = (d: string) => `$${d}#${cksum(d)}`;
