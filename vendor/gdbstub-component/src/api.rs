@@ -1,7 +1,5 @@
 //! Bindings for Wasmtime's debugger API.
 
-use wstd::runtime::AsyncPollable;
-
 wit_bindgen::generate!({
     world: "bytecodealliance:wasmtime/debug-main",
     path: "wit",
@@ -12,33 +10,35 @@ wit_bindgen::generate!({
 pub(crate) use bytecodealliance::wasmtime::debuggee::*;
 
 /// One "resumption", or period of execution, in the debuggee.
+///
+/// Upstream awaits the resumption through a `wasi:io/poll` pollable via wstd's
+/// reactor. We run this component inside a worker and bridge the `debuggee`
+/// interface to an async host (RDP) over a synchronous SharedArrayBuffer RPC,
+/// so `EventFuture::finish` already blocks until the next event arrives. We
+/// therefore drop the pollable/reactor machinery: `wait()` is a no-op and
+/// `result()` simply calls `finish()`. (The upstream reactor path also panics
+/// under jco, where `Reactor::current` is unavailable in gdbstub's synchronous
+/// resume() call.)
 pub struct Resumption {
     future: EventFuture,
-    pollable: Option<AsyncPollable>,
 }
 
 impl Resumption {
     pub fn continue_(d: &Debuggee, r: ResumptionValue) -> Self {
-        let future = d.continue_(r);
-        let pollable = Some(AsyncPollable::new(future.subscribe()));
-        Resumption { future, pollable }
-    }
-
-    pub fn single_step(d: &Debuggee, r: ResumptionValue) -> Self {
-        let future = d.single_step(r);
-        let pollable = Some(AsyncPollable::new(future.subscribe()));
-        Resumption { future, pollable }
-    }
-
-    pub async fn wait(&mut self) {
-        if let Some(pollable) = self.pollable.as_mut() {
-            pollable.wait_for().await;
+        Resumption {
+            future: d.continue_(r),
         }
     }
 
-    pub fn result(mut self, d: &Debuggee) -> std::result::Result<Event, Error> {
-        // Drop the pollable first, since it's a child resource.
-        let _ = self.pollable.take();
+    pub fn single_step(d: &Debuggee, r: ResumptionValue) -> Self {
+        Resumption {
+            future: d.single_step(r),
+        }
+    }
+
+    pub async fn wait(&mut self) {}
+
+    pub fn result(self, d: &Debuggee) -> std::result::Result<Event, Error> {
         EventFuture::finish(self.future, d)
     }
 }

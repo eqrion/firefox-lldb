@@ -134,30 +134,15 @@ impl<'a> Debugger<'a> {
                         break 'mainloop;
                     }
 
-                    // Wait for either a resumption or a byte from the
-                    // connection.
-                    let resumption = self
-                        .running
-                        .as_mut()
-                        .expect("In Running state, we must have a resumption future");
-                    select! {
-                        _ = resumption.wait().fuse() => {
-                            let resumption = self.running.take().unwrap();
-                            let event = resumption.result(self.debuggee)?;
-                            stub = self.handle_event(event, inner).await?;
-                        }
-                        byte = inner.borrow_conn().read_byte().fuse() => {
-                            let Some(byte) = byte? else {
-                                // Eat any connection-closed errors on
-                                // the outbound flush.
-                                let _ = inner.borrow_conn().flush().await;
-                                // Connection closed.
-                                log::info!("Connection closed; debugger detached.");
-                                break 'mainloop;
-                            };
-                            stub = inner.incoming_data(&mut *self, byte)?;
-                        }
-                    }
+                    // Block until the debuggee reports the next event. The host
+                    // bridges `EventFuture::finish` synchronously (it returns
+                    // only once the next event occurs), so we do not need to
+                    // poll the connection concurrently here. (Upstream used a
+                    // wstd select! over a wasi pollable and the connection; that
+                    // reactor path is unavailable under jco.)
+                    let resumption = self.running.take().unwrap();
+                    let event = resumption.result(self.debuggee)?;
+                    stub = self.handle_event(event, inner).await?;
                 }
                 GdbStubStateMachine::CtrlCInterrupt(mut inner) => {
                     if inner.borrow_conn().flush().await.is_err() {

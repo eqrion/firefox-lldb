@@ -48,7 +48,6 @@ export interface EventInjectedCallReturn {
   tag: 'injected-call-return',
   val: Array<WasmValue>,
 }
-export type Pollable = import('./wasi-io-poll.js').Pollable;
 export interface InjectCall {
   callee: WasmFunc,
   arguments: Array<WasmValue>,
@@ -109,7 +108,6 @@ export class EventFuture {
    * This type does not have a public constructor.
    */
   private constructor();
-  subscribe(): Pollable;
   static finish(self: EventFuture, debuggee: Debuggee): Event;
 }
 

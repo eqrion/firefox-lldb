@@ -30,8 +30,16 @@ component-transpile:
         vendor/gdbstub-component/target/wasm32-wasip2/release/firefox_lldb_gdbstub_component.wasm \
         -o src/gdb/generated --name gdbstub --instantiation async
 
-# Rebuild and re-transpile the vendored component in one step
-component: component-build component-transpile
+# Rebuild and re-transpile the vendored component in one step.
+# Uses the JSPI transpile: jco's non-JSPI resource glue has a codegen bug
+# (undefined `currentSubtask`) that breaks resource round-trips.
+component: component-build component-transpile-jspi
+
+# Run the worker-architecture prototype (component on a Worker, debuggee bridged
+# to the main thread over a synchronous SharedArrayBuffer RPC). Proves async
+# resumption + reads with the main event loop free. Requires Node >=24.
+proto-worker:
+    node --experimental-wasm-jspi --import tsx src/gdb/worker/proto-host.mjs
 
 # Transpile with JSPI so the RDP-backed debuggee methods can be async.
 # The generated module must run under Node >=24 with --experimental-wasm-jspi.
