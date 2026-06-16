@@ -1,8 +1,7 @@
 // A generic GDB-remote-serial-protocol TCP server.
 //
-// This is the transport shared by both layers of the bridge: the platform
-// server and the per-tab GDB server. It owns socket I/O, packet framing, and
-// ack/no-ack bookkeeping, and delegates packet payloads to an RspHandler.
+// Owns socket I/O, packet framing, and ack/no-ack bookkeeping; delegates
+// packet payloads to an RspHandler.
 
 import net from "node:net";
 import { PacketParser, framePacket } from "./packet.js";
@@ -14,10 +13,6 @@ export interface RspHandler {
    * response (e.g. continue/step, whose reply is a later async stop packet).
    */
   handle(payload: Buffer, session: RspSession): Promise<Uint8Array | string | null>;
-  /** Handle a Ctrl-C (0x03) interrupt request. */
-  interrupt?(session: RspSession): void | Promise<void>;
-  onConnect?(session: RspSession): void;
-  onDisconnect?(session: RspSession): void;
 }
 
 export interface RspLogger {
@@ -49,10 +44,7 @@ export class RspSession {
     this.#log = log;
 
     socket.on("data", (data: Buffer) => this.#onData(data));
-    socket.on("close", () => this.#handler.onDisconnect?.(this));
     socket.on("error", (err) => this.#log.warn(`socket error: ${err.message}`));
-
-    this.#handler.onConnect?.(this);
   }
 
   get noAckMode(): boolean {
@@ -87,7 +79,6 @@ export class RspSession {
           break;
         case "interrupt":
           this.#log.debug("<< interrupt");
-          await this.#handler.interrupt?.(this);
           break;
         case "packet": {
           if (!item.valid) {

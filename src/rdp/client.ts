@@ -88,11 +88,6 @@ export class RdpClient extends EventEmitter {
     });
   }
 
-  /** Resolve the next occurrence of an event key (`<actor>:<type>`). */
-  waitForEvent(eventKey: string): Promise<RdpPacket> {
-    return new Promise((resolve) => super.once(eventKey, resolve));
-  }
-
   registerEventType(type: string): void {
     EVENT_TYPES.add(type);
   }

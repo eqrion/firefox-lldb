@@ -1,4 +1,4 @@
-// M1: the LLDB platform server.
+// The LLDB platform server.
 //
 // Models the browser as an LLDB platform: tabs are processes and qLaunchGDBServer
 // spawns a per-tab GDB server. Implements the platform packet set documented in

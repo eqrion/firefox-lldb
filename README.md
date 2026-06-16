@@ -113,7 +113,6 @@ src/cli/             firefox-lldb-server (platform server), firefox-lldb (wrappe
 test/unit/           unit tests (protocol + platform server)
 test/e2e/run.py      fixture-driven lldb API test suite
 test/e2e/fixtures/   emscripten wasm fixtures (simple/oop/parser/ledger)
-test/e2e/integration.ts  raw GDB client pipeline test (manual)
 vendor/              vendored wasmtime gdbstub-component (+ MODIFICATIONS.md)
 scripts/             patch-generated.mjs (jco patch), wasm-offsets.mjs
 ```

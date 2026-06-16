@@ -227,32 +227,6 @@ export class RdpWasmSession extends EventEmitter {
     await this.#client.request(this.#consoleActor, { type: "evaluateJSAsync", text });
   }
 
-  /**
-   * Evaluate JS and resolve with the result packet. `selectedObjectActor` is
-   * exposed to the expression as `_self` (used to read a WebAssembly.Memory).
-   * evaluateJSAsync acks with a resultID, then delivers the value in a separate
-   * `evaluationResult` event matching that id.
-   */
-  async evaluateForResult(text: string, selectedObjectActor?: string): Promise<RdpPacket> {
-    if (!this.#consoleActor) throw new Error("no console actor");
-    this.#client.registerEventType("evaluationResult");
-    const ack = await this.#client.request(this.#consoleActor, {
-      type: "evaluateJSAsync",
-      text,
-      ...(selectedObjectActor ? { selectedObjectActor } : {}),
-    });
-    const resultID = (ack as { resultID?: string }).resultID;
-    return new Promise<RdpPacket>((resolve) => {
-      const onEvent = (p: RdpPacket) => {
-        if (p.type === "evaluationResult" && (p as { resultID?: string }).resultID === resultID) {
-          this.#client.off("event", onEvent);
-          resolve(p);
-        }
-      };
-      this.#client.on("event", onEvent);
-    });
-  }
-
   /** Fetch a frame's environment form (with the parent scope chain). */
   frameEnvironment(frameActor: string): Promise<RdpPacket> {
     return this.#client.request(frameActor, { type: "getEnvironment" });

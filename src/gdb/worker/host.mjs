@@ -4,8 +4,6 @@
 // for LLDB on `port`; the main event loop stays free for async work (RDP).
 
 import { Worker } from "node:worker_threads";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import {
   encode,
   decode,
@@ -15,8 +13,6 @@ import {
   STATE_RESPONSE,
   DATA_BYTES,
 } from "./wire.mjs";
-
-const here = path.dirname(fileURLToPath(import.meta.url));
 
 /**
  * @param {object} opts

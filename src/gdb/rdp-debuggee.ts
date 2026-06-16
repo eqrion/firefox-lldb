@@ -4,11 +4,11 @@
 // The component is wasm-centric: exit-frames/parent-frame must yield WASM
 // frames, and frame_to_pc requires each frame's instance/module/pc. We map:
 //   - module      <-> a wasm source (stable id per URL); bytecode via HTTP fetch
-//   - frame        <-> a `wasmcall` RDP frame (JS frames are skipped for now)
+//   - frame        <-> a `wasmcall` RDP frame (JS frames are skipped; wasm-centric)
 //   - frame.get-pc  =  RDP frame.where.line (the wasm byte offset)
 //   - add-breakpoint = thread.setBreakpoint at {sourceUrl, line:offset, column:1}
 //   - continue/step  = thread.resume; event-future.finish awaits the next pause
-// Locals/globals/memory (instances, wasm-values) are deferred (M4).
+// Locals/globals/memory (instances, wasm-values) are exposed via the env chain.
 
 import type { RdpWasmSession, FrameForm } from "../rdp/session.js";
 
@@ -152,7 +152,7 @@ export class RdpDebuggee {
       case "Frame.getLocals":
         return this.#localsForFrame(id);
       case "Frame.getStack":
-        return []; // M5 (operand stack not exposed)
+        return []; // operand stack not exposed
       case "Frame.parentFrame":
         return this.#parentFrame(id);
 

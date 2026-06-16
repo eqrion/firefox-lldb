@@ -118,9 +118,6 @@ section is mapped at `(module_id << 32)`.
   four fixtures; breakpoint by file:line; multiple breakpoints + continue;
   struct inspection through a pointer; dynamic dispatch; StepInstruction,
   StepIn/StepOut, StepOver; locals.
-- **Integration script** (`test/e2e/integration.ts`) — manual raw GDB client that
-  exercises `qWasmLocal`/`qWasmGlobal` and has a `hold` mode for attaching an
-  external lldb to a live wasm pause. Useful for one-off protocol experiments.
 
 ## Vendoring & patches
 

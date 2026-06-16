@@ -1,14 +1,7 @@
 // Convenience wrapper: launch firefox-lldb-server, wait for it to be ready,
 // then exec lldb pre-configured to connect to it.
-//
-// Usage (dev):
-//   node --import tsx src/cli/firefox-lldb.ts [--lldb <path>] [server flags]
-//
-// Server flags passed through: --port, --rdp-port, --url, --firefox,
-//   --headless, --launch (default), --connect, --verbose / -v.
-//
-// The lldb binary is taken from $LLDB or "lldb" on PATH.
 
+import { parseArgs } from "node:util";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -16,29 +9,58 @@ import path from "node:path";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+const USAGE = `\
+Usage: firefox-lldb [--lldb <path>] [-h] [server options...]
+
+  --lldb <path>   lldb binary to use (default: $LLDB or "lldb" on PATH).
+  -h, --help      Show this message.
+
+All other flags are forwarded to firefox-lldb-server. Run:
+  firefox-lldb-server --help
+for the full server option list.
+`;
+
 interface Args {
   lldb: string;
   url?: string;
   serverArgv: string[];
 }
 
-function parseArgs(argv: string[]): Args {
-  const a: Args = {
-    lldb: process.env.LLDB ?? "lldb",
-    serverArgv: [],
-  };
-  for (let i = 0; i < argv.length; i++) {
-    const v = argv[i];
-    if (v === "--lldb") {
-      a.lldb = argv[++i];
-    } else if (v === "--url") {
-      a.url = argv[i + 1];
-      a.serverArgv.push(v, argv[++i]);
-    } else {
-      a.serverArgv.push(v);
+function parseCliArgs(argv: string[]): Args {
+  const { values, tokens } = parseArgs({
+    args: argv,
+    strict: false,
+    tokens: true,
+    options: {
+      lldb: { type: "string" },
+      url: { type: "string" },
+      help: { type: "boolean", short: "h" },
+    },
+  });
+
+  if (values.help) {
+    process.stdout.write(USAGE);
+    process.exit(0);
+  }
+
+  // Rebuild serverArgv from all tokens that are not --lldb (consumed locally).
+  const serverArgv: string[] = [];
+  for (const tok of tokens) {
+    if (tok.kind === "option" && tok.name === "lldb") continue;
+    if (tok.kind === "option-terminator") continue;
+    if (tok.kind === "option") {
+      serverArgv.push(`--${tok.name}`);
+      if (typeof tok.value === "string") serverArgv.push(tok.value);
+    } else if (tok.kind === "positional") {
+      serverArgv.push(tok.value);
     }
   }
-  return a;
+
+  return {
+    lldb: (values.lldb as string | undefined) ?? process.env.LLDB ?? "lldb",
+    url: values.url as string | undefined,
+    serverArgv,
+  };
 }
 
 function resolveServerScript(): string {
@@ -51,7 +73,7 @@ function resolveServerScript(): string {
 }
 
 async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2));
+  const args = parseCliArgs(process.argv.slice(2));
 
   const serverScript = resolveServerScript();
   const nodeArgs = serverScript.endsWith(".ts")

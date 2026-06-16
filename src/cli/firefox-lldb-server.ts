@@ -1,25 +1,6 @@
-// Unified entry point for the firefox-lldb bridge.
-//
-// Starts an LLDB platform server backed by Firefox over RDP. LLDB attaches
-// with:
-//   (lldb) platform select remote-gdb-server
-//   (lldb) platform connect connect://localhost:<port>
-//   (lldb) platform process launch -- <url>
-//
-// Modes:
-//   --launch  (default) Launch a fresh headless Firefox with a throwaway profile.
-//   --connect           Connect to an already-running Firefox.
-//
-// Flags:
-//   --port <N>          Platform server RSP port (default 1234).
-//   --rdp-port <N>      Firefox RDP port (default 6080).
-//   --url <U>           Starting URL (navigated to when LLDB spawns a process;
-//                       also loaded at startup in --launch mode for quick use).
-//   --firefox <path>    Firefox binary override.
-//   --headless          Run Firefox headlessly (default off; on for tests).
-//   --fire <js>         Evaluate JS after the first breakpoint arms (test use).
-//   --verbose / -v      Log debug output.
+// LLDB platform server backed by Firefox over RDP.
 
+import { parseArgs } from "node:util";
 import { RspServer } from "../protocol/rsp-server.js";
 import { GdbServerSpawner, type GdbServerLauncher } from "../platform/gdb-server-spawner.js";
 import { PlatformServer } from "../platform/platform-server.js";
@@ -29,6 +10,30 @@ import { launchFirefox, type FirefoxHandle } from "../rdp/firefox.js";
 // @ts-expect-error - .mjs host has no type declarations
 import { startGdbServer } from "../gdb/worker/host.mjs";
 import { consoleLogger } from "./logger.js";
+
+const USAGE = `\
+Usage: firefox-lldb-server [options]
+
+Modes (default: --launch):
+  --launch            Launch a fresh headless Firefox with a throwaway profile.
+  --connect           Connect to an already-running Firefox.
+
+Options:
+  -p, --port <N>      Platform server RSP port (default: 1234).
+  --rdp-port <N>      Firefox RDP port (default: 6080).
+  --url <U>           Starting URL (navigated to when LLDB spawns a process;
+                      also loaded at startup in --launch mode).
+  --firefox <path>    Firefox binary override.
+  --headless          Run Firefox headlessly.
+  --fire <js>         Evaluate JS after the first breakpoint arms (test use).
+  -v, --verbose       Log debug output.
+  -h, --help          Show this message.
+
+LLDB attach sequence:
+  (lldb) platform select remote-gdb-server
+  (lldb) platform connect connect://localhost:<port>
+  (lldb) platform process launch -- <url>
+`;
 
 interface Args {
   connect: boolean;
@@ -41,27 +46,56 @@ interface Args {
   verbose: boolean;
 }
 
-function parseArgs(argv: string[]): Args {
-  const a: Args = {
-    connect: false,
-    headless: false,
-    port: 1234,
-    rdpPort: 6080,
-    verbose: false,
-  };
-  for (let i = 0; i < argv.length; i++) {
-    const v = argv[i];
-    if (v === "--connect") a.connect = true;
-    else if (v === "--launch") a.connect = false;
-    else if (v === "--headless") a.headless = true;
-    else if (v === "--port" || v === "-p") a.port = Number(argv[++i]);
-    else if (v === "--rdp-port") a.rdpPort = Number(argv[++i]);
-    else if (v === "--url") a.url = argv[++i];
-    else if (v === "--firefox") a.firefox = argv[++i];
-    else if (v === "--fire") a.fire = argv[++i];
-    else if (v === "--verbose" || v === "-v") a.verbose = true;
+function parseCliArgs(argv: string[]): Args {
+  let values;
+  try {
+    ({ values } = parseArgs({
+      args: argv,
+      strict: true,
+      options: {
+        connect: { type: "boolean" },
+        launch: { type: "boolean" },
+        headless: { type: "boolean" },
+        port: { type: "string", short: "p" },
+        "rdp-port": { type: "string" },
+        url: { type: "string" },
+        firefox: { type: "string" },
+        fire: { type: "string" },
+        verbose: { type: "boolean", short: "v" },
+        help: { type: "boolean", short: "h" },
+      },
+    }));
+  } catch (e) {
+    process.stderr.write(`error: ${(e as Error).message}\ntry --help for usage.\n`);
+    process.exit(1);
   }
-  return a;
+
+  if (values.help) {
+    process.stdout.write(USAGE);
+    process.exit(0);
+  }
+
+  const port = Number(values.port ?? 1234);
+  const rdpPort = Number(values["rdp-port"] ?? 6080);
+  if (Number.isNaN(port)) {
+    process.stderr.write(`error: --port must be a number, got "${values.port}"\n`);
+    process.exit(1);
+  }
+  if (Number.isNaN(rdpPort)) {
+    process.stderr.write(`error: --rdp-port must be a number, got "${values["rdp-port"]}"\n`);
+    process.exit(1);
+  }
+
+  return {
+    connect: values.launch ? false : !!values.connect,
+    headless: !!values.headless,
+    port,
+    rdpPort,
+    url: values.url,
+    firefox: values.firefox,
+    fire: values.fire,
+    verbose: !!values.verbose,
+  };
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -89,7 +123,7 @@ async function waitForWasm(session: RdpWasmSession): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2));
+  const args = parseCliArgs(process.argv.slice(2));
   const logger = consoleLogger(args.verbose || process.env.DEBUG === "1");
   const launching = !args.connect;
 
