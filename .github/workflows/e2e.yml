@@ -7,7 +7,7 @@ on:
 
 jobs:
   e2e:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -16,17 +16,19 @@ jobs:
           cache: npm
       - run: npm ci
 
-      - name: Install LLDB 19 and Firefox
+      - name: Install LLDB and Firefox
         run: |
-          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
-            | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
-          echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-19 main" \
-            | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo install -d -m 0755 /etc/apt/keyrings
+          wget -qO- https://packages.mozilla.org/apt/repo-signing-key.gpg \
+            | sudo tee /etc/apt/keyrings/packages.mozilla.org.asc > /dev/null
+          echo "deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main" \
+            | sudo tee /etc/apt/sources.list.d/mozilla.list > /dev/null
+          printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' \
+            | sudo tee /etc/apt/preferences.d/mozilla > /dev/null
           sudo apt-get update
-          sudo apt-get install -y lldb-19 python3-lldb-19 firefox
+          sudo apt-get install -y lldb-18 python3-lldb-18 firefox
 
       - name: Run e2e tests
         env:
-          LLDB: lldb-19
-          LD_LIBRARY_PATH: /usr/lib/llvm-19/lib
+          LLDB: lldb-18
         run: npm run test:e2e
