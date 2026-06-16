@@ -28,4 +28,5 @@ jobs:
       - name: Run e2e tests
         env:
           LLDB: lldb-19
+          LD_LIBRARY_PATH: /usr/lib/llvm-19/lib
         run: npm run test:e2e
