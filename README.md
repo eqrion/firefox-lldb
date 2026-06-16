@@ -27,8 +27,8 @@ End-to-end working and validated against a **real upstream lldb** built from
 |-----------|-------|
 | **M1 — platform server** | Done. Full platform packet set; validated live against Apple `lldb-1700` (`platform connect`, process list, `platform shell`, `vFile`). 16 unit tests. |
 | **M2 — module loading + call stack** | Done. `qXfer:libraries:read`, module bytes, `qWasmCallStack`; LLDB resolves the wasm stack to source via embedded DWARF. Validated with real lldb against live Firefox. |
-| **M3 — breakpoints + continue/step** | Working. `Z0/z0` → `thread.setBreakpoint`; `vCont;c`/`s` → `thread.resume`; stop replies via the RDP `paused` event. |
-| **M4 — locals / globals / memory** | Component+protocol plumbing done and validated by the lldb test suite (locals `a=1,b=2` via `qWasmLocal` + linear-memory reads). The **RDP-backed path is still stubbed** (`RdpDebuggee` returns `[]`); next step is wiring it to the RDP environment actor + linear memory. |
+| **M3 — breakpoints + continue/step** | Done, validated end-to-end in real headless Firefox. `Z0/z0` → `thread.setBreakpoint` (LLDB's DWARF prologue-end offset is snapped to the engine's nearest valid breakpoint position); `vCont;c`/`s` → `thread.resume`; stop replies via the RDP `paused` event. Stepping required a new `ThreadPlanWasmStep` in the lldb wasm plugin — not in upstream lldb. |
+| **M4 — locals / globals / memory** | Done, validated end-to-end in real headless Firefox (`compute_factorial(n=10)` resolves `n`). Locals come from the wasm frame's RDP environment bindings (`var0..varN`); globals from the instance scope (`global0..globalN`); linear memory is read by evaluating `new Uint8Array(memory0.buffer, addr, len)` in the frame's scope. |
 | **M5 — operand stack** | Not available (`qWasmStackValue` → empty); SpiderMonkey does not expose the wasm value stack yet. |
 
 ## Architecture
@@ -122,10 +122,11 @@ section is mapped at `(module_id << 32)`.
 | wasm module bytes | **HTTP fetch of the source URL** — the source actor cannot serve wasm binary; LLDB reads DWARF from the fetched bytes |
 | Stack frames | `thread.frames` returns interleaved `wasmcall`/`call` frames |
 | wasm PC | a `wasmcall` frame's `where.line` is the byte offset (column is always 1; **not** column as the original design assumed) |
-| Breakpoints | `thread.setBreakpoint` at `{ sourceUrl, line: <offset>, column: 1 }` (use the *thread* actor, not the watcher breakpoint-list) |
+| Breakpoints | `thread.setBreakpoint` at `{ sourceUrl, line: <offset>, column: 1 }` (use the *thread* actor, not the watcher breakpoint-list). The offset is snapped to a valid position from `getBreakpointPositionsCompressed` — an invalid offset is a silent no-op in Firefox |
 | Continue / step | `thread.resume()` / `thread.resume({type:"step"})`; stop via the `paused` event |
-| Locals / globals | Environment actor (`frame.getEnvironment` bindings) — *to be implemented in `RdpDebuggee`* |
-| Linear memory | a new/dedicated RDP read — *to be implemented* |
+| Locals | `frame.getEnvironment` → the `wasm function` scope's `var0..varN` bindings (raw i32/i64/f32/f64 values), returned to LLDB in wasm-local-index order |
+| Linear memory | evaluate `new Uint8Array(memory0.buffer, addr, len)` in the wasm frame's scope (`evaluateJSAsync` with `frameActor`); `memory0` lives in the `wasm instance` scope. (`selectedObjectActor`/`_self` can't reach it — pause-pool objects aren't in the target's objectsPool.) |
+| Globals | `wasm instance` scope `global0..globalN` bindings → `instance.get-global` / `global.get` → `qWasmGlobal`. (LLDB only emits `qWasmGlobal` for a DWARF `DW_OP_WASM_location` global op, which emscripten's local frame bases don't generate — validated directly with a raw GDB client; see `just integration`.) |
 
 ## Build & run
 
@@ -150,31 +151,56 @@ than writing our own.
 - **Unit tests** (`npm test`) cover the protocol layer and the platform server.
 - **lldb API suite** — build lldb from `../llvm-project` with
   `LLDB_ENABLE_PYTHON=ON` + `LLDB_INCLUDE_TESTS=ON` (needs SWIG). `TestWasm.py`
-  (LLVM's wasm spec) passes as a baseline.
-- **End-to-end TDD** — `test/lldb/TestRdpBridge.py` is an lldb API test (modeled
-  on `TestWasm.py`) that drives a real lldb against our actual gdbstub component,
-  backed by a deterministic `FakeDebuggee` (`src/gdb/fake-debuggee.ts`,
-  `src/cli/fake-wasm-server.ts`) — no Firefox required, so it is a fast,
-  reproducible loop. Symlink it into
+  (LLVM's wasm spec) passes as a baseline. (Note: `TestWasm.py` tests the lldb
+  *client* against an in-process mock server, so it can't be pointed at our
+  server — `TestRdpBridge.py` reuses its harness but connects real lldb to our
+  real server instead.)
+- **`test/lldb/TestRdpBridge.py`** — one fixture-driven lldb API test run against
+  **two backends**:
+  - **`fake`** — a deterministic `FakeDebuggee` (canned call stack / locals /
+    memory; `src/cli/fake-wasm-server.ts`). No browser; the fast default TDD loop.
+  - **`firefox`** — the real bridge against **headless Firefox** running the
+    example wasm (`src/cli/live-wasm-server.ts` launches stable Firefox with a
+    throwaway profile, serves the page, drives the export on the first continue).
+    Opt-in via `FIREFOX_LLDB_LIVE=1`.
+
+  Fixtures: `factorial`, `oop` (virtual dispatch), `parser` (recursive descent),
+  `ledger` (struct/array state) — built from `../examples/*` (`cd ../examples &&
+  just build-fixtures`). Each asserts the wasm call stack resolves to the right
+  function + source via embedded DWARF on both backends. Fake call-stack offsets
+  are derived with `scripts/wasm-offsets.mjs` (Firefox `where.line` =
+  code-section offset + DWARF address). `test_locals_*` additionally check
+  variable resolution (locals + linear memory) on both backends.
+
+  Live-backend behaviour tests (firefox only): breakpoint by `file:line`;
+  multiple breakpoints + continue-to-next (`compute_factorial` → recursive
+  `factorial`); struct inspection through a pointer via the SB value API
+  (`ledger` `txn->amount == 30`); dynamic dispatch (virtual call → concrete
+  override with dispatch site on stack); `StepInstruction` (PC advances);
+  `StepIn`→`StepOut` round-trip across a call boundary; `StepOver` stays at
+  the same depth.
+
+  Symlink the test into
   `llvm-project/lldb/test/API/functionalities/gdb_remote_client/` and run:
   ```sh
-  build/bin/lldb-dotest -p TestRdpBridge.py <that dir>
+  just test-lldb        # fake backend only (fast)
+  just test-lldb-live   # + real headless Firefox (FIREFOX_LLDB_LIVE=1)
   ```
-  Passing: wasm call stack + DWARF symbolication, and locals (`a=1`, `b=2`).
-- **Live Firefox** — `src/gdb/rdp-integration.ts` (`just integration`) runs the
-  full pipeline against a running Firefox and the served `examples/` page.
+- **Live Firefox (manual)** — `just integration` (raw GDB client) or
+  `just live ../examples/oop "run()"` (serve one example for an external lldb).
 
 ## Repo layout
 
 ```
 src/protocol/   RSP packet framing, hex, generic TCP server
 src/platform/   M1 platform server (filesystem, process list, qLaunchGDBServer)
-src/rdp/        RDP client + RdpWasmSession
+src/rdp/        RDP client + RdpWasmSession + headless Firefox launcher
 src/gdb/        RdpDebuggee, FakeDebuggee, worker host + SAB RPC, generated/ (jco output)
-src/cli/        entry points (platform, wasm-debug, fake-wasm-server)
-test/lldb/      lldb API test + simple.wasm asset
+src/cli/        entry points (platform, wasm-debug, fake-wasm-server, live-wasm-server)
+test/lldb/      fixture-driven lldb API test + simple.wasm asset
 vendor/         the vendored wasmtime gdbstub-component (+ MODIFICATIONS.md)
-scripts/        patch-generated.mjs (post-transpile jco patch)
+scripts/        patch-generated.mjs (jco patch), wasm-offsets.mjs (fixture offsets)
+../examples/    wasm fixtures (simple/oop/parser/ledger) — emscripten + DWARF
 ```
 
 ## Vendoring & patches
@@ -188,8 +214,22 @@ patch (a jco 1.24 `currentSubtask` codegen bug) is reapplied idempotently by
 
 - No multithreading initially (gdbstub-component is single-thread).
 - Operand stack (`qWasmStackValue`) unavailable until SpiderMonkey exposes it.
-- `RdpDebuggee` locals/globals/memory are stubbed (component side validated via
-  the TDD harness; RDP wiring is the next step).
+- Local/global type inference is heuristic: RDP reports the value as a plain JS
+  value without its wasm type, so integer numbers are treated as i32 (what lldb
+  needs for the frame-base pointer), non-integers as f64, bigints as i64.
+- Stepping works via the **SB API** (`thread.StepInstruction`, `StepOver`,
+  `StepOut`) but CLI `thread step-in/over/out` does not reach our override
+  (the CLI command path in `CommandObjectThread::DoExecute` appears to not
+  dispatch to `QueueThreadPlanForStep*` in batch mode — a secondary bug, not
+  yet diagnosed). GUI debuggers and DAP adapters use the SB API and work.
+  Note: wasmtime's own stepping support uses a completely different approach —
+  it debugs the **wasmtime host process** as a native target (`lldb -- wasmtime
+  run`), not `process connect --plugin wasm`. The wasm RSP extensions and
+  `ProcessWasm` plugin were never wired for stepping before our fix.
+- Expression evaluation (`expr` / `p`) is unavailable: it JIT-compiles for the
+  target, which wasm has no support for. Inspect variables via the SB value API
+  (`frame.FindVariable`, `GetChildMemberWithName`, `Dereference`) instead, which
+  reads DWARF + linear memory directly.
 - Interleaved JS/wasm stacks currently surface only wasm frames (the upstream
   component is wasm-centric; a synthetic `[host]` sentinel for JS gaps is a
   possible enhancement).
