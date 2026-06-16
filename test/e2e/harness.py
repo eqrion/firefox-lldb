@@ -351,7 +351,7 @@ class TestBase(unittest.TestCase):
 
     def _check_call_stack(self, fx):
         target, process = self._stopped_at_breakpoint(fx)
-        self.assertEqual(target.GetNumModules(), 1)
+        self.assertGreaterEqual(target.GetNumModules(), 1)
         thread = process.GetThreadAtIndex(0)
         self.assertTrue(thread.IsValid())
         frame0 = thread.GetFrameAtIndex(0)

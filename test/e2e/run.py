@@ -453,6 +453,97 @@ class TestLiveFirefox(TestBase):
         self.assertEqual(frame0.GetLineEntry().GetFileSpec().GetFilename(), "oop.cpp")
 
 
+# ---- source listing ----------------------------------------------------
+
+
+class TestSourceListing(TestBase):
+    def _source_lines(self, target, file_spec, line, context=2):
+        """Return source text around `line` via LLDB's source manager, or '' if not found."""
+        stream = lldb.SBStream()
+        count = target.GetSourceManager().DisplaySourceLinesWithLineNumbers(
+            file_spec, line, context, context, "->", stream
+        )
+        return stream.GetData() if count > 0 else ""
+
+    def test_wasm_source_listing(self):
+        """Source listing on the innermost wasm frame shows C++ source lines."""
+        fx = next(f for f in FIXTURES if f["name"] == "factorial")
+        target, process = self._stopped_at_breakpoint(fx)
+        frame0 = process.GetThreadAtIndex(0).GetFrameAtIndex(0)
+        self.assertIn("compute_factorial", frame0.GetFunctionName() or "")
+        entry = frame0.GetLineEntry()
+        self.assertTrue(entry.IsValid(), "wasm frame has a valid line entry")
+        filename = entry.GetFileSpec().GetFilename()
+        self.assertEqual(filename, "math.cpp")
+        line = entry.GetLine()
+        self.assertGreater(line, 0, "line number is positive")
+        # The DWARF-embedded absolute path reflects the build machine; remap to
+        # the checked-in fixture file which is always present in the repo.
+        local_spec = lldb.SBFileSpec(str(REPO / fx["page_dir"] / filename))
+        content = self._source_lines(target, local_spec, line)
+        self.assertIn("compute_factorial", content,
+                      f"expected compute_factorial in source listing:\n{content}")
+
+    def test_js_source_listing(self):
+        """Source listing on a JS frame shows JavaScript source lines from the temp file."""
+        fx = next(f for f in FIXTURES if f["name"] == "factorial")
+        platform_port = self._start_platform(fx)
+        target, process = self._connect_via_platform(platform_port)
+        target.BreakpointCreateByName("compute_factorial")
+        process.Continue()
+        self.assertEqual(process.GetState(), lldb.eStateStopped)
+        thread = process.GetThreadAtIndex(0)
+        js_frame = None
+        for i in range(thread.GetNumFrames()):
+            f = thread.GetFrameAtIndex(i)
+            if f.GetLineEntry().GetFileSpec().GetFilename().endswith(".js"):
+                js_frame = f
+                break
+        self.assertIsNotNone(js_frame, "no JS frame with a .js source file found in call stack")
+        entry = js_frame.GetLineEntry()
+        self.assertTrue(entry.IsValid(), "JS frame has a valid line entry")
+        line = entry.GetLine()
+        self.assertGreater(line, 0, "JS frame line number is positive")
+        content = self._source_lines(target, entry.GetFileSpec(), line)
+        self.assertGreater(len(content), 0, "source listing for JS frame should be non-empty")
+        js_keywords = ("function", "var ", "const ", "let ", "return", "Module", "=>")
+        self.assertTrue(
+            any(kw in content for kw in js_keywords),
+            f"JS source listing does not look like JavaScript:\n{content!r}",
+        )
+
+    def test_js_source_line_number_is_accurate(self):
+        """The JS frame's line number falls within the source file's line count."""
+        fx = next(f for f in FIXTURES if f["name"] == "factorial")
+        platform_port = self._start_platform(fx)
+        target, process = self._connect_via_platform(platform_port)
+        target.BreakpointCreateByName("compute_factorial")
+        process.Continue()
+        self.assertEqual(process.GetState(), lldb.eStateStopped)
+        thread = process.GetThreadAtIndex(0)
+        for i in range(thread.GetNumFrames()):
+            f = thread.GetFrameAtIndex(i)
+            entry = f.GetLineEntry()
+            if not entry.GetFileSpec().GetFilename().endswith(".js"):
+                continue
+            line = entry.GetLine()
+            self.assertGreater(line, 0, "JS frame line > 0")
+            # Read the materialized temp file directly to count lines.
+            import os
+            path = os.path.join(
+                entry.GetFileSpec().GetDirectory(),
+                entry.GetFileSpec().GetFilename(),
+            )
+            if os.path.exists(path):
+                with open(path) as fh:
+                    total_lines = sum(1 for _ in fh)
+                self.assertLessEqual(
+                    line, total_lines,
+                    f"frame line {line} exceeds file length {total_lines} in {path}",
+                )
+            break
+
+
 # ---- edge cases --------------------------------------------------------
 
 
@@ -486,13 +577,8 @@ class TestEdgeCases(TestBase):
         if wp is not None and wp.IsValid():
             pass  # unexpected success: watchpoints actually work
 
-    @unittest.expectedFailure
     def test_interleaved_js_wasm_frames(self):
-        """JS frames between wasm frames should be visible in the call stack.
-
-        Currently marked xfail: RdpDebuggee filters to wasm-only frames,
-        so the JS glue frames above wasm are not surfaced to LLDB.
-        """
+        """JS frames between wasm frames should be visible in the call stack."""
         fx = next(f for f in FIXTURES if f["name"] == "factorial")
         platform_port = self._start_platform(fx)
         target, process = self._connect_via_platform(platform_port)
@@ -500,15 +586,19 @@ class TestEdgeCases(TestBase):
         process.Continue()
         self.assertEqual(process.GetState(), lldb.eStateStopped)
         thread = process.GetThreadAtIndex(0)
-        # With full interleaved stacks we'd expect JS frames above the wasm.
-        # Check that there are more frames than just the wasm ones.
         all_names = [
             thread.GetFrameAtIndex(i).GetFunctionName() or ""
             for i in range(thread.GetNumFrames())
         ]
         has_js = any("js" in n.lower() or "::" not in n and "." in n
                      for n in all_names)
-        self.assertTrue(has_js, "expected JS frames in the mixed call stack")
+        self.assertTrue(has_js, f"expected JS frames in the mixed call stack; got: {all_names}")
+        # At least one frame should have a .js file in its line entry.
+        has_js_file = any(
+            thread.GetFrameAtIndex(i).GetLineEntry().GetFileSpec().GetFilename().endswith(".js")
+            for i in range(thread.GetNumFrames())
+        )
+        self.assertTrue(has_js_file, "expected at least one frame with a .js source file")
 
 
 # ---- wasm trap (runs last to avoid LLDB state contamination) -----------

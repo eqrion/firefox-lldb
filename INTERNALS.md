@@ -100,9 +100,12 @@ section is mapped at `(module_id << 32)`.
 | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | wasm module list  | `thread.sources` (filter `introductionType === "wasm"`)                                                                                                                                                                                                          |
 | wasm module bytes | HTTP fetch of the source URL — the source actor cannot serve wasm binary; lldb reads DWARF from the fetched bytes                                                                                                                                                |
-| Stack frames      | `thread.frames` returns interleaved `wasmcall`/`call` frames                                                                                                                                                                                                     |
+| Stack frames      | `thread.frames` returns interleaved `wasmcall`/`call` frames; both are surfaced to LLDB                                                                                                                                                                          |
 | wasm PC           | a `wasmcall` frame's `where.line` is the byte offset (column is always 1; not column as the original design assumed)                                                                                                                                             |
-| Breakpoints       | `thread.setBreakpoint` at `{ sourceUrl, line: <offset>, column: 1 }` (use the thread actor, not the watcher breakpoint-list). The offset is snapped to a valid position from `getBreakpointPositionsCompressed` — an invalid offset is a silent no-op in Firefox |
+| JS PC             | a `call` frame's `where.line` is the source line (1-based). Reported as `where.line + codeOffset` so LLDB's code-section subtraction recovers the DWARF address = source line.                                                                                   |
+| JS sources        | each JS source is a synthetic wasm module (`src/gdb/synthetic-module.ts`) with DWARF v4 mapping address L → line L. Source text is fetched via the source actor `source` request and written to a temp file for `source list`.                                    |
+| Breakpoints (wasm)| `thread.setBreakpoint` at `{ sourceUrl, line: <offset>, column: 1 }` — offset snapped to a valid position from `getBreakpointPositionsCompressed`; an invalid offset is a silent no-op in Firefox                                                                |
+| Breakpoints (JS)  | same packet, no snapping; line = source line number (pc - codeOffset)                                                                                                                                                                                            |
 | Continue / step   | `thread.resume()` / `thread.resume({type:"step"})`; stop via the `paused` event                                                                                                                                                                                  |
 | Locals            | `frame.getEnvironment` → the `wasm function` scope's `var0..varN` bindings (raw i32/i64/f32/f64 values), returned to lldb in wasm-local-index order                                                                                                              |
 | Linear memory     | evaluate `new Uint8Array(memory0.buffer, addr, len)` in the wasm frame's scope (`evaluateJSAsync` with `frameActor`); `memory0` lives in the `wasm instance` scope                                                                                               |
@@ -141,6 +144,6 @@ committed source (never auto-clobbered). A single jco-generated patch (a jco
 - **Local/global type inference** is heuristic — RDP reports values as plain JS
   numbers without wasm types. Integer numbers are treated as i32, non-integers as
   f64, bigints as i64.
-- **Interleaved JS/wasm stacks** — only wasm frames surface; the component is
-  wasm-centric. A synthetic `[host]` sentinel for JS gaps is a possible
-  enhancement.
+- **JS locals/variable inspection** — JS frame locals are not yet exposed (returns empty). JS values don't map cleanly to wasm types; deferred to a future phase.
+- **Per-function JS names** — each JS source is one synthetic module with a file-level subprogram; `GetFunctionName()` returns the filename. Real per-function names (from the per-frame `displayName` RDP already provides) would need multi-subprogram modules with content-versioned unique ids.
+- **Stepping across the JS/wasm boundary** — not yet supported.
