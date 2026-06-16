@@ -4,12 +4,17 @@
   "description": "LLDB platform server and GDB remote stub for debugging WebAssembly running inside Firefox",
   "type": "module",
   "license": "MPL-2.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "files": ["dist"],
   "bin": {
     "firefox-lldb": "./dist/cli/firefox-lldb.js",
     "firefox-lldb-server": "./dist/cli/firefox-lldb-server.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
+    "prepublishOnly": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
@@ -27,9 +32,11 @@
     "build:fixture-ledger": "cd test/e2e/fixtures/ledger && ${EMSDK:+$EMSDK/upstream/emscripten/}emcc ledger.cpp -o ledger.js -g -O0 -s EXPORTED_RUNTIME_METHODS='[\"cwrap\"]' -s MODULARIZE=1 -s EXPORT_NAME=LedgerModule",
     "test:e2e": "LLDB=${LLDB:-$LLVM/build/bin/lldb} python3 test/e2e/run.py"
   },
+  "dependencies": {
+    "@bytecodealliance/preview2-shim": "^0.18.1"
+  },
   "devDependencies": {
     "@bytecodealliance/jco": "^1.24.0",
-    "@bytecodealliance/preview2-shim": "^0.18.1",
     "@types/node": "^22.10.0",
     "prettier": "^3.0.0",
     "tsx": "^4.19.0",
