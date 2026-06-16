@@ -112,13 +112,13 @@ section is mapped at `(module_id << 32)`.
 
 - **Unit tests** (`npm test`) — protocol layer and platform server. Run without
   Firefox or a wasm-plugin lldb.
-- **e2e suite** (`just test-lldb`) — fixture-driven tests via the real bridge
+- **e2e suite** (`npm run test:e2e`) — fixture-driven tests via the real bridge
   against headless Firefox. Needs a wasm-plugin lldb build and emsdk-built
-  fixtures (`just build-fixtures`). Tests: call-stack symbolication across all
+  fixtures (`npm run build:fixtures`). Tests: call-stack symbolication across all
   four fixtures; breakpoint by file:line; multiple breakpoints + continue;
   struct inspection through a pointer; dynamic dispatch; StepInstruction,
   StepIn/StepOut, StepOver; locals.
-- **Integration script** (`just integration`) — manual raw GDB client that
+- **Integration script** (`test/e2e/integration.ts`) — manual raw GDB client that
   exercises `qWasmLocal`/`qWasmGlobal` and has a `hold` mode for attaching an
   external lldb to a live wasm pause. Useful for one-off protocol experiments.
 
@@ -127,7 +127,7 @@ section is mapped at `(module_id << 32)`.
 See `vendor/gdbstub-component/MODIFICATIONS.md`. The vendored Rust edits are
 committed source (never auto-clobbered). A single jco-generated patch (a jco
 1.24 `currentSubtask` codegen bug) is reapplied idempotently by
-`scripts/patch-generated.mjs`, wired into `just component-transpile`.
+`scripts/patch-generated.mjs`, wired into `npm run component:transpile`.
 
 ## Known limitations
 

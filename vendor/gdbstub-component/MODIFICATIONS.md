@@ -6,8 +6,7 @@ from a clean upstream + jco pipeline, and how it is kept from being clobbered.
 
 ## 1. Vendored Rust source edits (committed; never auto-clobbered)
 
-These live in `src/` and `Cargo.toml` and are under version control. `just
-component` only *builds + transpiles* them — it never re-downloads, so they are
+These live in `src/` and `Cargo.toml` and are under version control. `npm run component` only *builds + transpiles* them — it never re-downloads, so they are
 safe. They would only need re-applying on a deliberate re-vendor from upstream
 wasmtime, which is a manual, rare action. Each edit is commented in place.
 
@@ -35,12 +34,12 @@ edit. There is exactly one needed patch (a jco 1.24 codegen bug: a bare
 - **idempotent** (skips if already applied),
 - **guarded** (errors loudly if jco's output format changes — the anchor it
   inserts after is gone), and
-- **wired into `just component-transpile`**, so every regeneration reapplies it.
+- **wired into `npm run component:transpile`**, so every regeneration reapplies it.
 
 The patched output is also committed, so a fresh checkout runs without rust/jco.
 
 `@bytecodealliance/jco` is pinned via `package-lock.json`; bumping it may move or
-fix the bug — re-run `just component` and the guard will tell you if the anchor
+fix the bug — re-run `npm run component` and the guard will tell you if the anchor
 changed.
 
 ## 3. Not patches (our own committed source)
@@ -51,7 +50,7 @@ generated or vendored-from-upstream — normal version control.
 
 ## Build
 
-`just component` = `cargo build --release --target wasm32-wasip2` then
+`npm run component` = `cargo build --release --target wasm32-wasip2` then
 `jco transpile ... --instantiation async` then `node scripts/patch-generated.mjs`.
 Needs `rustup target add wasm32-wasip2`. The transpile is SYNC mode (no
 `--async-mode jspi`): the component runs on a worker and blocks synchronously on

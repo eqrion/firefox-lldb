@@ -14,7 +14,18 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "check": "npm run typecheck && npm run format:check",
-    "test": "node --import tsx --test 'test/unit/**/*.test.ts'"
+    "test": "node --import tsx --test 'test/unit/**/*.test.ts'",
+    "launch": "node --import tsx src/cli/firefox-lldb-server.ts --launch --port ${PORT:-1234} --rdp-port ${RDP_PORT:-6080} ${URL:+--url $URL}",
+    "connect": "node --import tsx src/cli/firefox-lldb-server.ts --connect --port ${PORT:-1234} --rdp-port ${RDP_PORT:-6080} ${URL:+--url $URL}",
+    "component:build": "cd vendor/gdbstub-component && cargo build --release --target wasm32-wasip2",
+    "component:transpile": "npx jco transpile vendor/gdbstub-component/target/wasm32-wasip2/release/firefox_lldb_gdbstub_component.wasm -o src/gdb/generated --name gdbstub --instantiation async && node scripts/patch-generated.mjs",
+    "component": "npm run component:build && npm run component:transpile",
+    "build:fixtures": "npm run build:fixture-simple && npm run build:fixture-oop && npm run build:fixture-parser && npm run build:fixture-ledger",
+    "build:fixture-simple": "cd test/e2e/fixtures/simple && ${EMSDK:+$EMSDK/upstream/emscripten/}emcc math.cpp -o math.js -g -O0 -s EXPORTED_RUNTIME_METHODS='[\"cwrap\"]' -s MODULARIZE=1 -s EXPORT_NAME=MathModule",
+    "build:fixture-oop": "cd test/e2e/fixtures/oop && ${EMSDK:+$EMSDK/upstream/emscripten/}emcc oop.cpp -o oop.js -g -O0 -s EXPORTED_RUNTIME_METHODS='[\"cwrap\"]' -s MODULARIZE=1 -s EXPORT_NAME=OopModule",
+    "build:fixture-parser": "cd test/e2e/fixtures/parser && ${EMSDK:+$EMSDK/upstream/emscripten/}emcc parser.cpp -o parser.js -g -O0 -s EXPORTED_RUNTIME_METHODS='[\"cwrap\"]' -s MODULARIZE=1 -s EXPORT_NAME=ParserModule",
+    "build:fixture-ledger": "cd test/e2e/fixtures/ledger && ${EMSDK:+$EMSDK/upstream/emscripten/}emcc ledger.cpp -o ledger.js -g -O0 -s EXPORTED_RUNTIME_METHODS='[\"cwrap\"]' -s MODULARIZE=1 -s EXPORT_NAME=LedgerModule",
+    "test:e2e": "LLDB=${LLDB:-$LLVM/build/bin/lldb} python3 test/e2e/run.py"
   },
   "devDependencies": {
     "@bytecodealliance/jco": "^1.24.0",

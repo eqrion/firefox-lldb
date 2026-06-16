@@ -36,7 +36,6 @@ LLDB=/path/to/wasm-lldb node --import tsx src/cli/firefox-lldb.ts \
 From the lldb prompt:
 
 ```
-(lldb) platform process launch -- http://localhost:8080/index.html
 (lldb) breakpoint set -n compute_factorial
 (lldb) continue
 ```
@@ -47,7 +46,7 @@ Start the platform server separately, then connect lldb by hand:
 
 ```sh
 # Terminal 1 — launch Firefox + platform server
-just launch URL=http://localhost:8080/index.html
+URL=http://localhost:8080/index.html npm run launch
 
 # Terminal 2 — connect lldb
 lldb
@@ -59,7 +58,7 @@ lldb
 Connect to an already-running Firefox instead of launching a new one:
 
 ```sh
-just connect RDP_PORT=6080
+npm run connect
 ```
 
 ### Flags
@@ -93,11 +92,11 @@ just connect RDP_PORT=6080
 ## Development
 
 ```sh
-just install          # npm install
-npm test              # unit tests
-just test-lldb        # e2e suite (needs wasm-plugin lldb + Firefox)
-just build-fixtures   # rebuild emscripten test fixtures (needs emsdk)
-just component        # rebuild the vendored gdbstub-component (needs Rust + jco)
+npm install                          # install dependencies
+npm test                             # unit tests
+LLVM=/path/to/llvm npm run test:e2e  # e2e suite (needs wasm-plugin lldb + Firefox)
+npm run build:fixtures               # rebuild emscripten test fixtures (needs emsdk)
+npm run component                    # rebuild the vendored gdbstub-component (needs Rust + jco)
 ```
 
 See [INTERNALS.md](INTERNALS.md) for architecture, protocol details, and
