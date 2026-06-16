@@ -49,6 +49,25 @@ proto-worker:
 bridge PORT="8123" RDP_PORT="6080":
     node --import tsx src/cli/wasm-debug.ts --port {{PORT}} --rdp-port {{RDP_PORT}}
 
+# Run a self-contained live bridge for one example dir (launches headless
+# Firefox, serves the page, serves the gdbstub component for lldb on PORT).
+#   just live ../examples/oop "run()"
+live PAGE_DIR FIRE="run()" PORT="8123" RDP_PORT="6080":
+    node --import tsx src/cli/live-wasm-server.ts \
+        --page-dir {{PAGE_DIR}} --fire "{{FIRE}}" --port {{PORT}} --rdp-port {{RDP_PORT}}
+
+# Run the lldb API bridge suite against the deterministic Fake backend (fast,
+# no browser). LLVM defaults to the sibling llvm-project checkout.
+test-lldb LLVM="../llvm-project":
+    {{LLVM}}/build/bin/lldb-dotest -p TestRdpBridge.py \
+        {{LLVM}}/lldb/test/API/functionalities/gdb_remote_client/
+
+# Same suite, additionally against real headless Firefox (needs the example
+# fixtures built: cd ../examples && just build-fixtures).
+test-lldb-live LLVM="../llvm-project":
+    FIREFOX_LLDB_LIVE=1 {{LLVM}}/build/bin/lldb-dotest -p TestRdpBridge.py \
+        {{LLVM}}/lldb/test/API/functionalities/gdb_remote_client/
+
 # Full-pipeline integration test: live Firefox (RDP) -> RdpDebuggee -> gdbstub
 # component -> raw GDB client. Needs a Firefox on RDP_PORT and the simple wasm
 # page served (see examples/).
