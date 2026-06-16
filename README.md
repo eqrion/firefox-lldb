@@ -116,3 +116,17 @@ test/e2e/fixtures/   emscripten wasm fixtures (simple/oop/parser/ledger)
 vendor/              vendored wasmtime gdbstub-component (+ MODIFICATIONS.md)
 scripts/             patch-generated.mjs (jco patch), wasm-offsets.mjs
 ```
+
+## Licensing
+
+This project is licensed under the Mozilla Public License, v. 2.0 (see
+[LICENSE](LICENSE)).
+
+`vendor/gdbstub-component/` is vendored from
+[wasmtime](https://github.com/bytecodealliance/wasmtime) and remains under its
+original Apache License 2.0 with LLVM-exception (see
+[vendor/gdbstub-component/LICENSE](vendor/gdbstub-component/LICENSE)). Local
+changes are documented in
+[vendor/gdbstub-component/MODIFICATIONS.md](vendor/gdbstub-component/MODIFICATIONS.md).
+The transpiled output under `src/gdb/generated/` is jco-generated from that
+component and derives from the same Apache-2.0 source.

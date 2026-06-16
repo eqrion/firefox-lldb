@@ -1,3 +1,7 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
 // Launch a headless Firefox with an isolated, throwaway profile and the RDP
 // debugger server enabled. Used by the live test bridge so an lldb test can
 // debug real wasm in a real browser without touching the user's Firefox.

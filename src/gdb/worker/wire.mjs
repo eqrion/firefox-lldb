@@ -1,3 +1,7 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
 // Wire codec for the synchronous worker<->main RPC that bridges the component's
 // (synchronous) `debuggee` interface to the async RDP client on the main thread.
 //

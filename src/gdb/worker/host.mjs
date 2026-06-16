@@ -1,3 +1,7 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
 // Reusable GDB-server host: spawns the gdbstub component on a worker thread and
 // services its synchronous debuggee RPCs from an async `dispatch` function on
 // the main thread (over the SharedArrayBuffer channel). The component listens
