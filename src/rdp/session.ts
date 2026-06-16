@@ -79,7 +79,8 @@ export class RdpWasmSession extends EventEmitter {
     this.#watcher = watcher as string;
 
     const cfg = await this.#client.request(this.#watcher, { type: "getThreadConfigurationActor" });
-    const configActor = ((cfg.configuration as { actor?: string })?.actor ?? cfg.configuration) as string;
+    const configActor = ((cfg.configuration as { actor?: string })?.actor ??
+      cfg.configuration) as string;
     await this.#client.request(configActor, {
       type: "updateConfiguration",
       configuration: { observeWasm: true, observeAsmJS: true, pauseOnExceptions: false },
@@ -87,13 +88,21 @@ export class RdpWasmSession extends EventEmitter {
 
     this.#client.on("event", (p) => this.#onEvent(p));
     await this.#client.request(this.#watcher, { type: "watchTargets", targetType: "frame" });
-    await this.#client.request(this.#watcher, { type: "watchResources", resourceTypes: ["source"] });
+    await this.#client.request(this.#watcher, {
+      type: "watchResources",
+      resourceTypes: ["source"],
+    });
   }
 
   #onEvent(p: RdpPacket): void {
     switch (p.type) {
       case "target-available-form": {
-        const target = p.target as { url?: string; threadActor?: string; consoleActor?: string; isTopLevelTarget?: boolean };
+        const target = p.target as {
+          url?: string;
+          threadActor?: string;
+          consoleActor?: string;
+          isTopLevelTarget?: boolean;
+        };
         if (target?.isTopLevelTarget) {
           this.#threadActor = target.threadActor ?? null;
           this.#consoleActor = target.consoleActor ?? null;
@@ -197,7 +206,9 @@ export class RdpWasmSession extends EventEmitter {
       type: "getBreakpointPositionsCompressed",
       query: { start: { line: 0 }, end: { line: 1e7 } },
     });
-    return Object.keys((positions ?? {}) as Record<string, number[]>).map(Number).sort((a, b) => a - b);
+    return Object.keys((positions ?? {}) as Record<string, number[]>)
+      .map(Number)
+      .sort((a, b) => a - b);
   }
 
   resume(): Promise<RdpPacket> {

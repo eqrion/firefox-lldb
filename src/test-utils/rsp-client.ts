@@ -23,9 +23,7 @@ export class RspClient {
 
   static connect(port: number, host = "127.0.0.1"): Promise<RspClient> {
     return new Promise((resolve, reject) => {
-      const socket = net.createConnection({ port, host }, () =>
-        resolve(new RspClient(socket))
-      );
+      const socket = net.createConnection({ port, host }, () => resolve(new RspClient(socket)));
       socket.once("error", reject);
     });
   }

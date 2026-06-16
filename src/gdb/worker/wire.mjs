@@ -45,12 +45,17 @@ export function encode(value) {
   const out = new Uint8Array(total);
   const dv = new DataView(out.buffer);
   let o = 0;
-  dv.setUint32(o, json.length, true); o += 4;
-  out.set(json, o); o += json.length;
-  dv.setUint32(o, blobs.length, true); o += 4;
+  dv.setUint32(o, json.length, true);
+  o += 4;
+  out.set(json, o);
+  o += json.length;
+  dv.setUint32(o, blobs.length, true);
+  o += 4;
   for (const b of blobs) {
-    dv.setUint32(o, b.length, true); o += 4;
-    out.set(b, o); o += b.length;
+    dv.setUint32(o, b.length, true);
+    o += 4;
+    out.set(b, o);
+    o += b.length;
   }
   return out;
 }
@@ -59,14 +64,19 @@ export function encode(value) {
 export function decode(bytes) {
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let o = 0;
-  const jsonLen = dv.getUint32(o, true); o += 4;
-  const json = JSON.parse(td.decode(bytes.subarray(o, o + jsonLen))); o += jsonLen;
-  const nBlobs = dv.getUint32(o, true); o += 4;
+  const jsonLen = dv.getUint32(o, true);
+  o += 4;
+  const json = JSON.parse(td.decode(bytes.subarray(o, o + jsonLen)));
+  o += jsonLen;
+  const nBlobs = dv.getUint32(o, true);
+  o += 4;
   const blobs = [];
   for (let i = 0; i < nBlobs; i++) {
-    const len = dv.getUint32(o, true); o += 4;
+    const len = dv.getUint32(o, true);
+    o += 4;
     // Copy out of the SAB-backed view into a plain Uint8Array.
-    blobs.push(bytes.slice(o, o + len)); o += len;
+    blobs.push(bytes.slice(o, o + len));
+    o += len;
   }
   return revive(json, blobs);
 }

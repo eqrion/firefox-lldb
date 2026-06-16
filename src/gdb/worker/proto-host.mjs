@@ -9,7 +9,13 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  encode, decode, CTRL_STATE, CTRL_LEN, CTRL_WORDS, STATE_RESPONSE, DATA_BYTES,
+  encode,
+  decode,
+  CTRL_STATE,
+  CTRL_LEN,
+  CTRL_WORDS,
+  STATE_RESPONSE,
+  DATA_BYTES,
 } from "./wire.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -22,7 +28,9 @@ const ctrl = new Int32Array(sab, 0, CTRL_WORDS);
 const data = new Uint8Array(sab, 16);
 
 // --- Fake async debuggee (stands in for the RDP client) -------------------
-const wasmBytes = new Uint8Array(await readFile(path.join(here, "../../../../examples/simple/math.wasm")));
+const wasmBytes = new Uint8Array(
+  await readFile(path.join(here, "../../../../examples/simple/math.wasm"))
+);
 const i32 = (v) => {
   const b = new Uint8Array(4);
   new DataView(b.buffer).setUint32(0, v >>> 0, true);
@@ -49,27 +57,48 @@ async function dispatch(req) {
   const key = `${req.type}.${req.method}`;
   await delay(5); // simulate RDP latency on every call
   switch (key) {
-    case "Debuggee.allModules": return [MODULE];
-    case "Debuggee.allInstances": return [];
-    case "Debuggee.exitFrames": return [FRAME];
+    case "Debuggee.allModules":
+      return [MODULE];
+    case "Debuggee.allInstances":
+      return [];
+    case "Debuggee.exitFrames":
+      return [FRAME];
     case "Debuggee.continue":
-    case "Debuggee.singleStep": return EVENT_FUTURE;
-    case "Debuggee.interrupt": return null;
-    case "Module.uniqueId": return 1n;
-    case "Module.bytecode": return wasmBytes;
+    case "Debuggee.singleStep":
+      return EVENT_FUTURE;
+    case "Debuggee.interrupt":
+      return null;
+    case "Module.uniqueId":
+      return 1n;
+    case "Module.bytecode":
+      return wasmBytes;
     case "Module.addBreakpoint":
-    case "Module.removeBreakpoint": return null;
-    case "Instance.getModule": return MODULE;
-    case "Instance.uniqueId": return 1n;
-    case "Frame.getInstance": return INSTANCE;
-    case "Frame.getFuncIndex": return 0;
-    case "Frame.getPc": return 0x10;
-    case "Frame.getLocals": return [wasmVal({ tag: "wasm-i32" }, i32(0xdeadbeef))];
-    case "Frame.getStack": return [];
-    case "Frame.parentFrame": return null;
-    case "WasmValue.getType": return values.get(req.id).wtype;
-    case "WasmValue.unwrapI32": return new DataView(values.get(req.id).bytes.buffer).getUint32(0, true);
-    case "WasmValue.clone": { const v = values.get(req.id); return wasmVal(v.wtype, v.bytes); }
+    case "Module.removeBreakpoint":
+      return null;
+    case "Instance.getModule":
+      return MODULE;
+    case "Instance.uniqueId":
+      return 1n;
+    case "Frame.getInstance":
+      return INSTANCE;
+    case "Frame.getFuncIndex":
+      return 0;
+    case "Frame.getPc":
+      return 0x10;
+    case "Frame.getLocals":
+      return [wasmVal({ tag: "wasm-i32" }, i32(0xdeadbeef))];
+    case "Frame.getStack":
+      return [];
+    case "Frame.parentFrame":
+      return null;
+    case "WasmValue.getType":
+      return values.get(req.id).wtype;
+    case "WasmValue.unwrapI32":
+      return new DataView(values.get(req.id).bytes.buffer).getUint32(0, true);
+    case "WasmValue.clone": {
+      const v = values.get(req.id);
+      return wasmVal(v.wtype, v.bytes);
+    }
     case "EventFuture.finish":
       // Block (asynchronously) until the next "paused" event, then report it.
       console.log(`[host] finish() awaiting paused event (resume #${++resumes})...`);
@@ -117,7 +146,11 @@ worker.on("error", (e) => console.error("[worker error]", e));
 let beats = 0;
 const hb = setInterval(() => console.log(`[heartbeat ${++beats}] main loop alive`), 60);
 
-function cksum(s) { let n = 0; for (const c of s) n = (n + c.charCodeAt(0)) & 0xff; return n.toString(16).padStart(2, "0"); }
+function cksum(s) {
+  let n = 0;
+  for (const c of s) n = (n + c.charCodeAt(0)) & 0xff;
+  return n.toString(16).padStart(2, "0");
+}
 const pkt = (d) => `$${d}#${cksum(d)}`;
 
 async function driveClient() {
@@ -127,8 +160,14 @@ async function driveClient() {
   const responses = [];
   const script = ["QStartNoAckMode", "qSupported:xmlRegisters=i386", "?", "c", "qWasmLocal:0;0"];
   let i = 0;
-  const send = () => { sock.write("+"); sock.write(pkt(script[i])); };
-  sock.on("connect", () => { sock.write("+"); send(); });
+  const send = () => {
+    sock.write("+");
+    sock.write(pkt(script[i]));
+  };
+  sock.on("connect", () => {
+    sock.write("+");
+    send();
+  });
   sock.on("data", (d) => {
     buf += d.toString("latin1");
     let h;
@@ -155,4 +194,9 @@ async function driveClient() {
   sock.on("error", (e) => console.error("[main] sock error", e.message));
 }
 
-setTimeout(() => { console.error("timeout"); clearInterval(hb); worker.terminate(); process.exit(1); }, 15000);
+setTimeout(() => {
+  console.error("timeout");
+  clearInterval(hb);
+  worker.terminate();
+  process.exit(1);
+}, 15000);

@@ -1,0 +1,5 @@
+dist/
+src/gdb/generated/
+node_modules/
+vendor/
+*.wasm

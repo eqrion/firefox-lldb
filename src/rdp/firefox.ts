@@ -34,14 +34,17 @@ export async function launchFirefox(opts: {
   const profileDir = await mkdtemp(join(tmpdir(), "ff-rdp-"));
 
   const prefs =
-    PROFILE_PREFS.map(([k, v]) => `user_pref(${JSON.stringify(k)}, ${JSON.stringify(v)});`).join("\n") +
-    `\nuser_pref("devtools.debugger.remote-port", ${opts.rdpPort});\n`;
+    PROFILE_PREFS.map(([k, v]) => `user_pref(${JSON.stringify(k)}, ${JSON.stringify(v)});`).join(
+      "\n"
+    ) + `\nuser_pref("devtools.debugger.remote-port", ${opts.rdpPort});\n`;
   await writeFile(join(profileDir, "user.js"), prefs);
 
   const args = [
     "--no-remote",
-    "--profile", profileDir,
-    "--start-debugger-server", String(opts.rdpPort),
+    "--profile",
+    profileDir,
+    "--start-debugger-server",
+    String(opts.rdpPort),
     "about:blank",
   ];
   if (opts.headless ?? true) args.unshift("--headless");

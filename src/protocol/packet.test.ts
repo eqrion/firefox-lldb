@@ -1,12 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import {
-  checksum,
-  framePacket,
-  escapeBinary,
-  unescapeBinary,
-  PacketParser,
-} from "./packet.js";
+import { checksum, framePacket, escapeBinary, unescapeBinary, PacketParser } from "./packet.js";
 
 test("checksum is the byte sum modulo 256", () => {
   assert.equal(checksum(new TextEncoder().encode("OK")), (0x4f + 0x4b) & 0xff);

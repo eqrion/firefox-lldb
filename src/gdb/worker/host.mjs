@@ -7,7 +7,13 @@ import { Worker } from "node:worker_threads";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  encode, decode, CTRL_STATE, CTRL_LEN, CTRL_WORDS, STATE_RESPONSE, DATA_BYTES,
+  encode,
+  decode,
+  CTRL_STATE,
+  CTRL_LEN,
+  CTRL_WORDS,
+  STATE_RESPONSE,
+  DATA_BYTES,
 } from "./wire.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));

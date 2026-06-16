@@ -46,8 +46,9 @@ export async function instantiateGdbStub(
     "bytecodealliance:wasmtime/debuggee": debuggee,
   };
 
-  const wasm = (globalThis as unknown as { WebAssembly: { compile(b: Uint8Array): Promise<unknown> } })
-    .WebAssembly;
+  const wasm = (
+    globalThis as unknown as { WebAssembly: { compile(b: Uint8Array): Promise<unknown> } }
+  ).WebAssembly;
   const root = await instantiate(
     async (corePath) => wasm.compile(await readFile(path.join(GENERATED_DIR, corePath))),
     imports

@@ -60,56 +60,128 @@ const isDebuggee = (a) => a instanceof Debuggee;
 const restArgs = (args) => args.filter((a) => !isDebuggee(a));
 
 class Debuggee {
-  allModules() { return rpc("Debuggee", 0, "allModules", []); }
-  allInstances() { return rpc("Debuggee", 0, "allInstances", []); }
-  exitFrames() { return rpc("Debuggee", 0, "exitFrames", []); }
-  continue(rv) { return rpc("Debuggee", 0, "continue", [rv]); }
-  singleStep(rv) { return rpc("Debuggee", 0, "singleStep", [rv]); }
-  interrupt() { return rpc("Debuggee", 0, "interrupt", []); }
+  allModules() {
+    return rpc("Debuggee", 0, "allModules", []);
+  }
+  allInstances() {
+    return rpc("Debuggee", 0, "allInstances", []);
+  }
+  exitFrames() {
+    return rpc("Debuggee", 0, "exitFrames", []);
+  }
+  continue(rv) {
+    return rpc("Debuggee", 0, "continue", [rv]);
+  }
+  singleStep(rv) {
+    return rpc("Debuggee", 0, "singleStep", [rv]);
+  }
+  interrupt() {
+    return rpc("Debuggee", 0, "interrupt", []);
+  }
 }
 class EventFuture {
-  subscribe() { return { ready: () => true, block: () => {} }; }
-  static finish(self, _d) { return rpc("EventFuture", self.__id, "finish", []); }
+  subscribe() {
+    return { ready: () => true, block: () => {} };
+  }
+  static finish(self, _d) {
+    return rpc("EventFuture", self.__id, "finish", []);
+  }
 }
 class Module {
-  bytecode() { return rpc("Module", this.__id, "bytecode", []); }
-  uniqueId() { return rpc("Module", this.__id, "uniqueId", []); }
-  addBreakpoint(...a) { return rpc("Module", this.__id, "addBreakpoint", restArgs(a)); }
-  removeBreakpoint(...a) { return rpc("Module", this.__id, "removeBreakpoint", restArgs(a)); }
-  clone() { return makeProxy({ $res: "Module", id: this.__id }); }
+  bytecode() {
+    return rpc("Module", this.__id, "bytecode", []);
+  }
+  uniqueId() {
+    return rpc("Module", this.__id, "uniqueId", []);
+  }
+  addBreakpoint(...a) {
+    return rpc("Module", this.__id, "addBreakpoint", restArgs(a));
+  }
+  removeBreakpoint(...a) {
+    return rpc("Module", this.__id, "removeBreakpoint", restArgs(a));
+  }
+  clone() {
+    return makeProxy({ $res: "Module", id: this.__id });
+  }
 }
 class Instance {
-  getModule(...a) { return rpc("Instance", this.__id, "getModule", restArgs(a)); }
-  getMemory(...a) { return rpc("Instance", this.__id, "getMemory", restArgs(a)); }
-  getGlobal(...a) { return rpc("Instance", this.__id, "getGlobal", restArgs(a)); }
-  uniqueId() { return rpc("Instance", this.__id, "uniqueId", []); }
-  clone() { return makeProxy({ $res: "Instance", id: this.__id }); }
+  getModule(...a) {
+    return rpc("Instance", this.__id, "getModule", restArgs(a));
+  }
+  getMemory(...a) {
+    return rpc("Instance", this.__id, "getMemory", restArgs(a));
+  }
+  getGlobal(...a) {
+    return rpc("Instance", this.__id, "getGlobal", restArgs(a));
+  }
+  uniqueId() {
+    return rpc("Instance", this.__id, "uniqueId", []);
+  }
+  clone() {
+    return makeProxy({ $res: "Instance", id: this.__id });
+  }
 }
 class Memory {
-  sizeBytes(...a) { return rpc("Memory", this.__id, "sizeBytes", restArgs(a)); }
-  getBytes(...a) { return rpc("Memory", this.__id, "getBytes", restArgs(a)); }
-  uniqueId() { return rpc("Memory", this.__id, "uniqueId", []); }
-  clone() { return makeProxy({ $res: "Memory", id: this.__id }); }
+  sizeBytes(...a) {
+    return rpc("Memory", this.__id, "sizeBytes", restArgs(a));
+  }
+  getBytes(...a) {
+    return rpc("Memory", this.__id, "getBytes", restArgs(a));
+  }
+  uniqueId() {
+    return rpc("Memory", this.__id, "uniqueId", []);
+  }
+  clone() {
+    return makeProxy({ $res: "Memory", id: this.__id });
+  }
 }
 class Global {
-  get(...a) { return rpc("Global", this.__id, "get", restArgs(a)); }
+  get(...a) {
+    return rpc("Global", this.__id, "get", restArgs(a));
+  }
 }
 class Frame {
-  getInstance(...a) { return rpc("Frame", this.__id, "getInstance", restArgs(a)); }
-  getFuncIndex(...a) { return rpc("Frame", this.__id, "getFuncIndex", restArgs(a)); }
-  getPc(...a) { return rpc("Frame", this.__id, "getPc", restArgs(a)); }
-  getLocals(...a) { return rpc("Frame", this.__id, "getLocals", restArgs(a)); }
-  getStack(...a) { return rpc("Frame", this.__id, "getStack", restArgs(a)); }
-  parentFrame(...a) { return rpc("Frame", this.__id, "parentFrame", restArgs(a)); }
+  getInstance(...a) {
+    return rpc("Frame", this.__id, "getInstance", restArgs(a));
+  }
+  getFuncIndex(...a) {
+    return rpc("Frame", this.__id, "getFuncIndex", restArgs(a));
+  }
+  getPc(...a) {
+    return rpc("Frame", this.__id, "getPc", restArgs(a));
+  }
+  getLocals(...a) {
+    return rpc("Frame", this.__id, "getLocals", restArgs(a));
+  }
+  getStack(...a) {
+    return rpc("Frame", this.__id, "getStack", restArgs(a));
+  }
+  parentFrame(...a) {
+    return rpc("Frame", this.__id, "parentFrame", restArgs(a));
+  }
 }
 class WasmValue {
-  getType() { return rpc("WasmValue", this.__id, "getType", []); }
-  unwrapI32() { return rpc("WasmValue", this.__id, "unwrapI32", []); }
-  unwrapI64() { return rpc("WasmValue", this.__id, "unwrapI64", []); }
-  unwrapF32() { return rpc("WasmValue", this.__id, "unwrapF32", []); }
-  unwrapF64() { return rpc("WasmValue", this.__id, "unwrapF64", []); }
-  unwrapV128() { return rpc("WasmValue", this.__id, "unwrapV128", []); }
-  clone() { return rpc("WasmValue", this.__id, "clone", []); }
+  getType() {
+    return rpc("WasmValue", this.__id, "getType", []);
+  }
+  unwrapI32() {
+    return rpc("WasmValue", this.__id, "unwrapI32", []);
+  }
+  unwrapI64() {
+    return rpc("WasmValue", this.__id, "unwrapI64", []);
+  }
+  unwrapF32() {
+    return rpc("WasmValue", this.__id, "unwrapF32", []);
+  }
+  unwrapF64() {
+    return rpc("WasmValue", this.__id, "unwrapF64", []);
+  }
+  unwrapV128() {
+    return rpc("WasmValue", this.__id, "unwrapV128", []);
+  }
+  clone() {
+    return rpc("WasmValue", this.__id, "clone", []);
+  }
 }
 class Table {}
 class WasmFunc {}
@@ -117,8 +189,18 @@ class WasmException {}
 class WasmTag {}
 
 const CLASSES = {
-  Debuggee, EventFuture, Module, Instance, Memory, Global, Frame,
-  WasmValue, Table, WasmFunc, WasmException, WasmTag,
+  Debuggee,
+  EventFuture,
+  Module,
+  Instance,
+  Memory,
+  Global,
+  Frame,
+  WasmValue,
+  Table,
+  WasmFunc,
+  WasmException,
+  WasmTag,
 };
 
 const imports = {

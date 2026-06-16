@@ -27,12 +27,7 @@ function toBytes(payload: Uint8Array | string): Uint8Array {
 export function framePacket(payload: Uint8Array | string): Buffer {
   const body = toBytes(payload);
   const cs = checksum(body).toString(16).padStart(2, "0");
-  return Buffer.concat([
-    Buffer.from("$"),
-    Buffer.from(body),
-    Buffer.from("#"),
-    Buffer.from(cs),
-  ]);
+  return Buffer.concat([Buffer.from("$"), Buffer.from(body), Buffer.from("#"), Buffer.from(cs)]);
 }
 
 /** Escape raw bytes for inclusion in a binary packet payload. */

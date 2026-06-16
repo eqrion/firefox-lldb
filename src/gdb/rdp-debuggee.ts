@@ -272,11 +272,13 @@ export class RdpDebuggee {
   // `global0..globalN` and `memory0`.
   async #instanceScopeBindings(): Promise<Record<string, { value?: unknown }>> {
     if (!this.#topFrameActor) return {};
-    let env = (await this.#session.frameEnvironment(this.#topFrameActor)) as {
-      scopeKind?: string;
-      parent?: unknown;
-      bindings?: { variables?: Record<string, { value?: unknown }> };
-    } | undefined;
+    let env = (await this.#session.frameEnvironment(this.#topFrameActor)) as
+      | {
+          scopeKind?: string;
+          parent?: unknown;
+          bindings?: { variables?: Record<string, { value?: unknown }> };
+        }
+      | undefined;
     while (env && env.scopeKind !== "wasm instance") {
       env = env.parent as typeof env;
     }
@@ -317,7 +319,9 @@ export class RdpDebuggee {
       `(()=>{const b=memory0.buffer,t=b.byteLength,a=${addr},n=${len},o=new Uint8Array(n);` +
       `if(a<t)o.set(new Uint8Array(b,a,Math.min(n,t-a)));` +
       `let s='';for(const x of o)s+=x.toString(16).padStart(2,'0');return s;})()`;
-    const r = (await this.#session.evaluateInFrame(expr, this.#topFrameActor)) as { result?: unknown };
+    const r = (await this.#session.evaluateInFrame(expr, this.#topFrameActor)) as {
+      result?: unknown;
+    };
     const hex = typeof r.result === "string" ? r.result : "";
     for (let i = 0; i < len && i * 2 + 1 < hex.length; i++) {
       out[i] = parseInt(hex.substr(i * 2, 2), 16);

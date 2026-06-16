@@ -29,8 +29,14 @@ function codeSectionOffset(buf) {
   let o = 8;
   while (o < buf.length) {
     const id = buf[o++];
-    let size = 0, shift = 0, b;
-    do { b = buf[o++]; size |= (b & 0x7f) << shift; shift += 7; } while (b & 0x80);
+    let size = 0,
+      shift = 0,
+      b;
+    do {
+      b = buf[o++];
+      size |= (b & 0x7f) << shift;
+      shift += 7;
+    } while (b & 0x80);
     if (id === 10) return o; // Code section: contents start here
     o += size;
   }
@@ -46,5 +52,7 @@ for (const line of out.split("\n")) {
   if (!m) continue;
   const dwarf = parseInt(m[1], 16);
   const off = codeOff + dwarf;
-  console.log(`  0x${off.toString(16).padStart(4, "0")}  line=${m[2]}  (dwarf=0x${dwarf.toString(16)})`);
+  console.log(
+    `  0x${off.toString(16).padStart(4, "0")}  line=${m[2]}  (dwarf=0x${dwarf.toString(16)})`
+  );
 }
