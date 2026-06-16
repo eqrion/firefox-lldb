@@ -48,6 +48,11 @@ def _bootstrap_lldb():
             pass
     if pypath and pypath not in sys.path:
         sys.path.insert(0, pypath)
+    # Clear any stale partial import left by the pre-installed lldb package on
+    # the system. Without this, `import lldb` returns a broken partially-initialized
+    # module when python3-lldb is already wired into Python's site-packages.
+    for _key in [k for k in sys.modules if k == "lldb" or k.startswith("lldb.")]:
+        del sys.modules[_key]
     try:
         import lldb as _lldb
 
