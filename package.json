@@ -7,7 +7,9 @@
   "engines": {
     "node": ">=20"
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "bin": {
     "firefox-lldb": "./dist/cli/firefox-lldb.js",
     "firefox-lldb-server": "./dist/cli/firefox-lldb-server.js"
