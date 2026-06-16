@@ -3,8 +3,7 @@
 //   { "modulePath": "...wasm", "callStack": [0x1b0],
 //     "frameLocals": [[0,0,66016]], "memory": {"base":65536,"bytesHex":"00.."} }
 //
-// Run with Node >=24 + --experimental-wasm-jspi:
-//   node --experimental-wasm-jspi --import tsx fake-wasm-server.ts --config c.json --port 8123
+//   node --import tsx fake-wasm-server.ts --config c.json --port 8123
 
 import { readFile } from "node:fs/promises";
 import { FakeDebuggee, type FakeConfig } from "../gdb/fake-debuggee.js";

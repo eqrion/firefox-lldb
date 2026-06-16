@@ -2,7 +2,7 @@
 // gdbstub component (worker) -> raw GDB client. Verifies the wasm call stack and
 // module bytes served to a GDB client originate from the live browser.
 //
-// Run with Node >=24: node --experimental-wasm-jspi --import tsx rdp-integration.ts
+//   node --import tsx rdp-integration.ts
 import net from "node:net";
 import { RdpWasmSession } from "../rdp/session.js";
 import { RdpDebuggee } from "./rdp-debuggee.js";
@@ -31,7 +31,10 @@ for (const off of offsets) await session.setWasmBreakpoint(wasm.url, off);
 await session.evaluate("runFactorial()");
 await Promise.race([paused, new Promise((r) => setTimeout(r, 4000))]);
 const frames = await session.frames();
-console.log("[rdp] paused; wasm frame pc offset:", frames.find((f) => f.type === "wasmcall")?.where?.line);
+console.log(
+  "[rdp] paused; wasm frame pc offset:",
+  frames.find((f) => f.type === "wasmcall")?.where?.line
+);
 
 // Serve the gdbstub component backed by the live RDP debuggee.
 const debuggee = new RdpDebuggee(session);
@@ -49,7 +52,11 @@ if (process.argv.includes("hold")) {
 }
 
 // --- raw GDB client ---
-function cksum(s: string) { let n = 0; for (const c of s) n = (n + c.charCodeAt(0)) & 0xff; return n.toString(16).padStart(2, "0"); }
+function cksum(s: string) {
+  let n = 0;
+  for (const c of s) n = (n + c.charCodeAt(0)) & 0xff;
+  return n.toString(16).padStart(2, "0");
+}
 const pkt = (d: string) => `$${d}#${cksum(d)}`;
 const sock = net.createConnection({ port: LLDB_PORT, host: "127.0.0.1" });
 let buf = "";
@@ -68,18 +75,28 @@ sock.on("data", (d) => {
 function rle(s: string): string {
   let out = "";
   for (let i = 0; i < s.length; i++) {
-    if (s[i] === "*") { out += out[out.length - 1].repeat(s.charCodeAt(++i) - 29); }
-    else out += s[i];
+    if (s[i] === "*") {
+      out += out[out.length - 1].repeat(s.charCodeAt(++i) - 29);
+    } else out += s[i];
   }
   return out;
 }
-const req = (d: string) => new Promise<string>((res) => { waiters.push((s) => res(rle(s))); sock.write("+"); sock.write(pkt(d)); });
+const req = (d: string) =>
+  new Promise<string>((res) => {
+    waiters.push((s) => res(rle(s)));
+    sock.write("+");
+    sock.write(pkt(d));
+  });
 await new Promise<void>((r) => sock.on("connect", () => r()));
 
 const decodeAddr = (leHex: string) => {
   let v = 0n;
   for (let i = 0; i < 8; i++) v |= BigInt(parseInt(leHex.substr(i * 2, 2), 16)) << BigInt(i * 8);
-  return { type: Number((v >> 62n) & 0x3n), moduleId: Number((v >> 32n) & 0x3fffffffn), offset: Number(v & 0xffffffffn) };
+  return {
+    type: Number((v >> 62n) & 0x3n),
+    moduleId: Number((v >> 32n) & 0x3fffffffn),
+    offset: Number(v & 0xffffffffn),
+  };
 };
 
 console.log("\n=== GDB client over RDP ===");
@@ -96,15 +113,26 @@ if (callstack && callstack !== "" && !callstack.startsWith("E")) {
   // Read the module's first bytes via an Object-type address (type=1, offset 0).
   const loadAddr = (BigInt(1) << 62n) | (BigInt(top.moduleId) << 32n);
   const mem = await req(`m${loadAddr.toString(16)},4`);
-  console.log(`  module bytes  -> ${mem}  ${mem === "0061736d" ? "(wasm magic \\0asm from live Firefox!)" : ""}`);
+  console.log(
+    `  module bytes  -> ${mem}  ${mem === "0061736d" ? "(wasm magic \\0asm from live Firefox!)" : ""}`
+  );
 }
 
 // Locals (RDP environment bindings) and globals (instance scope) -> WasmValue.
-const decodeI32 = (h: string) => { let v = 0; for (let i = 0; i < 4 && i * 2 + 1 < h.length; i++) v |= parseInt(h.substr(i * 2, 2), 16) << (i * 8); return v >>> 0; };
+const decodeI32 = (h: string) => {
+  let v = 0;
+  for (let i = 0; i < 4 && i * 2 + 1 < h.length; i++)
+    v |= parseInt(h.substr(i * 2, 2), 16) << (i * 8);
+  return v >>> 0;
+};
 const local0 = await req("qWasmLocal:0;0");
-console.log(`qWasmLocal:0;0  -> ${local0}${local0 && !local0.startsWith("E") ? ` (i32=${decodeI32(local0)})` : ""}`);
+console.log(
+  `qWasmLocal:0;0  -> ${local0}${local0 && !local0.startsWith("E") ? ` (i32=${decodeI32(local0)})` : ""}`
+);
 const global0 = await req("qWasmGlobal:0;0");
-console.log(`qWasmGlobal:0;0 -> ${global0}${global0 && !global0.startsWith("E") ? ` (i32=${decodeI32(global0)})` : ""}`);
+console.log(
+  `qWasmGlobal:0;0 -> ${global0}${global0 && !global0.startsWith("E") ? ` (i32=${decodeI32(global0)})` : ""}`
+);
 
 sock.end();
 stop();

@@ -1,54 +1,26 @@
 // M1: the LLDB platform server.
 //
-// Models the browser as an LLDB platform: tabs are processes, a filesystem
-// backend stands in for the remote host's files, and qLaunchGDBServer spawns a
-// per-tab GDB server. Implements the platform packet set documented in
+// Models the browser as an LLDB platform: tabs are processes and qLaunchGDBServer
+// spawns a per-tab GDB server. Implements the platform packet set documented in
 // lldb/docs/resources/lldbplatformpackets.md. Wire formats were validated
 // against GDBRemoteCommunicationClient.cpp.
 
 import os from "node:os";
-import { promisify } from "node:util";
-import { execFile } from "node:child_process";
 import type { RspHandler, RspSession } from "../protocol/rsp-server.js";
-import { escapeBinary, unescapeBinary } from "../protocol/packet.js";
 import { asciiToHex, hexToAscii } from "../protocol/hex.js";
-import type { PlatformFileSystem } from "./filesystem.js";
 import type { GdbServerSpawner } from "./gdb-server-spawner.js";
 import type { ProcessInfo, ProcessProvider } from "./process-provider.js";
 
-const execFileAsync = promisify(execFile);
-
-// Map Node error codes to the POSIX errno numbers LLDB expects.
-const ERRNO: Record<string, number> = {
-  EPERM: 1,
-  ENOENT: 2,
-  EBADF: 9,
-  EACCES: 13,
-  EFAULT: 14,
-  EBUSY: 16,
-  EEXIST: 17,
-  ENOTDIR: 20,
-  EISDIR: 21,
-  EINVAL: 22,
-  EMFILE: 24,
-  EROFS: 30,
-};
-
-function errnoOf(err: unknown): number {
-  const code = (err as NodeJS.ErrnoException)?.code;
-  return (code && ERRNO[code]) || 1;
-}
-
 export interface PlatformServerDeps {
-  fs: PlatformFileSystem;
   spawner: GdbServerSpawner;
   processes: ProcessProvider;
+  defaultUrl?: string;
 }
 
 export class PlatformServer implements RspHandler {
-  #fs: PlatformFileSystem;
   #spawner: GdbServerSpawner;
   #processes: ProcessProvider;
+  #defaultUrl?: string;
 
   // Per-connection state.
   #workingDir = process.cwd();
@@ -57,9 +29,9 @@ export class PlatformServer implements RspHandler {
   #processMatches: ProcessInfo[] = [];
 
   constructor(deps: PlatformServerDeps) {
-    this.#fs = deps.fs;
     this.#spawner = deps.spawner;
     this.#processes = deps.processes;
+    this.#defaultUrl = deps.defaultUrl;
   }
 
   async handle(payload: Buffer, session: RspSession): Promise<Uint8Array | string | null> {
@@ -93,14 +65,6 @@ export class PlatformServer implements RspHandler {
       return (await this.#spawner.kill(pid)) ? "OK" : "E01";
     }
     if (data === "qLaunchSuccess") return "OK";
-
-    if (data.startsWith("qModuleInfo:")) return this.#moduleInfo(data);
-    if (data.startsWith("qPathComplete:")) return this.#pathComplete(data);
-    if (data.startsWith("qPlatform_mkdir:")) return this.#mkdir(data);
-    if (data.startsWith("qPlatform_chmod:")) return this.#chmod(data);
-    if (data.startsWith("qPlatform_shell:")) return this.#shell(data);
-
-    if (data.startsWith("vFile:")) return this.#vFile(data, payload);
 
     // Process-launch configuration packets. We do not launch native processes
     // (the GDB server attaches to a tab), so we accept and remember settings.
@@ -175,7 +139,8 @@ export class PlatformServer implements RspHandler {
   }
 
   async #launchGdbServer(): Promise<string> {
-    const { pid, port } = await this.#spawner.launch(0);
+    const url = this.#resolveLaunchUrl();
+    const { pid, port } = await this.#spawner.launch(0, url);
     return `pid:${pid};port:${port};`;
   }
 
@@ -183,161 +148,10 @@ export class PlatformServer implements RspHandler {
     return JSON.stringify(this.#spawner.list().map((s) => ({ port: s.port })));
   }
 
-  async #moduleInfo(data: string): Promise<string> {
-    const args = data.slice("qModuleInfo:".length);
-    const semi = args.indexOf(";");
-    const path = hexToAscii(args.slice(0, semi));
-    const triple = args.slice(semi + 1);
-    const info = await this.#fs.moduleInfo(path, triple);
-    if (!info) return "E01";
-    const parts: string[] = [];
-    if (info.uuid) parts.push(`uuid:${info.uuid}`);
-    parts.push(`triple:${asciiToHex(info.triple ?? triple)}`);
-    parts.push(`file_offset:${info.fileOffset.toString(16)}`);
-    parts.push(`file_size:${info.fileSize.toString(16)}`);
-    return parts.join(";") + ";";
-  }
-
-  async #pathComplete(data: string): Promise<string> {
-    const [flagStr, partialHex] = data.slice("qPathComplete:".length).split(",");
-    const dirsOnly = parseInt(flagStr, 16) === 1;
-    const matches = await this.#fs.pathComplete(hexToAscii(partialHex ?? ""), dirsOnly);
-    return "M" + matches.map(asciiToHex).join(",");
-  }
-
-  async #mkdir(data: string): Promise<string> {
-    const [modeHex, pathHex] = data.slice("qPlatform_mkdir:".length).split(",");
-    try {
-      await this.#fs.mkdir(hexToAscii(pathHex), parseInt(modeHex, 16));
-      return "F0";
-    } catch (err) {
-      return `F${errnoOf(err).toString(16)}`;
-    }
-  }
-
-  async #chmod(data: string): Promise<string> {
-    const [modeHex, pathHex] = data.slice("qPlatform_chmod:".length).split(",");
-    try {
-      await this.#fs.chmod(hexToAscii(pathHex), parseInt(modeHex, 16));
-      return "F0";
-    } catch (err) {
-      return `F${errnoOf(err).toString(16)}`;
-    }
-  }
-
-  async #shell(data: string): Promise<string | Uint8Array> {
-    const [cmdHex, , cwdHex] = data.slice("qPlatform_shell:".length).split(",");
-    const command = hexToAscii(cmdHex);
-    const cwd = cwdHex ? hexToAscii(cwdHex) : this.#workingDir;
-    try {
-      const { stdout } = await execFileAsync("/bin/sh", ["-c", command], {
-        cwd,
-        encoding: "buffer",
-        timeout: 30_000,
-      });
-      return this.#shellReply(0, 0, stdout);
-    } catch (err) {
-      const e = err as { code?: number; stdout?: Buffer };
-      const exit = typeof e.code === "number" ? e.code : 255;
-      return this.#shellReply(exit, 0, e.stdout ?? Buffer.alloc(0));
-    }
-  }
-
-  #shellReply(exit: number, signal: number, output: Uint8Array): Uint8Array {
-    const header = `F,${(exit >>> 0).toString(16)},${signal.toString(16)},`;
-    return concatBytes(new TextEncoder().encode(header), escapeBinary(output));
-  }
-
-  async #vFile(data: string, payload: Buffer): Promise<string | Uint8Array> {
-    if (data.startsWith("vFile:open:")) {
-      const [pathHex, flagsHex, modeHex] = data.slice("vFile:open:".length).split(",");
-      try {
-        const fd = await this.#fs.open(
-          hexToAscii(pathHex),
-          parseInt(flagsHex, 16),
-          parseInt(modeHex, 16)
-        );
-        return `F${fd.toString(16)}`;
-      } catch (err) {
-        return `F-1,${errnoOf(err).toString(16)}`;
-      }
-    }
-    if (data.startsWith("vFile:close:")) {
-      try {
-        await this.#fs.close(parseInt(data.slice("vFile:close:".length), 16));
-        return "F0";
-      } catch (err) {
-        return `F-1,${errnoOf(err).toString(16)}`;
-      }
-    }
-    if (data.startsWith("vFile:pread:")) {
-      const [fdHex, countHex, offsetHex] = data.slice("vFile:pread:".length).split(",");
-      try {
-        const bytes = await this.#fs.pread(
-          parseInt(fdHex, 16),
-          parseInt(countHex, 16),
-          parseInt(offsetHex, 16)
-        );
-        const header = new TextEncoder().encode(`F${bytes.length.toString(16)};`);
-        return concatBytes(header, escapeBinary(bytes));
-      } catch (err) {
-        return `F-1,${errnoOf(err).toString(16)}`;
-      }
-    }
-    if (data.startsWith("vFile:pwrite:")) {
-      // The third field is raw (escaped) binary, so slice it from the buffer.
-      const rest = payload.subarray("vFile:pwrite:".length);
-      const c1 = rest.indexOf(0x2c);
-      const c2 = rest.indexOf(0x2c, c1 + 1);
-      const fd = parseInt(rest.subarray(0, c1).toString("latin1"), 16);
-      const offset = parseInt(rest.subarray(c1 + 1, c2).toString("latin1"), 16);
-      const bytes = unescapeBinary(rest.subarray(c2 + 1));
-      try {
-        const written = await this.#fs.pwrite(fd, offset, bytes);
-        return `F${written.toString(16)}`;
-      } catch (err) {
-        return `F-1,${errnoOf(err).toString(16)}`;
-      }
-    }
-    if (data.startsWith("vFile:size:")) {
-      try {
-        const size = await this.#fs.size(hexToAscii(data.slice("vFile:size:".length)));
-        return `F${size.toString(16)}`;
-      } catch (err) {
-        return `F-1,${errnoOf(err).toString(16)}`;
-      }
-    }
-    if (data.startsWith("vFile:mode:")) {
-      try {
-        const mode = await this.#fs.mode(hexToAscii(data.slice("vFile:mode:".length)));
-        return `F${mode.toString(16)}`;
-      } catch (err) {
-        return `F-1,${errnoOf(err).toString(16)}`;
-      }
-    }
-    if (data.startsWith("vFile:exists:")) {
-      const exists = await this.#fs.exists(hexToAscii(data.slice("vFile:exists:".length)));
-      return `F,${exists ? 1 : 0}`;
-    }
-    if (data.startsWith("vFile:unlink:")) {
-      try {
-        await this.#fs.unlink(hexToAscii(data.slice("vFile:unlink:".length)));
-        return "F0";
-      } catch (err) {
-        return `F-1,${errnoOf(err).toString(16)}`;
-      }
-    }
-    if (data.startsWith("vFile:symlink:")) {
-      // Wire order is dst,src (LLDB mirrors the reversed unix symlink args).
-      const [dstHex, srcHex] = data.slice("vFile:symlink:".length).split(",");
-      try {
-        await this.#fs.symlink(hexToAscii(srcHex), hexToAscii(dstHex));
-        return "F0";
-      } catch (err) {
-        return `F-1,${errnoOf(err).toString(16)}`;
-      }
-    }
-    return "";
+  #resolveLaunchUrl(): string | undefined {
+    const arg0 = this.#launchArgs[0];
+    if (arg0 && /^(https?:|file:|about:)/.test(arg0)) return arg0;
+    return this.#defaultUrl;
   }
 
   #setLaunchArgs(data: string): string {
@@ -357,7 +171,10 @@ export class PlatformServer implements RspHandler {
   }
 }
 
-function hostTriple(arch: string, platform: string): {
+function hostTriple(
+  arch: string,
+  platform: string
+): {
   ostype: string;
   vendor: string;
   triple: string;
@@ -403,11 +220,4 @@ function nameMatches(name: string, want: string, matchType: string): boolean {
     default:
       return name === want;
   }
-}
-
-function concatBytes(a: Uint8Array, b: Uint8Array): Uint8Array {
-  const out = new Uint8Array(a.length + b.length);
-  out.set(a, 0);
-  out.set(b, a.length);
-  return out;
 }

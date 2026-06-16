@@ -1,11 +1,18 @@
 // Manages the per-tab GDB servers the platform spawns on qLaunchGDBServer.
 //
-// In LLDB's native platform this forks an `lldb-server gdbserver` process; here
-// each "GDB server" is an in-process RspServer bound to its own TCP port whose
-// handler speaks the wasm protocol (built in M2+). The handler is injected so
-// this stays decoupled from the wasm implementation.
+// Each "GDB server" is created by the injected launcher, which builds an
+// RdpDebuggee over an RdpWasmSession and serves it via the worker-hosted
+// gdbstub component. The launcher is injected so this stays decoupled from
+// the wasm and RDP implementation.
 
-import { RspServer, type RspHandler, type RspLogger } from "../protocol/rsp-server.js";
+import net from "node:net";
+import type { AddressInfo } from "node:net";
+
+export interface LaunchedServer {
+  stop(): void | Promise<void>;
+}
+
+export type GdbServerLauncher = (opts: { port: number; url?: string }) => Promise<LaunchedServer>;
 
 export interface SpawnedServer {
   pid: number;
@@ -13,42 +20,48 @@ export interface SpawnedServer {
 }
 
 export class GdbServerSpawner {
-  #handlerFactory: () => RspHandler;
-  #logger?: RspLogger;
-  #servers = new Map<number, RspServer>();
+  #launcher: GdbServerLauncher;
+  #servers = new Map<number, { port: number; handle: LaunchedServer }>();
   #nextPid = 0x10000;
 
-  constructor(handlerFactory: () => RspHandler, logger?: RspLogger) {
-    this.#handlerFactory = handlerFactory;
-    this.#logger = logger;
+  constructor(launcher: GdbServerLauncher) {
+    this.#launcher = launcher;
   }
 
-  /** Launch a GDB server. requestedPort 0 lets the OS pick a free port. */
-  async launch(requestedPort = 0): Promise<SpawnedServer> {
-    const server = new RspServer(this.#handlerFactory, {
-      logger: this.#logger,
-      singleConnection: true,
-    });
-    const port = await server.listen(requestedPort);
+  /** Launch a GDB server. When requestedPort is 0 a free port is pre-allocated. */
+  async launch(requestedPort = 0, url?: string): Promise<SpawnedServer> {
+    const port = requestedPort !== 0 ? requestedPort : await freePort();
+    const handle = await this.#launcher({ port, url });
     const pid = this.#nextPid++;
-    this.#servers.set(pid, server);
+    this.#servers.set(pid, { port, handle });
     return { pid, port };
   }
 
   async kill(pid: number): Promise<boolean> {
-    const server = this.#servers.get(pid);
-    if (!server) return false;
+    const entry = this.#servers.get(pid);
+    if (!entry) return false;
     this.#servers.delete(pid);
-    await server.close();
+    await entry.handle.stop();
     return true;
   }
 
   list(): SpawnedServer[] {
-    return [...this.#servers].map(([pid, server]) => ({ pid, port: server.port }));
+    return [...this.#servers].map(([pid, { port }]) => ({ pid, port }));
   }
 
   async killAll(): Promise<void> {
-    await Promise.all([...this.#servers.values()].map((s) => s.close()));
+    await Promise.all([...this.#servers.values()].map((e) => e.handle.stop()));
     this.#servers.clear();
   }
+}
+
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const s = net.createServer();
+    s.listen(0, () => {
+      const port = (s.address() as AddressInfo).port;
+      s.close((err) => (err ? reject(err) : resolve(port)));
+    });
+    s.on("error", reject);
+  });
 }
