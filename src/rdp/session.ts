@@ -42,6 +42,7 @@ export class RdpWasmSession extends EventEmitter {
   #threadActor: string | null = null;
   #consoleActor: string | null = null;
   #targetUrl = "";
+  #wasmActorByUrl = new Map<string, string>();
 
   private constructor(client: RdpClient) {
     super();
@@ -130,13 +131,20 @@ export class RdpWasmSession extends EventEmitter {
     return this.#threadActor;
   }
 
+  /** Send a raw request to an actor (escape hatch for actor-specific packets). */
+  request(actor: string, packet: Record<string, unknown>): Promise<RdpPacket> {
+    return this.#client.request(actor, packet);
+  }
+
   async sources(): Promise<SourceForm[]> {
     const { sources } = await this.#client.request(this.#thread(), { type: "sources" });
     return sources as SourceForm[];
   }
 
   async wasmSources(): Promise<SourceForm[]> {
-    return (await this.sources()).filter((s) => s.introductionType === "wasm");
+    const wasm = (await this.sources()).filter((s) => s.introductionType === "wasm");
+    for (const s of wasm) this.#wasmActorByUrl.set(s.url, s.actor);
+    return wasm;
   }
 
   /** Fetch a module's bytes by URL (the source actor cannot serve wasm binary). */
@@ -149,11 +157,29 @@ export class RdpWasmSession extends EventEmitter {
     return (frames ?? []) as FrameForm[];
   }
 
-  /** Set a wasm breakpoint at a byte offset (column is always 1 for wasm). */
+  /**
+   * Set a wasm breakpoint at a byte offset (column is always 1 for wasm).
+   *
+   * LLDB resolves a breakpoint to a DWARF prologue-end offset, which is not
+   * necessarily one of the engine's valid breakpoint positions; setting at an
+   * invalid offset is a silent no-op in Firefox. Snap to the nearest valid
+   * position so the breakpoint actually arms.
+   */
   async setWasmBreakpoint(sourceUrl: string, offset: number): Promise<void> {
+    const actor = this.#wasmActorByUrl.get(sourceUrl);
+    let line = offset;
+    if (actor) {
+      const positions = await this.wasmBreakpointOffsets(actor);
+      if (positions.length && !positions.includes(offset)) {
+        line = positions.reduce(
+          (best, p) => (Math.abs(p - offset) < Math.abs(best - offset) ? p : best),
+          positions[0]
+        );
+      }
+    }
     await this.#client.request(this.#thread(), {
       type: "setBreakpoint",
-      location: { sourceUrl, line: offset, column: 1 },
+      location: { sourceUrl, line, column: 1 },
       options: {},
     });
   }
@@ -188,6 +214,59 @@ export class RdpWasmSession extends EventEmitter {
   async evaluate(text: string): Promise<void> {
     if (!this.#consoleActor) throw new Error("no console actor");
     await this.#client.request(this.#consoleActor, { type: "evaluateJSAsync", text });
+  }
+
+  /**
+   * Evaluate JS and resolve with the result packet. `selectedObjectActor` is
+   * exposed to the expression as `_self` (used to read a WebAssembly.Memory).
+   * evaluateJSAsync acks with a resultID, then delivers the value in a separate
+   * `evaluationResult` event matching that id.
+   */
+  async evaluateForResult(text: string, selectedObjectActor?: string): Promise<RdpPacket> {
+    if (!this.#consoleActor) throw new Error("no console actor");
+    this.#client.registerEventType("evaluationResult");
+    const ack = await this.#client.request(this.#consoleActor, {
+      type: "evaluateJSAsync",
+      text,
+      ...(selectedObjectActor ? { selectedObjectActor } : {}),
+    });
+    const resultID = (ack as { resultID?: string }).resultID;
+    return new Promise<RdpPacket>((resolve) => {
+      const onEvent = (p: RdpPacket) => {
+        if (p.type === "evaluationResult" && (p as { resultID?: string }).resultID === resultID) {
+          this.#client.off("event", onEvent);
+          resolve(p);
+        }
+      };
+      this.#client.on("event", onEvent);
+    });
+  }
+
+  /** Fetch a frame's environment form (with the parent scope chain). */
+  frameEnvironment(frameActor: string): Promise<RdpPacket> {
+    return this.#client.request(frameActor, { type: "getEnvironment" });
+  }
+
+  /** Evaluate JS in a frame's scope (so wasm-instance bindings like `memory0`
+   *  are visible) and resolve with the result packet. */
+  async evaluateInFrame(text: string, frameActor: string): Promise<RdpPacket> {
+    if (!this.#consoleActor) throw new Error("no console actor");
+    this.#client.registerEventType("evaluationResult");
+    const ack = await this.#client.request(this.#consoleActor, {
+      type: "evaluateJSAsync",
+      text,
+      frameActor,
+    });
+    const resultID = (ack as { resultID?: string }).resultID;
+    return new Promise<RdpPacket>((resolve) => {
+      const onEvent = (p: RdpPacket) => {
+        if (p.type === "evaluationResult" && (p as { resultID?: string }).resultID === resultID) {
+          this.#client.off("event", onEvent);
+          resolve(p);
+        }
+      };
+      this.#client.on("event", onEvent);
+    });
   }
 
   close(): void {

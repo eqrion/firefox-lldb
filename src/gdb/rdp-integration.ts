@@ -99,6 +99,13 @@ if (callstack && callstack !== "" && !callstack.startsWith("E")) {
   console.log(`  module bytes  -> ${mem}  ${mem === "0061736d" ? "(wasm magic \\0asm from live Firefox!)" : ""}`);
 }
 
+// Locals (RDP environment bindings) and globals (instance scope) -> WasmValue.
+const decodeI32 = (h: string) => { let v = 0; for (let i = 0; i < 4 && i * 2 + 1 < h.length; i++) v |= parseInt(h.substr(i * 2, 2), 16) << (i * 8); return v >>> 0; };
+const local0 = await req("qWasmLocal:0;0");
+console.log(`qWasmLocal:0;0  -> ${local0}${local0 && !local0.startsWith("E") ? ` (i32=${decodeI32(local0)})` : ""}`);
+const global0 = await req("qWasmGlobal:0;0");
+console.log(`qWasmGlobal:0;0 -> ${global0}${global0 && !global0.startsWith("E") ? ` (i32=${decodeI32(global0)})` : ""}`);
+
 sock.end();
 stop();
 session.close();
