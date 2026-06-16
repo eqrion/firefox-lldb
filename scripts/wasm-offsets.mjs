@@ -1,6 +1,5 @@
 // Derive the byte offsets that Firefox reports as a wasm frame's `where.line`
-// (and that the FakeDebuggee replays as a qWasmCallStack entry) for functions
-// in a wasm module.
+// for functions in a wasm module.
 //
 // Firefox/lldb wasm PC offset = <code-section content file offset> + <DWARF
 // address>. DWARF addresses are relative to the start of the Code section's

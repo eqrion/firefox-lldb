@@ -1,20 +1,16 @@
 #!/usr/bin/env python3
 """Standalone lldb bridge test harness — no lldb-dotest or LLVM source tree needed.
 
+Requires headless Firefox and a wasm-plugin lldb build.
+
 Usage:
-    # Fake backend only (fast, no browser):
     FIREFOX_LLDB_LLDB=../llvm-project/build/bin/lldb \\
         python3 test/lldb/run_bridge_tests.py
 
-    # Fake + live-Firefox (opt-in):
-    FIREFOX_LLDB_LIVE=1 FIREFOX_LLDB_LLDB=../llvm-project/build/bin/lldb \\
-        python3 test/lldb/run_bridge_tests.py
-
 Environment variables:
-    FIREFOX_LLDB_LLDB   Path to the lldb binary with the wasm plugin (required).
+    FIREFOX_LLDB_LLDB   Path to the wasm-plugin lldb binary (default: "lldb").
     LLDB_PYTHON_PATH    lldb Python module dir override (derived from FIREFOX_LLDB_LLDB if unset).
     FIREFOX_LLDB_NODE   Node binary to use (default: "node").
-    FIREFOX_LLDB_LIVE   Set to 1 to run the live-Firefox tests.
 """
 
 import json
@@ -38,7 +34,6 @@ REPO = Path(__file__).resolve().parent.parent.parent
 WASM_DEBUG = REPO.parent
 NODE = os.environ.get("FIREFOX_LLDB_NODE", "node")
 LLDB_BINARY = os.environ.get("FIREFOX_LLDB_LLDB", "lldb")
-LIVE = bool(os.environ.get("FIREFOX_LLDB_LIVE"))
 
 
 def _bootstrap_lldb():
@@ -61,11 +56,35 @@ def _bootstrap_lldb():
     except ImportError as e:
         sys.exit(
             f"Cannot import lldb from {pypath!r}: {e}\n"
-            "Set FIREFOX_LLDB_LLDB=<path to lldb binary> or LLDB_PYTHON_PATH=<python dir>."
+            "Set FIREFOX_LLDB_LLDB=<path to wasm-plugin lldb binary> or LLDB_PYTHON_PATH=<python dir>."
         )
 
 
 lldb = _bootstrap_lldb()
+
+
+def _check_wasm_plugin():
+    """Exit early with a clear message if the wasm process plugin is unavailable."""
+    dbg = lldb.SBDebugger.Create()
+    dbg.SetAsync(False)
+    target = dbg.CreateTarget("")
+    error = lldb.SBError()
+    # We expect either success (unlikely without a server) or a connection error.
+    # A "plugin not found" / "wasm" type unknown error means stock lldb.
+    process = target.ConnectRemote(
+        dbg.GetListener(), "connect://127.0.0.1:1", "wasm", error
+    )
+    msg = error.GetCString() or ""
+    lldb.SBDebugger.Destroy(dbg)
+    if "not found" in msg.lower() or "invalid" in msg.lower() and "wasm" in msg.lower():
+        sys.exit(
+            f"The wasm process plugin is not available in {LLDB_BINARY!r}.\n"
+            "Set FIREFOX_LLDB_LLDB=<path to a wasm-plugin lldb build>, e.g.:\n"
+            "  FIREFOX_LLDB_LLDB=../llvm-project/build/bin/lldb python3 test/lldb/run_bridge_tests.py"
+        )
+
+
+_check_wasm_plugin()
 
 # ---- fixtures ----------------------------------------------------------
 
@@ -73,7 +92,6 @@ FIXTURES = [
     {
         "name": "factorial",
         "module": "examples/simple/math.wasm",
-        "fake_call_stack": [0x1B0],
         "expect_func": "compute_factorial",
         "expect_file": "math.cpp",
         "page_dir": "examples/simple",
@@ -83,7 +101,6 @@ FIXTURES = [
     {
         "name": "oop",
         "module": "examples/oop/oop.wasm",
-        "fake_call_stack": [0x776],
         "expect_func": "area",
         "expect_file": "oop.cpp",
         "page_dir": "examples/oop",
@@ -93,7 +110,6 @@ FIXTURES = [
     {
         "name": "parser",
         "module": "examples/parser/parser.wasm",
-        "fake_call_stack": [0x649],
         "expect_func": "parse_factor",
         "expect_file": "parser.cpp",
         "page_dir": "examples/parser",
@@ -103,7 +119,6 @@ FIXTURES = [
     {
         "name": "ledger",
         "module": "examples/ledger/ledger.wasm",
-        "fake_call_stack": [0x31D],
         "expect_func": "apply_transaction",
         "expect_file": "ledger.cpp",
         "page_dir": "examples/ledger",
@@ -111,10 +126,6 @@ FIXTURES = [
         "break_func": "apply_transaction",
     },
 ]
-
-skip_unless_live = unittest.skipUnless(
-    LIVE, "set FIREFOX_LLDB_LIVE=1 to run live Firefox tests"
-)
 
 # ---- helpers -----------------------------------------------------------
 
@@ -216,9 +227,6 @@ class BridgeTestCase(unittest.TestCase):
         lldb.SBDebugger.Destroy(self.dbg)
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
-    def artifact(self, name):
-        return os.path.join(self._tmpdir, name)
-
     def _spawn(self, argv, *, ready, timeout=30):
         """Start a subprocess; block until `ready` string appears in output."""
         proc = subprocess.Popen(
@@ -237,31 +245,6 @@ class BridgeTestCase(unittest.TestCase):
             if ready in line:
                 return proc
         self.fail("server did not become ready: %s" % " ".join(str(a) for a in argv))
-
-    def _start_fake(self, fx):
-        port = free_port()
-        mod = fx["module"]
-        cfg = {
-            "modulePath": mod if os.path.isabs(mod) else str(WASM_DEBUG / mod),
-            "callStack": fx["fake_call_stack"],
-        }
-        if "frameLocals" in fx:
-            cfg["frameLocals"] = fx["frameLocals"]
-        if "memory" in fx:
-            cfg["memory"] = fx["memory"]
-        cfg_path = self.artifact("fake-config-%s.json" % fx["name"])
-        with open(cfg_path, "w") as f:
-            json.dump(cfg, f)
-        self._spawn(
-            [
-                NODE, "--import", "tsx",
-                str(REPO / "src" / "cli" / "fake-wasm-server.ts"),
-                "--config", cfg_path,
-                "--port", str(port),
-            ],
-            ready="listening",
-        )
-        return port
 
     def _start_platform(self, fx, timeout=120):
         """Start the unified CLI in launch+headless mode. Returns the platform port."""
@@ -286,7 +269,6 @@ class BridgeTestCase(unittest.TestCase):
         return platform_port
 
     def _connect(self, port):
-        """Direct wasm gdbstub connect (fake backend)."""
         target = self.dbg.CreateTarget("")
         error = lldb.SBError()
         process = target.ConnectRemote(
@@ -303,24 +285,20 @@ class BridgeTestCase(unittest.TestCase):
         gdb_port = launch_gdb_server(platform_port)
         return self._connect(gdb_port)
 
-    def _stopped_at_breakpoint(self, fx, backend):
-        self.dbg.SetAsync(False)
-        if backend == "fake":
-            target, process = self._connect(self._start_fake(fx))
-        else:
-            platform_port = self._start_platform(fx)
-            target, process = self._connect_via_platform(platform_port)
-            bp = target.BreakpointCreateByName(fx["break_func"])
-            self.assertTrue(
-                bp.IsValid() and bp.GetNumLocations() >= 1,
-                "breakpoint on %s" % fx["break_func"],
-            )
-            process.Continue()
-            self.assertEqual(process.GetState(), lldb.eStateStopped)
+    def _stopped_at_breakpoint(self, fx):
+        platform_port = self._start_platform(fx)
+        target, process = self._connect_via_platform(platform_port)
+        bp = target.BreakpointCreateByName(fx["break_func"])
+        self.assertTrue(
+            bp.IsValid() and bp.GetNumLocations() >= 1,
+            "breakpoint on %s" % fx["break_func"],
+        )
+        process.Continue()
+        self.assertEqual(process.GetState(), lldb.eStateStopped)
         return target, process
 
-    def _check_call_stack(self, fx, backend):
-        target, process = self._stopped_at_breakpoint(fx, backend)
+    def _check_call_stack(self, fx):
+        target, process = self._stopped_at_breakpoint(fx)
         self.assertEqual(target.GetNumModules(), 1)
         thread = process.GetThreadAtIndex(0)
         self.assertTrue(thread.IsValid())
@@ -336,80 +314,41 @@ class BridgeTestCase(unittest.TestCase):
 
 
 class TestLocals(BridgeTestCase):
-    def test_locals_fake(self):
-        """qWasmLocal: shadow-stack pointer; lldb reads values from linear memory."""
-        WASM_LOCAL_ADDR = 0x103E0
-        local_bytes = (
-            "0000000000000000020000000100000000000000020000000100000000000000"
-        )
-        port = self._start_fake(
-            {
-                "name": "simple-locals",
-                "module": str(REPO / "test" / "lldb" / "simple.wasm"),
-                "fake_call_stack": [0x019C, 0x01E5, 0x01FE],
-                "frameLocals": [[0, 0, WASM_LOCAL_ADDR]],
-                "memory": {
-                    "base": WASM_LOCAL_ADDR,
-                    "size": 0x20000,
-                    "bytesHex": local_bytes,
-                },
-            }
-        )
-        self.dbg.SetAsync(False)
-        target, process = self._connect(port)
-        thread = process.GetThreadAtIndex(0)
-        frame0 = thread.GetFrameAtIndex(0)
-        self.assertIn("add", frame0.GetFunctionName())
-        a = frame0.FindVariable("a")
-        self.assertTrue(a.IsValid(), "FindVariable('a')")
-        self.assertEqual(a.GetValueAsUnsigned(), 1)
-        b = frame0.FindVariable("b")
-        self.assertTrue(b.IsValid(), "FindVariable('b')")
-        self.assertEqual(b.GetValueAsUnsigned(), 2)
-
-    @skip_unless_live
     def test_locals_firefox(self):
-        """Live-Firefox locals (M4): compute_factorial(n=10) -> n == 10."""
+        """Live-Firefox locals: compute_factorial(n=10) -> n == 10."""
         fx = FIXTURES[0]
-        target, process = self._stopped_at_breakpoint(fx, "firefox")
+        target, process = self._stopped_at_breakpoint(fx)
         frame0 = process.GetThreadAtIndex(0).GetFrameAtIndex(0)
         n = frame0.FindVariable("n")
         self.assertTrue(n.IsValid(), "FindVariable('n')")
         self.assertEqual(n.GetValueAsUnsigned(), 10)
 
 
-# ---- call-stack tests (per-fixture × backend) --------------------------
+# ---- call-stack tests (per-fixture) ------------------------------------
 
 
 class TestCallStack(BridgeTestCase):
     pass
 
 
-def _make_call_stack_test(fx, backend):
+def _make_call_stack_test(fx):
     def test(self):
-        self._check_call_stack(fx, backend)
+        self._check_call_stack(fx)
 
-    test.__name__ = "test_%s_%s" % (fx["name"], backend)
-    test.__doc__ = "%s: wasm call stack + DWARF symbolication (%s)" % (
-        fx["name"],
-        backend,
-    )
-    if backend == "firefox":
-        test = skip_unless_live(test)
+    test.__name__ = "test_%s" % fx["name"]
+    test.__doc__ = "%s: wasm call stack + DWARF symbolication" % fx["name"]
     return test
 
 
 for _fx in FIXTURES:
-    for _backend in ("fake", "firefox"):
-        _t = _make_call_stack_test(_fx, _backend)
-        setattr(TestCallStack, _t.__name__, _t)
+    _t = _make_call_stack_test(_fx)
+    setattr(TestCallStack, _t.__name__, _t)
 
 
-# ---- live-Firefox-only tests -------------------------------------------
+# ---- live-Firefox behaviour tests --------------------------------------
 
 
 class TestLiveFirefox(BridgeTestCase):
-    @skip_unless_live
     def test_breakpoint_by_line(self):
         """Source breakpoint by file:line resolves and is hit."""
         platform_port = self._start_platform(FIXTURES[0])
@@ -424,7 +363,6 @@ class TestLiveFirefox(BridgeTestCase):
             frame0.GetLineEntry().GetFileSpec().GetFilename(), "math.cpp"
         )
 
-    @skip_unless_live
     def test_two_breakpoints_continue(self):
         """Two breakpoints; continue hits them in execution order."""
         platform_port = self._start_platform(FIXTURES[0])
@@ -439,7 +377,6 @@ class TestLiveFirefox(BridgeTestCase):
         self.assertIn("factorial", name)
         self.assertNotIn("compute", name)
 
-    @skip_unless_live
     def test_struct_variable(self):
         """Inspect a struct through a pointer arg: ledger txn->amount == 30."""
         fx = next(f for f in FIXTURES if f["name"] == "ledger")
@@ -455,7 +392,6 @@ class TestLiveFirefox(BridgeTestCase):
         self.assertTrue(amount.IsValid(), "txn->amount")
         self.assertEqual(amount.GetValueAsUnsigned(), 30)
 
-    @skip_unless_live
     def test_step_instruction(self):
         """StepInstruction advances the wasm PC without leaving the function."""
         platform_port = self._start_platform(FIXTURES[0])
@@ -474,7 +410,6 @@ class TestLiveFirefox(BridgeTestCase):
             process.GetSelectedThread().GetFrameAtIndex(0).GetFunctionName() or "",
         )
 
-    @skip_unless_live
     def test_step_in_out(self):
         """StepInstruction into callee; StepOut returns to caller."""
         platform_port = self._start_platform(FIXTURES[0])
@@ -499,7 +434,6 @@ class TestLiveFirefox(BridgeTestCase):
             "compute_factorial", t.GetFrameAtIndex(0).GetFunctionName() or ""
         )
 
-    @skip_unless_live
     def test_step_over(self):
         """StepOver advances the PC without increasing call stack depth."""
         platform_port = self._start_platform(FIXTURES[0])
@@ -518,7 +452,6 @@ class TestLiveFirefox(BridgeTestCase):
         self.assertNotEqual(t.GetFrameAtIndex(0).GetPC(), pc_before)
         self.assertLessEqual(t.GetNumFrames(), depth_before)
 
-    @skip_unless_live
     def test_dynamic_dispatch(self):
         """Virtual call through a base pointer resolves to the concrete override."""
         fx = next(f for f in FIXTURES if f["name"] == "oop")

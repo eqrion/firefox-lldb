@@ -57,21 +57,11 @@ component-transpile:
 # Rebuild and re-transpile (+patch) the vendored component in one step.
 component: component-build component-transpile
 
-# Run the worker-architecture prototype (component on a Worker, debuggee bridged
-# to the main thread over a synchronous SharedArrayBuffer RPC).
-proto-worker:
-    node --import tsx src/gdb/worker/proto-host.mjs
-
-# Run the lldb API bridge suite against the deterministic Fake backend (fast,
-# no browser). LLVM defaults to the sibling llvm-project checkout.
+# Run the lldb API bridge suite against headless Firefox. Needs:
+#   - wasm-plugin lldb at LLVM/build/bin/lldb (defaults to ../llvm-project)
+#   - example fixtures built: cd ../examples && just build-fixtures
 test-lldb LLVM="../llvm-project":
     FIREFOX_LLDB_LLDB={{LLVM}}/build/bin/lldb \
-        python3 test/lldb/run_bridge_tests.py
-
-# Same suite, additionally against real headless Firefox (needs the example
-# fixtures built: cd ../examples && just build-fixtures).
-test-lldb-live LLVM="../llvm-project":
-    FIREFOX_LLDB_LIVE=1 FIREFOX_LLDB_LLDB={{LLVM}}/build/bin/lldb \
         python3 test/lldb/run_bridge_tests.py
 
 # Full-pipeline integration test: live Firefox (RDP) -> RdpDebuggee -> gdbstub
