@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Wasm Debugger Test - Ledger</title>
+  <style>
+    body { font-family: monospace; max-width: 600px; margin: 2rem auto; padding: 0 1rem; }
+    .result { margin-top: 0.5rem; color: #080; }
+  </style>
+</head>
+<body>
+  <h1>Account ledger</h1>
+  <button onclick="run()">run_ledger()</button>
+  <div class="result" id="result"></div>
+
+  <script src="ledger.js"></script>
+  <script>
+    let runLedger;
+    LedgerModule().then(mod => {
+      runLedger = mod.cwrap('run_ledger', 'number', []);
+    });
+    function run() {
+      document.getElementById('result').textContent = `run_ledger() = ${runLedger()}`;
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Wasm Debugger Test</title>
+  <style>
+    body { font-family: monospace; max-width: 600px; margin: 2rem auto; padding: 0 1rem; }
+    label { display: inline-block; width: 3rem; }
+    button { margin-left: 0.5rem; }
+    .result { margin-top: 0.5rem; color: #080; }
+    .row { margin: 1rem 0; }
+  </style>
+</head>
+<body>
+  <h1>Wasm Debugger Test</h1>
+
+  <div class="row">
+    <label>n =</label>
+    <input id="fac-n" type="number" value="10" size="4">
+    <button onclick="runFactorial()">factorial(n)</button>
+    <div class="result" id="fac-result"></div>
+  </div>
+
+  <div class="row">
+    <label>n =</label>
+    <input id="fib-n" type="number" value="20" size="4">
+    <button onclick="runFib()">fib(n)</button>
+    <div class="result" id="fib-result"></div>
+  </div>
+
+  <div class="row">
+    <label>lo =</label>
+    <input id="sum-lo" type="number" value="1" size="4">
+    <label>hi =</label>
+    <input id="sum-hi" type="number" value="100" size="4">
+    <button onclick="runSum()">sum_range(lo, hi)</button>
+    <div class="result" id="sum-result"></div>
+  </div>
+
+  <script src="math.js"></script>
+  <script>
+    let factorial, fib, sumRange;
+
+    MathModule().then(mod => {
+      factorial = mod.cwrap('compute_factorial', 'number', ['number']);
+      fib       = mod.cwrap('compute_fib',       'number', ['number']);
+      sumRange  = mod.cwrap('sum_range',          'number', ['number', 'number']);
+    });
+
+    function runFactorial() {
+      const n = parseInt(document.getElementById('fac-n').value);
+      document.getElementById('fac-result').textContent = `factorial(${n}) = ${factorial(n)}`;
+    }
+
+    function runFib() {
+      const n = parseInt(document.getElementById('fib-n').value);
+      document.getElementById('fib-result').textContent = `fib(${n}) = ${fib(n)}`;
+    }
+
+    function runSum() {
+      const lo = parseInt(document.getElementById('sum-lo').value);
+      const hi = parseInt(document.getElementById('sum-hi').value);
+      document.getElementById('sum-result').textContent = `sum_range(${lo}, ${hi}) = ${sumRange(lo, hi)}`;
+    }
+  </script>
+</body>
+</html>

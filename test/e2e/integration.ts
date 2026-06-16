@@ -2,12 +2,12 @@
 // gdbstub component (worker) -> raw GDB client. Verifies the wasm call stack and
 // module bytes served to a GDB client originate from the live browser.
 //
-//   node --import tsx rdp-integration.ts
+//   node --import tsx test/e2e/integration.ts
 import net from "node:net";
-import { RdpWasmSession } from "../rdp/session.js";
-import { RdpDebuggee } from "./rdp-debuggee.js";
+import { RdpWasmSession } from "../../src/rdp/session.js";
+import { RdpDebuggee } from "../../src/gdb/rdp-debuggee.js";
 // @ts-expect-error - .mjs host has no types
-import { startGdbServer } from "./worker/host.mjs";
+import { startGdbServer } from "../../src/gdb/worker/host.mjs";
 
 const RDP_PORT = Number(process.argv[2] ?? 6080);
 const PAGE = process.argv[3] ?? "http://localhost:8080/index.html";

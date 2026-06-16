@@ -1,21 +1,20 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { RspServer } from "../protocol/rsp-server.js";
-import { RspClient } from "../test-utils/rsp-client.js";
-import { GdbServerSpawner, type GdbServerLauncher } from "./gdb-server-spawner.js";
-import { DefaultProcessProvider } from "./process-provider.js";
-import { PlatformServer } from "./platform-server.js";
-import { asciiToHex, hexToAscii } from "../protocol/hex.js";
+import { RspServer } from "../../src/protocol/rsp-server.js";
+import { RspClient } from "./rsp-client.js";
+import { GdbServerSpawner, type GdbServerLauncher } from "../../src/platform/gdb-server-spawner.js";
+import { PlatformServer } from "../../src/platform/platform-server.js";
+import { asciiToHex, hexToAscii } from "../../src/protocol/hex.js";
 
 // Fake launcher: starts a trivial RspServer on the given port so
 // qLaunchGDBServer tests can verify the spawned port is reachable.
 const fakeLauncher: GdbServerLauncher = async ({ port }) => {
   const srv = new RspServer(
-    () => ({
+    {
       async handle(payload) {
         return payload.toString("latin1").startsWith("qSupported") ? "PacketSize=4096" : "";
       },
-    }),
+    },
     { singleConnection: true }
   );
   await srv.listen(port);
@@ -28,13 +27,7 @@ let client: RspClient;
 
 before(async () => {
   spawner = new GdbServerSpawner(fakeLauncher);
-  server = new RspServer(
-    () =>
-      new PlatformServer({
-        spawner,
-        processes: new DefaultProcessProvider(),
-      })
-  );
+  server = new RspServer(new PlatformServer({ spawner }));
   const port = await server.listen(0);
   client = await RspClient.connect(port);
 });

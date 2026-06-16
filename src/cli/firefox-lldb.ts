@@ -1,167 +1,113 @@
-// Unified entry point for the firefox-lldb bridge.
+// Convenience wrapper: launch firefox-lldb-server, wait for it to be ready,
+// then exec lldb pre-configured to connect to it.
 //
-// Starts an LLDB platform server backed by Firefox over RDP. LLDB attaches
-// with:
-//   (lldb) platform select remote-gdb-server
-//   (lldb) platform connect connect://localhost:<port>
-//   (lldb) platform process launch -- <url>
+// Usage (dev):
+//   node --import tsx src/cli/firefox-lldb.ts [--lldb <path>] [server flags]
 //
-// Modes:
-//   --launch  (default) Launch a fresh headless Firefox with a throwaway profile.
-//   --connect           Connect to an already-running Firefox.
+// Server flags passed through: --port, --rdp-port, --url, --firefox,
+//   --headless, --launch (default), --connect, --verbose / -v.
 //
-// Flags:
-//   --port <N>          Platform server RSP port (default 1234).
-//   --rdp-port <N>      Firefox RDP port (default 6080).
-//   --url <U>           Starting URL (navigated to when LLDB spawns a process;
-//                       also loaded at startup in --launch mode for quick use).
-//   --firefox <path>    Firefox binary override.
-//   --headless          Run Firefox headlessly (default off; on for tests).
-//   --fire <js>         Evaluate JS after the first breakpoint arms (test use).
-//   --verbose / -v      Log debug output.
+// The lldb binary is taken from $LLDB or "lldb" on PATH.
 
-import { RspServer } from "../protocol/rsp-server.js";
-import { GdbServerSpawner, type GdbServerLauncher } from "../platform/gdb-server-spawner.js";
-import { DefaultProcessProvider } from "../platform/process-provider.js";
-import { PlatformServer } from "../platform/platform-server.js";
-import { RdpWasmSession } from "../rdp/session.js";
-import { RdpDebuggee } from "../gdb/rdp-debuggee.js";
-import { launchFirefox, type FirefoxHandle } from "../rdp/firefox.js";
-// @ts-expect-error - .mjs host has no type declarations
-import { startGdbServer } from "../gdb/worker/host.mjs";
-import { consoleLogger } from "./logger.js";
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 interface Args {
-  connect: boolean;
-  headless: boolean;
-  port: number;
-  rdpPort: number;
+  lldb: string;
   url?: string;
-  firefox?: string;
-  fire?: string;
-  verbose: boolean;
+  serverArgv: string[];
 }
 
 function parseArgs(argv: string[]): Args {
   const a: Args = {
-    connect: false,
-    headless: false,
-    port: 1234,
-    rdpPort: 6080,
-    verbose: false,
+    lldb: process.env.LLDB ?? "lldb",
+    serverArgv: [],
   };
   for (let i = 0; i < argv.length; i++) {
     const v = argv[i];
-    if (v === "--connect") a.connect = true;
-    else if (v === "--launch") a.connect = false;
-    else if (v === "--headless") a.headless = true;
-    else if (v === "--port" || v === "-p") a.port = Number(argv[++i]);
-    else if (v === "--rdp-port") a.rdpPort = Number(argv[++i]);
-    else if (v === "--url") a.url = argv[++i];
-    else if (v === "--firefox") a.firefox = argv[++i];
-    else if (v === "--fire") a.fire = argv[++i];
-    else if (v === "--verbose" || v === "-v") a.verbose = true;
+    if (v === "--lldb") {
+      a.lldb = argv[++i];
+    } else if (v === "--url") {
+      a.url = argv[i + 1];
+      a.serverArgv.push(v, argv[++i]);
+    } else {
+      a.serverArgv.push(v);
+    }
   }
   return a;
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-async function connectWithRetry(rdpPort: number): Promise<RdpWasmSession> {
-  let lastErr: unknown;
-  for (let i = 0; i < 80; i++) {
-    try {
-      return await RdpWasmSession.start(rdpPort);
-    } catch (err) {
-      lastErr = err;
-      await sleep(250);
-    }
-  }
-  throw new Error(`could not connect to Firefox RDP on ${rdpPort}: ${lastErr}`);
-}
-
-async function waitForWasm(session: RdpWasmSession): Promise<void> {
-  let wasm = (await session.wasmSources())[0];
-  for (let i = 0; i < 80 && !wasm; i++) {
-    await sleep(100);
-    wasm = (await session.wasmSources())[0];
-  }
-  if (!wasm) throw new Error("no wasm source appeared");
+function resolveServerScript(): string {
+  // When packaged (dist/), the server lives alongside this file.
+  // In dev (src/cli/), reference the sibling source file.
+  const here = __dirname;
+  const devScript = path.join(here, "firefox-lldb-server.ts");
+  const builtScript = path.join(here, "firefox-lldb-server.js");
+  return existsSync(devScript) ? devScript : builtScript;
 }
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
-  const logger = consoleLogger(args.verbose || process.env.DEBUG === "1");
-  const launching = !args.connect;
 
-  let firefox: FirefoxHandle | undefined;
-  if (launching) {
-    firefox = await launchFirefox({
-      rdpPort: args.rdpPort,
-      binary: args.firefox,
-      headless: args.headless,
+  const serverScript = resolveServerScript();
+  const nodeArgs = serverScript.endsWith(".ts")
+    ? ["--import", "tsx", serverScript]
+    : [serverScript];
+
+  const server = spawn(process.execPath, [...nodeArgs, ...args.serverArgv], {
+    stdio: ["ignore", "pipe", "inherit"],
+  });
+
+  let port: number | undefined;
+
+  // Wait for "platform server ready on connect://localhost:<port>"
+  await new Promise<void>((resolve, reject) => {
+    let buf = "";
+    server.stdout!.setEncoding("utf8");
+    server.stdout!.on("data", (chunk: string) => {
+      buf += chunk;
+      process.stdout.write(chunk);
+      const m = buf.match(/platform server ready on connect:\/\/localhost:(\d+)/);
+      if (m) {
+        port = Number(m[1]);
+        resolve();
+      }
     });
-    logger.info("launched Firefox");
+    server.on("exit", (code) => {
+      reject(new Error(`server exited with code ${code} before becoming ready`));
+    });
+  });
+
+  // Pipe remaining server stdout to our stdout.
+  server.stdout!.on("data", (chunk: string) => process.stdout.write(chunk));
+
+  const lldbArgs = [
+    "-o",
+    "platform select remote-gdb-server",
+    "-o",
+    `platform connect connect://localhost:${port}`,
+  ];
+  if (args.url) {
+    lldbArgs.push("-o", `platform process launch -- ${args.url}`);
   }
 
-  const launcher: GdbServerLauncher = async ({ port, url }) => {
-    const session = launching
-      ? await connectWithRetry(args.rdpPort)
-      : await RdpWasmSession.start(args.rdpPort);
+  const lldb = spawn(args.lldb, lldbArgs, { stdio: "inherit" });
 
-    if (url) {
-      await session.navigate(url);
-      logger.debug(`[rdp] on ${session.targetUrl}`);
-      await waitForWasm(session);
-    } else if (!session.threadActor) {
-      await sleep(500);
-    }
-
-    const fire = args.fire;
-    const onFirstContinue = fire
-      ? () => {
-          const wrapped = `(function poll(){try{${fire}}catch(e){setTimeout(poll,20);}})()`;
-          session.evaluate(wrapped).catch(() => {});
-        }
-      : undefined;
-
-    const debuggee = new RdpDebuggee(session, onFirstContinue ? { onFirstContinue } : undefined);
-    const { ready, stop } = startGdbServer({
-      dispatch: (req: unknown) => debuggee.dispatch(req as never),
-      port,
-      onInfo: (m: string) => logger.debug(`[component] ${m}`),
-    });
-    await ready;
-    return {
-      stop: () => {
-        stop();
-        session.close();
-      },
-    };
+  const cleanup = () => {
+    server.kill();
+    lldb.kill();
   };
+  process.on("SIGINT", cleanup);
+  process.on("SIGTERM", cleanup);
 
-  const spawner = new GdbServerSpawner(launcher);
-  const server = new RspServer(
-    () =>
-      new PlatformServer({
-        spawner,
-        processes: new DefaultProcessProvider(),
-        defaultUrl: args.url,
-      }),
-    { logger }
-  );
-
-  const bound = await server.listen(args.port);
-  logger.info(`platform server ready on connect://localhost:${bound}`);
-
-  const shutdown = async () => {
-    await spawner.killAll();
-    await server.close();
-    await firefox?.close();
+  lldb.on("exit", () => {
+    server.kill();
     process.exit(0);
-  };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  });
 }
 
 main().catch((err) => {

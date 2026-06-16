@@ -80,7 +80,7 @@ Key modules:
 - `src/gdb/rdp-debuggee.ts` (`RdpDebuggee`) — the WIT `debuggee` impl over RDP.
 - `src/gdb/worker/host.mjs`, `component-worker.mjs`, `wire.mjs` — the worker +
   SAB RPC bridge.
-- `src/cli/wasm-debug.ts` — the bridge entry point (`just bridge`).
+- `src/cli/firefox-lldb-server.ts` — the platform server entry point (`just launch` / `just connect`).
 
 ### Enabling wasm debugging in Firefox (the `observeWasm` timing problem)
 
@@ -134,10 +134,10 @@ section is mapped at `(module_id << 32)`.
 
 ```sh
 just install            # npm install
-just test               # unit tests (protocol + platform server)
+npm test                # unit tests (protocol + platform server)
 just component          # (re)build the vendored component + transpile (+patch); needs `rustup target add wasm32-wasip2`
-just platform           # run the M1 platform server
-just bridge             # run the wasm bridge (connects to Firefox, serves LLDB)
+just launch             # launch Firefox + platform server (LLDB connects manually)
+firefox-lldb --launch   # launch server + spawn lldb pre-connected (wrapper)
 ```
 
 `just component` builds `vendor/gdbstub-component` to a `wasm32-wasip2`
@@ -151,13 +151,13 @@ Primary strategy (per the original design): run LLDB's own test suites rather
 than writing our own.
 
 - **Unit tests** (`npm test`) cover the protocol layer and the platform server.
-- **lldb API suite** (`test/lldb/run_bridge_tests.py`) — fixture-driven tests run
-  against headless Firefox via the real bridge. Needs a wasm-plugin lldb build
-  (from `../llvm-project` with `LLDB_ENABLE_PYTHON=ON`).
+- **lldb API suite** (`test/e2e/run.py`) — fixture-driven tests run against
+  headless Firefox via the real bridge. Needs a wasm-plugin lldb build (from
+  `../llvm-project` with `LLDB_ENABLE_PYTHON=ON`).
 
   Fixtures: `factorial`, `oop` (virtual dispatch), `parser` (recursive descent),
-  `ledger` (struct/array state) — built from `../examples/*` (`cd ../examples &&
-  just build-fixtures`). Each asserts the wasm call stack resolves to the right
+  `ledger` (struct/array state) — in `test/e2e/fixtures/`, rebuilt with
+  `just build-fixtures`. Each asserts the wasm call stack resolves to the right
   function + source via embedded DWARF. Offsets are derived with
   `scripts/wasm-offsets.mjs` (Firefox `where.line` = code-section offset + DWARF
   address).
@@ -165,7 +165,7 @@ than writing our own.
   Behaviour tests: breakpoint by `file:line`; multiple breakpoints +
   continue-to-next (`compute_factorial` → recursive `factorial`); struct
   inspection through a pointer via the SB value API (`ledger` `txn->amount ==
-  30`); dynamic dispatch (virtual call → concrete override with dispatch site on
+30`); dynamic dispatch (virtual call → concrete override with dispatch site on
   stack); `StepInstruction` (PC advances); `StepIn`→`StepOut` round-trip across a
   call boundary; `StepOver` stays at the same depth; locals + linear memory via
   `FindVariable`.
@@ -174,21 +174,23 @@ than writing our own.
   just test-lldb
   ```
 
-- **Live Firefox (manual)** — `just integration` (raw GDB client) or
-  `just live ../examples/oop "run()"` (serve one example for an external lldb).
+- **Live Firefox (manual)** — `just integration` (raw GDB client against a live
+  Firefox with a wasm page loaded).
 
 ## Repo layout
 
 ```
-src/protocol/   RSP packet framing, hex, generic TCP server
-src/platform/   M1 platform server (filesystem, process list, qLaunchGDBServer)
-src/rdp/        RDP client + RdpWasmSession + headless Firefox launcher
-src/gdb/        RdpDebuggee, worker host + SAB RPC, generated/ (jco output)
-src/cli/        entry points (platform server, firefox-lldb)
-test/lldb/      fixture-driven lldb API test suite
-vendor/         the vendored wasmtime gdbstub-component (+ MODIFICATIONS.md)
-scripts/        patch-generated.mjs (jco patch), wasm-offsets.mjs (fixture offsets)
-../examples/    wasm fixtures (simple/oop/parser/ledger) — emscripten + DWARF
+src/protocol/        RSP packet framing, hex, generic TCP server
+src/platform/        platform server (process list, qLaunchGDBServer)
+src/rdp/             RDP client + RdpWasmSession + headless Firefox launcher
+src/gdb/             RdpDebuggee, worker host + SAB RPC, generated/ (jco output)
+src/cli/             firefox-lldb-server (platform server), firefox-lldb (wrapper)
+test/unit/           unit tests (protocol + platform server)
+test/e2e/run.py      fixture-driven lldb API test suite
+test/e2e/fixtures/   emscripten wasm fixtures (simple/oop/parser/ledger)
+test/e2e/integration.ts  raw GDB client pipeline test (manual)
+vendor/              vendored wasmtime gdbstub-component (+ MODIFICATIONS.md)
+scripts/             patch-generated.mjs (jco patch), wasm-offsets.mjs
 ```
 
 ## Vendoring & patches

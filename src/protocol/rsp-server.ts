@@ -123,7 +123,7 @@ export class RspServer {
   #port = 0;
 
   constructor(
-    handlerFactory: () => RspHandler,
+    handler: RspHandler,
     options: { logger?: RspLogger; singleConnection?: boolean } = {}
   ) {
     this.#log = options.logger ?? noopLogger;
@@ -137,7 +137,7 @@ export class RspServer {
       }
       socket.setNoDelay(true);
       this.#log.info("client connected");
-      const session = new RspSession(socket, handlerFactory(), this.#log);
+      const session = new RspSession(socket, handler, this.#log);
       active = session;
       socket.on("close", () => {
         if (active === session) active = null;

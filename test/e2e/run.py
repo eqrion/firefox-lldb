@@ -4,12 +4,12 @@
 Requires headless Firefox and a wasm-plugin lldb build.
 
 Usage:
-    FIREFOX_LLDB_LLDB=../llvm-project/build/bin/lldb \\
-        python3 test/lldb/run_bridge_tests.py
+    LLDB=../llvm-project/build/bin/lldb \\
+        python3 test/e2e/run.py
 
 Environment variables:
-    FIREFOX_LLDB_LLDB   Path to the wasm-plugin lldb binary (default: "lldb").
-    LLDB_PYTHON_PATH    lldb Python module dir override (derived from FIREFOX_LLDB_LLDB if unset).
+    LLDB   Path to the wasm-plugin lldb binary (default: "lldb").
+    LLDB_PYTHON_PATH    lldb Python module dir override (derived from LLDB if unset).
     FIREFOX_LLDB_NODE   Node binary to use (default: "node").
 """
 
@@ -31,9 +31,8 @@ from urllib.parse import unquote
 # ---- env / paths -------------------------------------------------------
 
 REPO = Path(__file__).resolve().parent.parent.parent
-WASM_DEBUG = REPO.parent
 NODE = os.environ.get("FIREFOX_LLDB_NODE", "node")
-LLDB_BINARY = os.environ.get("FIREFOX_LLDB_LLDB", "lldb")
+LLDB_BINARY = os.environ.get("LLDB", "lldb")
 
 
 def _bootstrap_lldb():
@@ -56,7 +55,7 @@ def _bootstrap_lldb():
     except ImportError as e:
         sys.exit(
             f"Cannot import lldb from {pypath!r}: {e}\n"
-            "Set FIREFOX_LLDB_LLDB=<path to wasm-plugin lldb binary> or LLDB_PYTHON_PATH=<python dir>."
+            "Set LLDB=<path to wasm-plugin lldb binary> or LLDB_PYTHON_PATH=<python dir>."
         )
 
 
@@ -79,8 +78,8 @@ def _check_wasm_plugin():
     if "not found" in msg.lower() or "invalid" in msg.lower() and "wasm" in msg.lower():
         sys.exit(
             f"The wasm process plugin is not available in {LLDB_BINARY!r}.\n"
-            "Set FIREFOX_LLDB_LLDB=<path to a wasm-plugin lldb build>, e.g.:\n"
-            "  FIREFOX_LLDB_LLDB=../llvm-project/build/bin/lldb python3 test/lldb/run_bridge_tests.py"
+            "Set LLDB=<path to a wasm-plugin lldb build>, e.g.:\n"
+            "  LLDB=../llvm-project/build/bin/lldb python3 test/e2e/run.py"
         )
 
 
@@ -91,37 +90,37 @@ _check_wasm_plugin()
 FIXTURES = [
     {
         "name": "factorial",
-        "module": "examples/simple/math.wasm",
+        "module": "test/e2e/fixtures/simple/math.wasm",
         "expect_func": "compute_factorial",
         "expect_file": "math.cpp",
-        "page_dir": "examples/simple",
+        "page_dir": "test/e2e/fixtures/simple",
         "fire": "runFactorial()",
         "break_func": "compute_factorial",
     },
     {
         "name": "oop",
-        "module": "examples/oop/oop.wasm",
+        "module": "test/e2e/fixtures/oop/oop.wasm",
         "expect_func": "area",
         "expect_file": "oop.cpp",
-        "page_dir": "examples/oop",
+        "page_dir": "test/e2e/fixtures/oop",
         "fire": "run()",
         "break_func": "area",
     },
     {
         "name": "parser",
-        "module": "examples/parser/parser.wasm",
+        "module": "test/e2e/fixtures/parser/parser.wasm",
         "expect_func": "parse_factor",
         "expect_file": "parser.cpp",
-        "page_dir": "examples/parser",
+        "page_dir": "test/e2e/fixtures/parser",
         "fire": "run()",
         "break_func": "parse_factor",
     },
     {
         "name": "ledger",
-        "module": "examples/ledger/ledger.wasm",
+        "module": "test/e2e/fixtures/ledger/ledger.wasm",
         "expect_func": "apply_transaction",
         "expect_file": "ledger.cpp",
-        "page_dir": "examples/ledger",
+        "page_dir": "test/e2e/fixtures/ledger",
         "fire": "run()",
         "break_func": "apply_transaction",
     },
@@ -250,13 +249,13 @@ class BridgeTestCase(unittest.TestCase):
         """Start the unified CLI in launch+headless mode. Returns the platform port."""
         platform_port = free_port()
         rdp_port = free_port()
-        static_server, http_port = start_static_server(str(WASM_DEBUG / fx["page_dir"]))
+        static_server, http_port = start_static_server(str(REPO / fx["page_dir"]))
         self.addCleanup(static_server.shutdown)
         url = f"http://127.0.0.1:{http_port}/index.html"
         self._spawn(
             [
                 NODE, "--import", "tsx",
-                str(REPO / "src" / "cli" / "firefox-lldb.ts"),
+                str(REPO / "src" / "cli" / "firefox-lldb-server.ts"),
                 "--launch", "--headless",
                 "--port", str(platform_port),
                 "--rdp-port", str(rdp_port),

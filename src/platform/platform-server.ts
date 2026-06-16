@@ -9,17 +9,23 @@ import os from "node:os";
 import type { RspHandler, RspSession } from "../protocol/rsp-server.js";
 import { asciiToHex, hexToAscii } from "../protocol/hex.js";
 import type { GdbServerSpawner } from "./gdb-server-spawner.js";
-import type { ProcessInfo, ProcessProvider } from "./process-provider.js";
+
+interface ProcessInfo {
+  pid: number;
+  name: string;
+  triple: string;
+  parentPid: number;
+  uid: number;
+  gid: number;
+}
 
 export interface PlatformServerDeps {
   spawner: GdbServerSpawner;
-  processes: ProcessProvider;
   defaultUrl?: string;
 }
 
 export class PlatformServer implements RspHandler {
   #spawner: GdbServerSpawner;
-  #processes: ProcessProvider;
   #defaultUrl?: string;
 
   // Per-connection state.
@@ -30,8 +36,20 @@ export class PlatformServer implements RspHandler {
 
   constructor(deps: PlatformServerDeps) {
     this.#spawner = deps.spawner;
-    this.#processes = deps.processes;
     this.#defaultUrl = deps.defaultUrl;
+  }
+
+  #listProcesses(): ProcessInfo[] {
+    return [
+      {
+        pid: process.pid,
+        name: "firefox-lldb",
+        triple: "wasm32-unknown-unknown-wasm",
+        parentPid: process.ppid ?? 0,
+        uid: typeof process.getuid === "function" ? process.getuid() : 0,
+        gid: typeof process.getgid === "function" ? process.getgid() : 0,
+      },
+    ];
   }
 
   async handle(payload: Buffer, session: RspSession): Promise<Uint8Array | string | null> {
@@ -115,14 +133,14 @@ export class PlatformServer implements RspHandler {
     );
   }
 
-  async #processInfoPID(pid: number): Promise<string> {
-    const match = (await this.#processes.list()).find((p) => p.pid === pid);
+  #processInfoPID(pid: number): string {
+    const match = this.#listProcesses().find((p) => p.pid === pid);
     return match ? this.#encodeProcess(match) : "E01";
   }
 
-  async #firstProcessInfo(data: string): Promise<string> {
+  #firstProcessInfo(data: string): string {
     const criteria = parseKeyVals(data.includes(":") ? data.slice(data.indexOf(":") + 1) : "");
-    let list = await this.#processes.list();
+    let list = this.#listProcesses();
     const wantName = criteria.get("name");
     if (wantName !== undefined) {
       const name = hexToAscii(wantName);

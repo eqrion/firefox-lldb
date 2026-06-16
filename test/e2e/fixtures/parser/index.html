@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Wasm Debugger Test - Parser</title>
+  <style>
+    body { font-family: monospace; max-width: 600px; margin: 2rem auto; padding: 0 1rem; }
+    .result { margin-top: 0.5rem; color: #080; }
+  </style>
+</head>
+<body>
+  <h1>Recursive-descent parser</h1>
+  <button onclick="run()">eval_expr("2 + 3 * 4")</button>
+  <div class="result" id="result"></div>
+
+  <script src="parser.js"></script>
+  <script>
+    let evalExpr;
+    ParserModule().then(mod => {
+      evalExpr = mod.cwrap('eval_expr', 'number', []);
+    });
+    function run() {
+      document.getElementById('result').textContent = `eval_expr() = ${evalExpr()}`;
+    }
+  </script>
+</body>
+</html>
