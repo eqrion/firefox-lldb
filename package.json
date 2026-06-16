@@ -27,11 +27,14 @@
     "component:build": "cd vendor/gdbstub-component && cargo build --release --target wasm32-wasip2",
     "component:transpile": "npx jco transpile vendor/gdbstub-component/target/wasm32-wasip2/release/firefox_lldb_gdbstub_component.wasm -o src/gdb/generated --name gdbstub --instantiation async && node scripts/patch-generated.mjs",
     "component": "npm run component:build && npm run component:transpile",
-    "build:fixtures": "npm run build:fixture-simple && npm run build:fixture-oop && npm run build:fixture-parser && npm run build:fixture-ledger",
+    "build:fixtures": "npm run build:fixture-simple && npm run build:fixture-oop && npm run build:fixture-parser && npm run build:fixture-ledger && npm run build:fixture-types && npm run build:fixture-heap && npm run build:fixture-trap",
     "build:fixture-simple": "cd test/e2e/fixtures/simple && ${EMSDK:+$EMSDK/upstream/emscripten/}emcc math.cpp -o math.js -g -O0 -s EXPORTED_RUNTIME_METHODS='[\"cwrap\"]' -s MODULARIZE=1 -s EXPORT_NAME=MathModule",
     "build:fixture-oop": "cd test/e2e/fixtures/oop && ${EMSDK:+$EMSDK/upstream/emscripten/}emcc oop.cpp -o oop.js -g -O0 -s EXPORTED_RUNTIME_METHODS='[\"cwrap\"]' -s MODULARIZE=1 -s EXPORT_NAME=OopModule",
     "build:fixture-parser": "cd test/e2e/fixtures/parser && ${EMSDK:+$EMSDK/upstream/emscripten/}emcc parser.cpp -o parser.js -g -O0 -s EXPORTED_RUNTIME_METHODS='[\"cwrap\"]' -s MODULARIZE=1 -s EXPORT_NAME=ParserModule",
     "build:fixture-ledger": "cd test/e2e/fixtures/ledger && ${EMSDK:+$EMSDK/upstream/emscripten/}emcc ledger.cpp -o ledger.js -g -O0 -s EXPORTED_RUNTIME_METHODS='[\"cwrap\"]' -s MODULARIZE=1 -s EXPORT_NAME=LedgerModule",
+    "build:fixture-types": "cd test/e2e/fixtures/types && ${EMSDK:+$EMSDK/upstream/emscripten/}emcc types.cpp -o types.js -g -O0 -s EXPORTED_RUNTIME_METHODS='[\"cwrap\"]' -s MODULARIZE=1 -s EXPORT_NAME=TypesModule",
+    "build:fixture-heap": "cd test/e2e/fixtures/heap && ${EMSDK:+$EMSDK/upstream/emscripten/}emcc heap.cpp -o heap.js -g -O0 -s EXPORTED_RUNTIME_METHODS='[\"cwrap\"]' -s MODULARIZE=1 -s EXPORT_NAME=HeapModule",
+    "build:fixture-trap": "cd test/e2e/fixtures/trap && ${EMSDK:+$EMSDK/upstream/emscripten/}emcc trap.cpp -o trap.js -g -O0 -s EXPORTED_RUNTIME_METHODS='[\"cwrap\"]' -s MODULARIZE=1 -s EXPORT_NAME=TrapModule",
     "test:e2e": "LLDB=${LLDB:-$LLVM/build/bin/lldb} python3 test/e2e/run.py"
   },
   "dependencies": {

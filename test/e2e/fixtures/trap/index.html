@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Trap Fixture</title>
+</head>
+<body>
+  <script src="trap.js"></script>
+  <script>
+    var runTrap;
+    TrapModule().then(function(mod) {
+      runTrap = mod.cwrap('run_trap', 'number', []);
+    });
+    function run() {
+      try { runTrap(); } catch(e) { document.title = 'trap: ' + e.message; }
+    }
+  </script>
+</body>
+</html>

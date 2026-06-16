@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Heap Fixture</title>
+</head>
+<body>
+  <script src="heap.js"></script>
+  <script>
+    var runHeap;
+    HeapModule().then(function(mod) {
+      runHeap = mod.cwrap('run_heap', 'number', []);
+    });
+    function run() {
+      document.title = 'result: ' + runHeap();
+    }
+  </script>
+</body>
+</html>

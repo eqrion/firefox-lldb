@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Types Fixture</title>
+</head>
+<body>
+  <script src="types.js"></script>
+  <script>
+    var runTypes;
+    TypesModule().then(function(mod) {
+      runTypes = mod.cwrap('run_types', 'number', []);
+    });
+    function run() {
+      document.title = 'result: ' + runTypes();
+    }
+  </script>
+</body>
+</html>
