@@ -604,14 +604,57 @@ class TestThreaded(TestBase):
         )
 
     def test_other_threads_have_valid_state(self):
-        """After all-stop, every thread in the process is queryable."""
+        """After all-stop, every thread is queryable; the stopped thread has wasm frames.
+
+        The main (selected) thread is paused inside matmul_threaded and must
+        have at least one frame. Workers may have 0 or more frames depending on
+        whether they were actively executing wasm when interrupted vs. idle in
+        Atomics.wait; either is valid.
+        """
         _, process = self._start()
+        selected_id = process.GetSelectedThread().GetThreadID()
         n = process.GetNumThreads()
         for i in range(n):
             t = process.GetThreadAtIndex(i)
             self.assertTrue(t.IsValid(), "thread %d is valid" % i)
-            # Idle pool workers may have 0 wasm frames; that is fine.
-            _ = t.GetNumFrames()
+            nframes = t.GetNumFrames()
+            if t.GetThreadID() == selected_id:
+                self.assertGreaterEqual(
+                    nframes, 1,
+                    "stopped (main) thread should have >= 1 wasm frame",
+                )
+
+    def test_switch_selected_thread(self):
+        """Switching the selected thread to a worker keeps the process stopped."""
+        _, process = self._start()
+        n = process.GetNumThreads()
+        if n < 2:
+            self.skipTest("need >= 2 threads")
+        original_id = process.GetSelectedThread().GetThreadID()
+        worker = None
+        for i in range(n):
+            t = process.GetThreadAtIndex(i)
+            if t.GetThreadID() != original_id:
+                worker = t
+                break
+        self.assertIsNotNone(worker, "could not find a worker thread")
+        process.SetSelectedThread(worker)
+        self.assertEqual(process.GetState(), lldb.eStateStopped,
+                         "process still stopped after thread switch")
+        self.assertEqual(process.GetSelectedThread().GetThreadID(), worker.GetThreadID(),
+                         "selected thread is now the worker")
+
+    def test_step_keeps_other_threads_stopped(self):
+        """After single-stepping the main thread, other threads remain visible."""
+        _, process = self._start()
+        thread = process.GetSelectedThread()
+        thread.StepInstruction(False)
+        self.assertEqual(process.GetState(), lldb.eStateStopped)
+        n_after = process.GetNumThreads()
+        self.assertGreaterEqual(
+            n_after, 2,
+            "other threads still visible after single-step (got %d)" % n_after,
+        )
 
     def test_continue_after_stop(self):
         """Continuing after an all-stop resumes all threads without hanging.
