@@ -18,7 +18,12 @@ wasmtime, which is a manual, rare action. Each edit is commented in place.
   `wait()` is a no-op and `result()` calls `EventFuture::finish`, which blocks
   until the next event (bridged synchronously by the host worker RPC).
 - `src/lib.rs` — the Running-state arm drops the wstd `select!` over a wasi
-  pollable + the connection; it awaits `resumption.result()` directly.
+  pollable + the connection; it awaits `resumption.result()` directly. `Debugger`
+  now carries per-thread state (`BTreeMap<Tid, ThreadState>`) for multithread support.
+- `src/target.rs` — all `Target` trait callbacks that previously ignored `_tid`
+  now index `self.threads[&tid]`; `list_active_threads` iterates the full map.
+- `wit/world.wit` — extended the `debuggee` resource with `list-threads`,
+  `stopped-thread`; `exit-frames` and `single-step` now take an explicit `tid: u32`.
 
 To diff against pristine upstream: re-fetch the upstream files and compare, or
 keep this list current when editing.

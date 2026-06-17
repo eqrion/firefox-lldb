@@ -67,7 +67,7 @@ URL=http://localhost:8080/index.html npm run launch
 | Struct/pointer inspection       | done                                     |
 | Operand stack (qWasmStackValue) | blocked on SpiderMonkey                  |
 | Expression evaluation (expr)    | not supported (no wasm JIT in lldb)      |
-| Multithreading                  | not supported (gdbstub is single-thread) |
+| Multithreading                  | done — all-stop via per-thread RDP actors |
 
 ## Key gotchas
 
