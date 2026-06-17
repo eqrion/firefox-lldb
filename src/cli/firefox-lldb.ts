@@ -9,6 +9,7 @@ import { parseArgs } from "node:util";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import net from "node:net";
 import path from "node:path";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -76,6 +77,61 @@ function resolveServerScript(): string {
   return existsSync(devScript) ? devScript : builtScript;
 }
 
+// Send qLaunchGDBServer to the platform RSP server and return the spawned
+// GDB stub port. Uses the same approach as the e2e test harness so that lldb
+// can use `process connect --plugin wasm` instead of `process attach`, which
+// goes through ProcessGDBRemote and sends vAttach/attachment-verification
+// packets the gdbstub-component does not handle.
+function launchGdbStub(platformPort: number): Promise<number> {
+  const rspFrame = (s: string) => {
+    const cs = [...s].reduce((a, c) => (a + c.charCodeAt(0)) & 0xff, 0);
+    return `$${s}#${cs.toString(16).padStart(2, "0")}`;
+  };
+
+  return new Promise<number>((resolve, reject) => {
+    const sock = new net.Socket();
+    let buf = "";
+    let noAck = false;
+
+    const send = (payload: string) => sock.write(rspFrame(payload));
+
+    sock.connect(platformPort, "127.0.0.1", () => send("QStartNoAckMode"));
+    sock.setEncoding("latin1");
+    sock.setTimeout(30_000, () => {
+      sock.destroy();
+      reject(new Error("timeout waiting for GDB stub port"));
+    });
+
+    sock.on("data", (chunk: string) => {
+      buf += chunk;
+      for (;;) {
+        // Strip leading acks.
+        while (buf.startsWith("+") || buf.startsWith("-")) buf = buf.slice(1);
+        const s = buf.indexOf("$");
+        if (s < 0) break;
+        const e = buf.indexOf("#", s + 1);
+        if (e < 0 || buf.length < e + 3) break;
+        const payload = buf.slice(s + 1, e);
+        buf = buf.slice(e + 3);
+
+        if (!noAck) sock.write("+"); // ack before processing
+
+        if (payload === "OK" && !noAck) {
+          noAck = true;
+          send("qLaunchGDBServer:port:0;host:localhost;");
+        } else {
+          const m = payload.match(/port:(\d+)/);
+          sock.destroy();
+          if (m) resolve(parseInt(m[1], 10));
+          else reject(new Error(`qLaunchGDBServer: ${payload}`));
+        }
+      }
+    });
+
+    sock.on("error", reject);
+  });
+}
+
 async function main(): Promise<void> {
   const args = parseCliArgs(process.argv.slice(2));
 
@@ -90,17 +146,20 @@ async function main(): Promise<void> {
 
   let port: number | undefined;
 
-  // Wait for "platform server ready on connect://localhost:<port>"
+  // Wait for "platform server ready on connect://localhost:<port>", then keep piping.
   await new Promise<void>((resolve, reject) => {
     let buf = "";
+    let ready = false;
     server.stdout!.setEncoding("utf8");
     server.stdout!.on("data", (chunk: string) => {
-      buf += chunk;
-      process.stdout.write(chunk);
-      const m = buf.match(/platform server ready on connect:\/\/localhost:(\d+)/);
-      if (m) {
-        port = Number(m[1]);
-        resolve();
+      if (!ready) {
+        buf += chunk;
+        const m = buf.match(/platform server ready on connect:\/\/localhost:(\d+)/);
+        if (m) {
+          ready = true;
+          port = Number(m[1]);
+          resolve();
+        }
       }
     });
     server.on("exit", (code) => {
@@ -108,20 +167,38 @@ async function main(): Promise<void> {
     });
   });
 
-  // Pipe remaining server stdout to our stdout.
-  server.stdout!.on("data", (chunk: string) => process.stdout.write(chunk));
-
   const lldbArgs = [
     "-o",
     "platform select remote-gdb-server",
     "-o",
     `platform connect connect://localhost:${port}`,
   ];
+
+  // When a URL is known, pre-launch the GDB stub now (the launcher will
+  // navigate Firefox, wait for wasm, then start the stub). This lets lldb use
+  // `process connect --plugin wasm` — the only path the gdbstub-component
+  // supports — instead of `process attach`, which goes through ProcessGDBRemote
+  // and sends vAttach/attachment-verification packets the component rejects.
   if (args.url) {
-    lldbArgs.push("-o", `platform process launch -- ${args.url}`);
+    process.stderr.write("[info] waiting for wasm to load...\n");
+    try {
+      const stubPort = await launchGdbStub(port!);
+      lldbArgs.push("-o", `process connect --plugin wasm connect://localhost:${stubPort}`);
+    } catch (err) {
+      process.stderr.write(`[warn] could not pre-launch GDB stub: ${err}\n`);
+      // Fall through — user can attach manually.
+    }
+  } else {
+    lldbArgs.push("-o", "platform process list");
   }
 
   const lldb = spawn(args.lldb, lldbArgs, { stdio: "inherit" });
+
+  lldb.on("error", (err) => {
+    process.stderr.write(`[error] failed to start lldb (${args.lldb}): ${err.message}\n`);
+    server.kill();
+    process.exit(1);
+  });
 
   const cleanup = () => {
     server.kill();
@@ -132,6 +209,11 @@ async function main(): Promise<void> {
 
   lldb.on("exit", () => {
     server.kill();
+    process.exit(0);
+  });
+
+  server.on("exit", () => {
+    lldb.kill();
     process.exit(0);
   });
 }
