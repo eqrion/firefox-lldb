@@ -13,6 +13,7 @@ import os from "node:os";
 import type { RspHandler, RspSession } from "../protocol/rsp-server.js";
 import { asciiToHex, hexToAscii } from "../protocol/hex.js";
 import type { GdbServerSpawner } from "./gdb-server-spawner.js";
+import type { TabInfo } from "../rdp/session.js";
 
 interface ProcessInfo {
   pid: number;
@@ -26,11 +27,18 @@ interface ProcessInfo {
 export interface PlatformServerDeps {
   spawner: GdbServerSpawner;
   defaultUrl?: string;
+  listTabs?: () => Promise<TabInfo[]>;
 }
 
 export class PlatformServer implements RspHandler {
   #spawner: GdbServerSpawner;
   #defaultUrl?: string;
+  #listTabs?: () => Promise<TabInfo[]>;
+
+  // Stable mapping between synthetic integer PIDs and Firefox tab actors.
+  #tabPidMap = new Map<number, string>();
+  #tabActorPid = new Map<string, number>();
+  #nextTabPid = 1;
 
   // Per-connection state.
   #workingDir = process.cwd();
@@ -41,19 +49,41 @@ export class PlatformServer implements RspHandler {
   constructor(deps: PlatformServerDeps) {
     this.#spawner = deps.spawner;
     this.#defaultUrl = deps.defaultUrl;
+    this.#listTabs = deps.listTabs;
   }
 
-  #listProcesses(): ProcessInfo[] {
-    return [
-      {
-        pid: process.pid,
-        name: "firefox-lldb",
+  #tabPid(actor: string): number {
+    let pid = this.#tabActorPid.get(actor);
+    if (pid === undefined) {
+      pid = this.#nextTabPid++;
+      this.#tabActorPid.set(actor, pid);
+      this.#tabPidMap.set(pid, actor);
+    }
+    return pid;
+  }
+
+  /** Get or assign a stable integer PID for a tab actor. */
+  tabPid(actor: string): number {
+    return this.#tabPid(actor);
+  }
+
+  async #listProcesses(): Promise<ProcessInfo[]> {
+    if (!this.#listTabs) return [];
+    try {
+      const tabs = await this.#listTabs();
+      const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+      const gid = typeof process.getgid === "function" ? process.getgid() : 0;
+      return tabs.map((tab) => ({
+        pid: this.#tabPid(tab.actor),
+        name: tab.url || tab.actor,
         triple: "wasm32-unknown-unknown-wasm",
-        parentPid: process.ppid ?? 0,
-        uid: typeof process.getuid === "function" ? process.getuid() : 0,
-        gid: typeof process.getgid === "function" ? process.getgid() : 0,
-      },
-    ];
+        parentPid: 0,
+        uid,
+        gid,
+      }));
+    } catch {
+      return [];
+    }
   }
 
   async handle(payload: Buffer, session: RspSession): Promise<Uint8Array | string | null> {
@@ -80,7 +110,7 @@ export class PlatformServer implements RspHandler {
     }
     if (data === "qsProcessInfo") return this.#nextProcessInfo();
 
-    if (data.startsWith("qLaunchGDBServer")) return this.#launchGdbServer();
+    if (data.startsWith("qLaunchGDBServer")) return this.#launchGdbServer(data);
     if (data === "qQueryGDBServer") return this.#queryGdbServer();
     if (data.startsWith("qKillSpawnedProcess:")) {
       const pid = parseInt(data.slice("qKillSpawnedProcess:".length), 10);
@@ -137,14 +167,28 @@ export class PlatformServer implements RspHandler {
     );
   }
 
-  #processInfoPID(pid: number): string {
-    const match = this.#listProcesses().find((p) => p.pid === pid);
-    return match ? this.#encodeProcess(match) : "E01";
+  async #processInfoPID(pid: number): Promise<string> {
+    const list = await this.#listProcesses();
+    const match = list.find((p) => p.pid === pid);
+    if (match) return this.#encodeProcess(match);
+    // Fall back to the stable map for PIDs assigned in a previous listing.
+    const actor = this.#tabPidMap.get(pid);
+    if (!actor) return "E01";
+    const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+    const gid = typeof process.getgid === "function" ? process.getgid() : 0;
+    return this.#encodeProcess({
+      pid,
+      name: actor,
+      triple: "wasm32-unknown-unknown-wasm",
+      parentPid: 0,
+      uid,
+      gid,
+    });
   }
 
-  #firstProcessInfo(data: string): string {
+  async #firstProcessInfo(data: string): Promise<string> {
     const criteria = parseKeyVals(data.includes(":") ? data.slice(data.indexOf(":") + 1) : "");
-    let list = this.#listProcesses();
+    let list = await this.#listProcesses();
     const wantName = criteria.get("name");
     if (wantName !== undefined) {
       const name = hexToAscii(wantName);
@@ -160,9 +204,14 @@ export class PlatformServer implements RspHandler {
     return next ? this.#encodeProcess(next) : "E04";
   }
 
-  async #launchGdbServer(): Promise<string> {
-    const url = this.#resolveLaunchUrl();
-    const { pid, port } = await this.#spawner.launch(0, url);
+  async #launchGdbServer(data: string): Promise<string> {
+    // data may be "qLaunchGDBServer;host:..;port:..;pid:N" when triggered by
+    // `process attach --pid N`. Extract the pid and resolve it to a tab actor.
+    const params = parseKeyVals(data.includes(";") ? data.slice(data.indexOf(";") + 1) : "");
+    const pidParam = params.get("pid");
+    const tabActor = pidParam !== undefined ? this.#tabPidMap.get(Number(pidParam)) : undefined;
+    const url = tabActor ? undefined : this.#resolveLaunchUrl();
+    const { pid, port } = await this.#spawner.launch(0, url, tabActor);
     return `pid:${pid};port:${port};`;
   }
 

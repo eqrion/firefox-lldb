@@ -16,7 +16,11 @@ export interface LaunchedServer {
   stop(): void | Promise<void>;
 }
 
-export type GdbServerLauncher = (opts: { port: number; url?: string }) => Promise<LaunchedServer>;
+export type GdbServerLauncher = (opts: {
+  port: number;
+  url?: string;
+  tabActor?: string;
+}) => Promise<LaunchedServer>;
 
 export interface SpawnedServer {
   pid: number;
@@ -33,9 +37,9 @@ export class GdbServerSpawner {
   }
 
   /** Launch a GDB server. When requestedPort is 0 a free port is pre-allocated. */
-  async launch(requestedPort = 0, url?: string): Promise<SpawnedServer> {
+  async launch(requestedPort = 0, url?: string, tabActor?: string): Promise<SpawnedServer> {
     const port = requestedPort !== 0 ? requestedPort : await freePort();
-    const handle = await this.#launcher({ port, url });
+    const handle = await this.#launcher({ port, url, tabActor });
     const pid = this.#nextPid++;
     this.#servers.set(pid, { port, handle });
     return { pid, port };
