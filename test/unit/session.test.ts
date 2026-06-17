@@ -62,7 +62,7 @@ class FakeRdpServer {
       s.on("data", (chunk: Buffer) => {
         this.buf = Buffer.concat([this.buf, chunk]);
         const { packets, rest } = decodeAll(this.buf);
-        this.buf = rest;
+        this.buf = rest as Buffer<ArrayBuffer>;
         for (const pkt of packets) {
           this.received.push(pkt);
           this.#dispatch(pkt);
@@ -330,7 +330,7 @@ test("armAllStop → pause from one thread → interrupt others → stopped emit
   // must emit a paused event so #allStop can complete.
   srv.onAll(
     (r) => r.to === "threadB" && r.type === "interrupt",
-    (r) => {
+    (_r) => {
       // Respond to the interrupt request, then inject the paused event.
       setTimeout(() => srv.paused("threadB", "interrupted"), 5);
       return { from: "threadB" };

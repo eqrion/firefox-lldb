@@ -29,6 +29,25 @@ import { RdpClient } from "./client.js";
 import type { RdpPacket } from "./transport.js";
 import { EventEmitter } from "node:events";
 
+export interface TabInfo {
+  actor: string;
+  url: string;
+  title: string;
+}
+
+/** One-shot: connect, list tabs, disconnect. */
+export async function listFirefoxTabs(port = 6080, host = "127.0.0.1"): Promise<TabInfo[]> {
+  const client = await RdpClient.connect(port, host);
+  try {
+    const { tabs } = (await client.request("root", { type: "listTabs" })) as {
+      tabs: { actor: string; url?: string; title?: string }[];
+    };
+    return tabs.map((t) => ({ actor: t.actor, url: t.url ?? "", title: t.title ?? "" }));
+  } finally {
+    client.close();
+  }
+}
+
 export interface SourceForm {
   actor: string;
   url: string;

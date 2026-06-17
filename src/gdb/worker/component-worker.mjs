@@ -110,6 +110,9 @@ class Module {
   removeBreakpoint(...a) {
     return rpc("Module", this.__id, "removeBreakpoint", restArgs(a));
   }
+  name() {
+    return rpc("Module", this.__id, "name", []);
+  }
   clone() {
     return makeProxy({ $res: "Module", id: this.__id });
   }
