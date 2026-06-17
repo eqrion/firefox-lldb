@@ -19,6 +19,10 @@ use gdbstub::target::ext::base::single_register_access::{
 use gdbstub::target::ext::breakpoints::{
     Breakpoints, BreakpointsOps, SwBreakpoint, SwBreakpointOps,
 };
+use gdbstub::target::ext::extended_mode::{
+    AttachKind, CurrentActivePid, CurrentActivePidOps, ExtendedMode, ExtendedModeOps,
+    ShouldTerminate,
+};
 use gdbstub::target::ext::host_info::{HostInfo, HostInfoOps, HostInfoResponse};
 use gdbstub::target::ext::libraries::{Libraries, LibrariesOps};
 use gdbstub::target::ext::lldb_register_info_override::{
@@ -72,6 +76,49 @@ impl<'a> Target for Debugger<'a> {
 
     fn support_host_info(&mut self) -> Option<HostInfoOps<'_, Self>> {
         Some(self)
+    }
+
+    fn support_extended_mode(&mut self) -> Option<ExtendedModeOps<'_, Self>> {
+        Some(self)
+    }
+}
+
+// Support vAttach so that `process attach --pid N` (via a platform server)
+// works. The platform already attached the debuggee; we just acknowledge the
+// attach and report the current stop state.
+impl<'a> ExtendedMode for Debugger<'a> {
+    fn attach(&mut self, _pid: Pid) -> TargetResult<(), Self> {
+        Ok(())
+    }
+
+    fn query_if_attached(&mut self, _pid: Pid) -> TargetResult<AttachKind, Self> {
+        Ok(AttachKind::Attach)
+    }
+
+    fn kill(&mut self, _pid: Option<Pid>) -> TargetResult<ShouldTerminate, Self> {
+        Ok(ShouldTerminate::Yes)
+    }
+
+    fn run(
+        &mut self,
+        _filename: Option<&[u8]>,
+        _args: gdbstub::target::ext::extended_mode::Args<'_, '_>,
+    ) -> TargetResult<std::num::NonZero<usize>, Self> {
+        Err(TargetError::NonFatal)
+    }
+
+    fn restart(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn support_current_active_pid(&mut self) -> Option<CurrentActivePidOps<'_, Self>> {
+        Some(self)
+    }
+}
+
+impl<'a> CurrentActivePid for Debugger<'a> {
+    fn current_active_pid(&mut self) -> Result<Pid, Self::Error> {
+        Ok(Pid::new(1).unwrap())
     }
 }
 
