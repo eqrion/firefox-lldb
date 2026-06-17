@@ -87,6 +87,7 @@ export interface FrameForm {
   actor: string;
   type: string; // "wasmcall" | "call" | "global" | ...
   where?: { actor: string; line: number; column: number };
+  displayName?: string;
   arguments?: unknown[];
 }
 
@@ -103,6 +104,7 @@ export class RdpWasmSession extends EventEmitter {
   #consoleActor: string | null = null;
   #targetUrl = "";
   #wasmActorByUrl = new Map<string, string>();
+  #jsActorByUrl = new Map<string, string>();
 
   private constructor(client: RdpClient) {
     super();
@@ -221,6 +223,39 @@ export class RdpWasmSession extends EventEmitter {
     return wasm;
   }
 
+  cacheWasmActor(actor: string, url: string): void {
+    this.#wasmActorByUrl.set(url, actor);
+  }
+
+  async jsSources(): Promise<SourceForm[]> {
+    const js = (await this.sources()).filter((s) => s.url && s.introductionType !== "wasm");
+    for (const s of js) this.#jsActorByUrl.set(s.url, s.actor);
+    return js;
+  }
+
+  async fetchSourceText(sourceActor: string): Promise<string> {
+    const resp = (await this.#client.request(sourceActor, { type: "source" })) as {
+      source?: unknown;
+    };
+    const src = resp.source;
+    if (typeof src === "string") return src;
+    if (src && typeof src === "object") {
+      const grip = src as { type?: string; actor?: string; length?: number; initial?: string };
+      if (grip.type === "longString" && grip.actor && grip.length !== undefined) {
+        if (grip.initial !== undefined && grip.initial.length === grip.length) {
+          return grip.initial;
+        }
+        const sub = (await this.#client.request(grip.actor, {
+          type: "substring",
+          start: 0,
+          end: grip.length,
+        })) as { substring?: string };
+        return sub.substring ?? "";
+      }
+    }
+    return "";
+  }
+
   /** Fetch a module's bytes by URL (the source actor cannot serve wasm binary). */
   async fetchModuleBytes(url: string): Promise<Uint8Array> {
     return new Uint8Array(await (await fetch(url)).arrayBuffer());
@@ -262,6 +297,21 @@ export class RdpWasmSession extends EventEmitter {
     await this.#client.request(this.#thread(), {
       type: "removeBreakpoint",
       location: { sourceUrl, line: offset, column: 1 },
+    });
+  }
+
+  async setJsBreakpoint(sourceUrl: string, line: number): Promise<void> {
+    await this.#client.request(this.#thread(), {
+      type: "setBreakpoint",
+      location: { sourceUrl, line, column: 1 },
+      options: {},
+    });
+  }
+
+  async removeJsBreakpoint(sourceUrl: string, line: number): Promise<void> {
+    await this.#client.request(this.#thread(), {
+      type: "removeBreakpoint",
+      location: { sourceUrl, line, column: 1 },
     });
   }
 

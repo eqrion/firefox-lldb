@@ -30,9 +30,8 @@ def _make_call_stack_test(fx):
     return test
 
 
-# Only generate call-stack tests for fixtures that have a committed .wasm.
 _CALL_STACK_FIXTURES = [f for f in FIXTURES if f["name"] in {
-    "factorial", "oop", "parser", "ledger",
+    "factorial", "oop", "parser", "ledger", "sum_range", "types", "heap",
 }]
 
 for _fx in _CALL_STACK_FIXTURES:
@@ -316,9 +315,9 @@ class TestRecursion(TestBase):
 # ---- live-Firefox behaviour tests --------------------------------------
 
 
-class TestLiveFirefox(TestBase):
+class TestControlFlow(TestBase):
     def test_breakpoint_by_line(self):
-        """Source breakpoint by file:line resolves and is hit."""
+        """Source breakpoint by file:line resolves and is hit at the exact line."""
         platform_port = self._start_platform(
             next(f for f in FIXTURES if f["name"] == "factorial")
         )
@@ -329,9 +328,9 @@ class TestLiveFirefox(TestBase):
         self.assertEqual(process.GetState(), lldb.eStateStopped)
         frame0 = process.GetThreadAtIndex(0).GetFrameAtIndex(0)
         self.assertIn("compute_factorial", frame0.GetFunctionName() or "")
-        self.assertEqual(
-            frame0.GetLineEntry().GetFileSpec().GetFilename(), "math.cpp"
-        )
+        entry = frame0.GetLineEntry()
+        self.assertEqual(entry.GetFileSpec().GetFilename(), "math.cpp")
+        self.assertEqual(entry.GetLine(), 24, "stopped at exact line 24")
 
     def test_breakpoint_before_module_fires(self):
         """Breakpoint set before first Continue (before the page's wasm call) is hit."""
@@ -452,6 +451,223 @@ class TestLiveFirefox(TestBase):
         # If 'this' isn't directly visible, check that the frame is in oop.cpp
         self.assertEqual(frame0.GetLineEntry().GetFileSpec().GetFilename(), "oop.cpp")
 
+    def test_multiple_step_instructions(self):
+        """Five sequential StepInstructions each advance the PC."""
+        fx = next(f for f in FIXTURES if f["name"] == "factorial")
+        platform_port = self._start_platform(fx)
+        target, process = self._connect_via_platform(platform_port)
+        # Use factorial (not compute_factorial): it has more instructions to step through.
+        target.BreakpointCreateByName("factorial")
+        process.Continue()
+        self.assertEqual(process.GetState(), lldb.eStateStopped)
+        thread = process.GetSelectedThread()
+        self.assertIn("factorial", thread.GetFrameAtIndex(0).GetFunctionName() or "")
+
+        prev_pc = thread.GetFrameAtIndex(0).GetPC()
+        for step_num in range(5):
+            thread.StepInstruction(False)
+            self.assertEqual(process.GetState(), lldb.eStateStopped,
+                             f"process stopped after step {step_num + 1}")
+            thread = process.GetSelectedThread()
+            pc = thread.GetFrameAtIndex(0).GetPC()
+            self.assertNotEqual(pc, prev_pc, f"PC advanced at step {step_num + 1}")
+            prev_pc = pc
+
+    def test_breakpoint_fires_multiple_times(self):
+        """A breakpoint in a recursive function fires on each recursion level."""
+        fx = next(f for f in FIXTURES if f["name"] == "factorial")
+        platform_port = self._start_platform(fx)
+        target, process = self._connect_via_platform(platform_port)
+        target.BreakpointCreateByName("factorial")
+
+        n_values = []
+        for _ in range(3):
+            process.Continue()
+            self.assertEqual(process.GetState(), lldb.eStateStopped)
+            frame0 = process.GetSelectedThread().GetFrameAtIndex(0)
+            self.assertIn("factorial", frame0.GetFunctionName() or "")
+            n_var = frame0.FindVariable("n")
+            self.assertTrue(n_var.IsValid(), "n is visible in factorial")
+            n_values.append(n_var.GetValueAsSigned())
+
+        # factorial(10) → factorial(9) → factorial(8): n decreases each recursion level.
+        self.assertEqual(n_values, [10, 9, 8])
+
+    def test_step_out_in_recursion(self):
+        """StepOut from a recursive frame returns to the immediate caller frame."""
+        fx = next(f for f in FIXTURES if f["name"] == "factorial")
+        platform_port = self._start_platform(fx)
+        target, process = self._connect_via_platform(platform_port)
+        target.BreakpointCreateByName("factorial")
+
+        process.Continue()
+        self.assertEqual(process.GetState(), lldb.eStateStopped)
+        thread = process.GetSelectedThread()
+        n10 = thread.GetFrameAtIndex(0).FindVariable("n")
+        self.assertTrue(n10.IsValid())
+        self.assertEqual(n10.GetValueAsSigned(), 10)
+        depth_10 = thread.GetNumFrames()
+
+        process.Continue()
+        self.assertEqual(process.GetState(), lldb.eStateStopped)
+        thread = process.GetSelectedThread()
+        n9 = thread.GetFrameAtIndex(0).FindVariable("n")
+        self.assertTrue(n9.IsValid())
+        self.assertEqual(n9.GetValueAsSigned(), 9)
+        depth_9 = thread.GetNumFrames()
+        self.assertGreater(depth_9, depth_10, "recursive call increased stack depth")
+
+        # StepOut of factorial(9) should return to the factorial(10) frame.
+        thread.StepOut()
+        self.assertEqual(process.GetState(), lldb.eStateStopped)
+        thread = process.GetSelectedThread()
+        self.assertEqual(thread.GetNumFrames(), depth_10,
+                         "after StepOut, depth should match the factorial(10) level")
+        self.assertIn("factorial", thread.GetFrameAtIndex(0).GetFunctionName() or "")
+
+    def test_continue_after_step(self):
+        """After instruction steps, Continue correctly hits the next breakpoint."""
+        fx = next(f for f in FIXTURES if f["name"] == "factorial")
+        platform_port = self._start_platform(fx)
+        target, process = self._connect_via_platform(platform_port)
+        target.BreakpointCreateByName("compute_factorial")
+        target.BreakpointCreateByName("factorial")
+        process.Continue()
+        self.assertEqual(process.GetState(), lldb.eStateStopped)
+        self.assertIn("compute_factorial",
+                      process.GetSelectedThread().GetFrameAtIndex(0).GetFunctionName() or "")
+
+        # Step a few instructions from the breakpoint, then continue.
+        thread = process.GetSelectedThread()
+        for _ in range(3):
+            thread.StepInstruction(False)
+            self.assertEqual(process.GetState(), lldb.eStateStopped)
+            thread = process.GetSelectedThread()
+
+        process.Continue()
+        self.assertEqual(process.GetState(), lldb.eStateStopped)
+        frame0 = process.GetSelectedThread().GetFrameAtIndex(0)
+        func = frame0.GetFunctionName() or ""
+        self.assertIn("factorial", func,
+                      "after step+continue, should hit the factorial breakpoint")
+        self.assertNotIn("compute_", func)
+
+    def test_step_out_to_js(self):
+        """Stepping out of the outermost wasm frame eventually reaches a JS caller."""
+        fx = next(f for f in FIXTURES if f["name"] == "factorial")
+        platform_port = self._start_platform(fx)
+        target, process = self._connect_via_platform(platform_port)
+        target.BreakpointCreateByName("compute_factorial")
+        process.Continue()
+        self.assertEqual(process.GetState(), lldb.eStateStopped)
+        thread = process.GetSelectedThread()
+        self.assertIn("compute_factorial", thread.GetFrameAtIndex(0).GetFunctionName() or "")
+
+        # Step out through any wasm glue until we land in a JS frame.
+        for _ in range(5):
+            thread.StepOut()
+            self.assertEqual(process.GetState(), lldb.eStateStopped)
+            thread = process.GetSelectedThread()
+            filename = thread.GetFrameAtIndex(0).GetLineEntry().GetFileSpec().GetFilename()
+            if filename.endswith(".js"):
+                break
+        else:
+            last_func = thread.GetFrameAtIndex(0).GetFunctionName() or ""
+            last_file = thread.GetFrameAtIndex(0).GetLineEntry().GetFileSpec().GetFilename()
+            self.fail(f"never reached a JS frame after 5 StepOuts; "
+                      f"last: {last_func!r} in {last_file!r}")
+
+
+# ---- source listing ----------------------------------------------------
+
+
+class TestSourceListing(TestBase):
+    def _source_lines(self, target, file_spec, line, context=2):
+        """Return source text around `line` via LLDB's source manager, or '' if not found."""
+        stream = lldb.SBStream()
+        count = target.GetSourceManager().DisplaySourceLinesWithLineNumbers(
+            file_spec, line, context, context, "->", stream
+        )
+        return stream.GetData() if count > 0 else ""
+
+    def test_wasm_source_listing(self):
+        """Source listing on the innermost wasm frame shows C++ source lines."""
+        fx = next(f for f in FIXTURES if f["name"] == "factorial")
+        target, process = self._stopped_at_breakpoint(fx)
+        frame0 = process.GetThreadAtIndex(0).GetFrameAtIndex(0)
+        self.assertIn("compute_factorial", frame0.GetFunctionName() or "")
+        entry = frame0.GetLineEntry()
+        self.assertTrue(entry.IsValid(), "wasm frame has a valid line entry")
+        filename = entry.GetFileSpec().GetFilename()
+        self.assertEqual(filename, "math.cpp")
+        line = entry.GetLine()
+        self.assertGreater(line, 0, "line number is positive")
+        # The DWARF-embedded absolute path reflects the build machine; remap to
+        # the checked-in fixture file which is always present in the repo.
+        local_spec = lldb.SBFileSpec(str(REPO / fx["page_dir"] / filename))
+        content = self._source_lines(target, local_spec, line)
+        self.assertIn("compute_factorial", content,
+                      f"expected compute_factorial in source listing:\n{content}")
+
+    def test_js_source_listing(self):
+        """Source listing on a JS frame shows JavaScript source lines from the temp file."""
+        fx = next(f for f in FIXTURES if f["name"] == "factorial")
+        platform_port = self._start_platform(fx)
+        target, process = self._connect_via_platform(platform_port)
+        target.BreakpointCreateByName("compute_factorial")
+        process.Continue()
+        self.assertEqual(process.GetState(), lldb.eStateStopped)
+        thread = process.GetThreadAtIndex(0)
+        js_frame = None
+        for i in range(thread.GetNumFrames()):
+            f = thread.GetFrameAtIndex(i)
+            if f.GetLineEntry().GetFileSpec().GetFilename().endswith(".js"):
+                js_frame = f
+                break
+        self.assertIsNotNone(js_frame, "no JS frame with a .js source file found in call stack")
+        entry = js_frame.GetLineEntry()
+        self.assertTrue(entry.IsValid(), "JS frame has a valid line entry")
+        line = entry.GetLine()
+        self.assertGreater(line, 0, "JS frame line number is positive")
+        content = self._source_lines(target, entry.GetFileSpec(), line)
+        self.assertGreater(len(content), 0, "source listing for JS frame should be non-empty")
+        js_keywords = ("function", "var ", "const ", "let ", "return", "Module", "=>")
+        self.assertTrue(
+            any(kw in content for kw in js_keywords),
+            f"JS source listing does not look like JavaScript:\n{content!r}",
+        )
+
+    def test_js_source_line_number_is_accurate(self):
+        """The JS frame's line number falls within the source file's line count."""
+        fx = next(f for f in FIXTURES if f["name"] == "factorial")
+        platform_port = self._start_platform(fx)
+        target, process = self._connect_via_platform(platform_port)
+        target.BreakpointCreateByName("compute_factorial")
+        process.Continue()
+        self.assertEqual(process.GetState(), lldb.eStateStopped)
+        thread = process.GetThreadAtIndex(0)
+        for i in range(thread.GetNumFrames()):
+            f = thread.GetFrameAtIndex(i)
+            entry = f.GetLineEntry()
+            if not entry.GetFileSpec().GetFilename().endswith(".js"):
+                continue
+            line = entry.GetLine()
+            self.assertGreater(line, 0, "JS frame line > 0")
+            # Read the materialized temp file directly to count lines.
+            import os
+            path = os.path.join(
+                entry.GetFileSpec().GetDirectory(),
+                entry.GetFileSpec().GetFilename(),
+            )
+            if os.path.exists(path):
+                with open(path) as fh:
+                    total_lines = sum(1 for _ in fh)
+                self.assertLessEqual(
+                    line, total_lines,
+                    f"frame line {line} exceeds file length {total_lines} in {path}",
+                )
+            break
+
 
 # ---- edge cases --------------------------------------------------------
 
@@ -486,13 +702,8 @@ class TestEdgeCases(TestBase):
         if wp is not None and wp.IsValid():
             pass  # unexpected success: watchpoints actually work
 
-    @unittest.expectedFailure
     def test_interleaved_js_wasm_frames(self):
-        """JS frames between wasm frames should be visible in the call stack.
-
-        Currently marked xfail: RdpDebuggee filters to wasm-only frames,
-        so the JS glue frames above wasm are not surfaced to LLDB.
-        """
+        """JS caller frames are visible above the wasm breakpoint frame."""
         fx = next(f for f in FIXTURES if f["name"] == "factorial")
         platform_port = self._start_platform(fx)
         target, process = self._connect_via_platform(platform_port)
@@ -500,24 +711,36 @@ class TestEdgeCases(TestBase):
         process.Continue()
         self.assertEqual(process.GetState(), lldb.eStateStopped)
         thread = process.GetThreadAtIndex(0)
-        # With full interleaved stacks we'd expect JS frames above the wasm.
-        # Check that there are more frames than just the wasm ones.
-        all_names = [
-            thread.GetFrameAtIndex(i).GetFunctionName() or ""
+
+        # Frame 0 must be the wasm function at the breakpoint.
+        frame0 = thread.GetFrameAtIndex(0)
+        self.assertIn("compute_factorial", frame0.GetFunctionName() or "")
+        self.assertEqual(frame0.GetLineEntry().GetFileSpec().GetFilename(), "math.cpp")
+
+        # Find the innermost JS frame (by source file extension).
+        js_frame_idx = None
+        for i in range(thread.GetNumFrames()):
+            if thread.GetFrameAtIndex(i).GetLineEntry().GetFileSpec().GetFilename().endswith(".js"):
+                js_frame_idx = i
+                break
+
+        frame_files = [
+            thread.GetFrameAtIndex(i).GetLineEntry().GetFileSpec().GetFilename()
             for i in range(thread.GetNumFrames())
         ]
-        has_js = any("js" in n.lower() or "::" not in n and "." in n
-                     for n in all_names)
-        self.assertTrue(has_js, "expected JS frames in the mixed call stack")
+        self.assertIsNotNone(js_frame_idx,
+                             f"no JS frame found; frame source files: {frame_files}")
+        self.assertGreater(js_frame_idx, 0,
+                           "JS frame must be an outer caller of the wasm frame at frame 0")
 
 
-# ---- wasm trap (runs last to avoid LLDB state contamination) -----------
+# ---- wasm trap (must run last to avoid LLDB state contamination) --------
 # Triggering a wasm trap causes a wasm process exit, which leaves LLDB's
 # global wasm-module cache in a corrupt state that affects subsequent tests.
-# Sorting this class last (TestZ...) ensures it can't contaminate the suite.
+# The __main__ block below runs this class last explicitly.
 
 
-class TestZWasmTrap(TestBase):
+class TestWasmTrap(TestBase):
     @unittest.expectedFailure
     def test_wasm_trap_surfaces_as_exception(self):
         """Wasm integer divide-by-zero should surface as eStopReasonException.
@@ -546,4 +769,24 @@ class TestZWasmTrap(TestBase):
 # ---- entry point -------------------------------------------------------
 
 if __name__ == "__main__":
-    unittest.main(verbosity=2)
+    if len(sys.argv) > 1:
+        # Specific test names given on the command line — use standard discovery.
+        unittest.main(verbosity=2)
+    else:
+        # Run the full suite in explicit order so TestWasmTrap is always last;
+        # its trap test leaves LLDB's global wasm-module cache in a corrupt state.
+        _suite = unittest.TestSuite()
+        _loader = unittest.TestLoader()
+        for _cls in [
+            TestCallStack,
+            TestLocals,
+            TestInspectTypes,
+            TestInspectHeap,
+            TestRecursion,
+            TestControlFlow,
+            TestSourceListing,
+            TestEdgeCases,
+            TestWasmTrap,
+        ]:
+            _suite.addTests(_loader.loadTestsFromTestCase(_cls))
+        unittest.TextTestRunner(verbosity=2).run(_suite)

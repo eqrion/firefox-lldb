@@ -5,16 +5,31 @@
 // Implements the gdbstub component's WIT `debuggee` interface (as dispatched
 // over the worker SAB-RPC) on top of a live Firefox RDP session.
 //
-// The component is wasm-centric: exit-frames/parent-frame must yield WASM
-// frames, and frame_to_pc requires each frame's instance/module/pc. We map:
-//   - module      <-> a wasm source (stable id per URL); bytecode via HTTP fetch
-//   - frame        <-> a `wasmcall` RDP frame (JS frames are skipped; wasm-centric)
-//   - frame.get-pc  =  RDP frame.where.line (the wasm byte offset)
-//   - add-breakpoint = thread.setBreakpoint at {sourceUrl, line:offset, column:1}
-//   - continue/step  = thread.resume; event-future.finish awaits the next pause
-// Locals/globals/memory (instances, wasm-values) are exposed via the env chain.
+// Both wasm (`wasmcall`) and JS (`call`) RDP frames are surfaced so LLDB sees
+// the real interleaved call stack. JS sources are represented as synthetic wasm
+// modules carrying DWARF that maps DWARF address L -> source line L. JS frames
+// report pc = where.line + codeOffset so LLDB's subtraction of the code
+// section offset recovers the DWARF address (= the source line).
+//   - module     <-> a wasm source (real bytes via HTTP) or a JS source (synthetic)
+//   - frame      <-> a `wasmcall` or `call` RDP frame (both surfaced)
+//   - frame.getPc = where.line (wasm) or where.line + codeOffset (JS)
+//   - addBreakpoint = setWasmBreakpoint (wasm) or setJsBreakpoint (JS, no snapping)
+//   - continue/step = thread.resume; event-future.finish awaits the next pause
+// Locals/globals/memory are exposed via the env chain (wasm frames only for now).
 
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { join, basename, dirname } from "node:path";
+import { tmpdir } from "node:os";
 import type { RdpWasmSession, FrameForm } from "../rdp/session.js";
+import { buildSyntheticModule } from "./synthetic-module.js";
+
+function urlBasename(url: string): string {
+  try {
+    const name = new URL(url).pathname.split("/").filter(Boolean).pop();
+    if (name) return name;
+  } catch { /* fall through */ }
+  return basename(url) || "source.js";
+}
 
 export interface RpcRequest {
   type: string;
@@ -34,7 +49,13 @@ export class RdpDebuggee {
   #moduleById = new Map<number, { id: number; url: string }>();
   #sourceActorToUrl = new Map<string, string>();
 
-  // Per-stop frame snapshot (innermost-first wasm frames).
+  // Synthetic modules for JS sources: url -> {bytecode, codeOffset}.
+  #syntheticByUrl = new Map<string, { bytecode: Uint8Array; codeOffset: number }>();
+
+  // Temp dir for materialized JS source text (for LLDB source list).
+  #tmpDir: string = mkdtempSync(join(tmpdir(), "firefox-lldb-"));
+
+  // Per-stop frame snapshot (innermost-first, wasm+JS frames).
   #frames: FrameForm[] = [];
   #frameIndexById = new Map<number, number>();
 
@@ -68,6 +89,10 @@ export class RdpDebuggee {
       this.#lastPauseReason = p?.why?.type ?? "breakpoint";
       this.#resolvePause?.();
       this.#resolvePause = null;
+    });
+    const tmpDir = this.#tmpDir;
+    process.on("exit", () => {
+      try { rmSync(tmpDir, { recursive: true }); } catch { /* best-effort */ }
     });
   }
 
@@ -104,24 +129,45 @@ export class RdpDebuggee {
 
       case "Module.uniqueId":
         return BigInt(id);
-      case "Module.bytecode":
-        return this.#session.fetchModuleBytes(this.#moduleById.get(id)!.url);
-      case "Module.addBreakpoint":
-        await this.#session.setWasmBreakpoint(this.#moduleById.get(id)!.url, args[0] as number);
+      case "Module.bytecode": {
+        const { url } = this.#moduleById.get(id)!;
+        const syn = this.#syntheticByUrl.get(url);
+        return syn ? syn.bytecode : this.#session.fetchModuleBytes(url);
+      }
+      case "Module.addBreakpoint": {
+        const { url } = this.#moduleById.get(id)!;
+        const syn = this.#syntheticByUrl.get(url);
+        const pc = args[0] as number;
+        if (syn) {
+          await this.#session.setJsBreakpoint(url, pc - syn.codeOffset);
+        } else {
+          await this.#session.setWasmBreakpoint(url, pc);
+        }
         return null;
-      case "Module.removeBreakpoint":
-        await this.#session.removeWasmBreakpoint(this.#moduleById.get(id)!.url, args[0] as number);
+      }
+      case "Module.removeBreakpoint": {
+        const { url } = this.#moduleById.get(id)!;
+        const syn = this.#syntheticByUrl.get(url);
+        const pc = args[0] as number;
+        if (syn) {
+          await this.#session.removeJsBreakpoint(url, pc - syn.codeOffset);
+        } else {
+          await this.#session.removeWasmBreakpoint(url, pc);
+        }
         return null;
+      }
 
       case "Instance.getModule":
         return this.#moduleRef(this.#instanceUrlById.get(id)!);
       case "Instance.uniqueId":
         return BigInt(this.#moduleByUrl.get(this.#instanceUrlById.get(id)!)!.id);
-      case "Instance.getMemory":
-        // Single linear memory (index 0) per instance.
-        return (args[0] as number) === 0
-          ? { $res: "Memory", id: this.#nextId++ }
-          : Promise.reject(Object.assign(new Error("out-of-bounds"), { payload: "out-of-bounds" }));
+      case "Instance.getMemory": {
+        const iUrl = this.#instanceUrlById.get(id)!;
+        if (this.#syntheticByUrl.has(iUrl) || (args[0] as number) !== 0) {
+          return Promise.reject(Object.assign(new Error("out-of-bounds"), { payload: "out-of-bounds" }));
+        }
+        return { $res: "Memory", id: this.#nextId++ };
+      }
       case "Instance.getGlobal": {
         const gid = this.#nextId++;
         this.#globalIndexById.set(gid, args[0] as number);
@@ -151,10 +197,20 @@ export class RdpDebuggee {
         return this.#frameInstance(id);
       case "Frame.getFuncIndex":
         return 0;
-      case "Frame.getPc":
-        return this.#frames[this.#frameIndexById.get(id)!].where!.line;
+      case "Frame.getPc": {
+        const frame = this.#frames[this.#frameIndexById.get(id)!];
+        const line = frame.where!.line;
+        if (frame.type === "call") {
+          // JS frame: add codeOffset so LLDB can subtract it to recover the DWARF address.
+          const url = this.#sourceActorToUrl.get(frame.where!.actor) ?? frame.where!.actor;
+          return line + (this.#syntheticByUrl.get(url)?.codeOffset ?? 0);
+        }
+        return line;
+      }
       case "Frame.getLocals":
-        return this.#localsForFrame(id);
+        return this.#frames[this.#frameIndexById.get(id)!]?.type === "call"
+          ? [] // JS locals not yet supported
+          : this.#localsForFrame(id);
       case "Frame.getStack":
         return []; // operand stack not exposed
       case "Frame.parentFrame":
@@ -183,14 +239,42 @@ export class RdpDebuggee {
 
   // --- modules -------------------------------------------------------------
   async #allModules(): Promise<Ref[]> {
-    const sources = await this.#session.wasmSources();
+    const allSources = await this.#session.sources();
     this.#sourceActorToUrl.clear();
     const refs: Ref[] = [];
-    for (const s of sources) {
-      this.#sourceActorToUrl.set(s.actor, s.url);
-      refs.push(this.#moduleRef(s.url));
+
+    for (const s of allSources) {
+      if (s.introductionType === "wasm") {
+        // Real wasm module: track actor -> url, register as real module.
+        this.#sourceActorToUrl.set(s.actor, s.url);
+        refs.push(this.#moduleRef(s.url));
+        // Keep the wasm actor cache in session in sync.
+        this.#session.cacheWasmActor(s.actor, s.url);
+      } else {
+        // JS source: use url if present, else fall back to actor id so that
+        // every frame's source actor is guaranteed to be in #sourceActorToUrl.
+        const key = s.url || s.actor;
+        this.#sourceActorToUrl.set(s.actor, key);
+        await this.#ensureSynthetic(key, s.actor);
+        refs.push(this.#moduleRef(key));
+      }
     }
     return refs;
+  }
+
+  async #ensureSynthetic(url: string, sourceActor: string): Promise<void> {
+    if (this.#syntheticByUrl.has(url)) return;
+    let text = "";
+    try { text = await this.#session.fetchSourceText(sourceActor); } catch { /* skip */ }
+    const lineCount = text ? text.split("\n").length : 1;
+    const name = urlBasename(url);
+    const filePath = join(this.#tmpDir, name);
+    if (text) {
+      try { writeFileSync(filePath, text, "utf8"); } catch { /* best-effort */ }
+    }
+    const compDir = dirname(filePath);
+    const syn = buildSyntheticModule({ name, compDir, lineCount });
+    this.#syntheticByUrl.set(url, syn);
   }
 
   #moduleRef(url: string): Ref {
@@ -207,13 +291,16 @@ export class RdpDebuggee {
   async #snapshot(): Promise<void> {
     let frames: FrameForm[] = [];
     try {
-      frames = (await this.#session.frames()).filter((f) => f.type === "wasmcall" && f.where);
+      frames = (await this.#session.frames()).filter(
+        (f) => (f.type === "wasmcall" || f.type === "call") && f.where,
+      );
     } catch {
       frames = []; // not paused
     }
     this.#frames = frames;
     this.#frameIndexById.clear();
-    this.#topFrameActor = frames[0]?.actor ?? null;
+    // topFrameActor is the innermost *wasm* frame for memory/globals access.
+    this.#topFrameActor = frames.find((f) => f.type === "wasmcall")?.actor ?? null;
   }
 
   async #exitFrames(): Promise<Ref[]> {
