@@ -5,22 +5,26 @@
 // Implements the gdbstub component's WIT `debuggee` interface (as dispatched
 // over the worker SAB-RPC) on top of a live Firefox RDP session.
 //
+// Thread model: each Firefox thread actor maps to a gdbstub TID. Frames,
+// locals, and globals are per-thread. Linear memory is shared — any stopped
+// thread's `memory0` scope gives the same buffer.
+//
 // Both wasm (`wasmcall`) and JS (`call`) RDP frames are surfaced so LLDB sees
 // the real interleaved call stack. JS sources are represented as synthetic wasm
-// modules carrying DWARF that maps DWARF address L -> source line L. JS frames
-// report pc = where.line + codeOffset so LLDB's subtraction of the code
-// section offset recovers the DWARF address (= the source line).
-//   - module     <-> a wasm source (real bytes via HTTP) or a JS source (synthetic)
-//   - frame      <-> a `wasmcall` or `call` RDP frame (both surfaced)
-//   - frame.getPc = where.line (wasm) or where.line + codeOffset (JS)
-//   - addBreakpoint = setWasmBreakpoint (wasm) or setJsBreakpoint (JS, no snapping)
-//   - continue/step = thread.resume; event-future.finish awaits the next pause
-// Locals/globals/memory are exposed via the env chain (wasm frames only for now).
+// modules carrying DWARF that maps DWARF address L -> source line L.
+//
+// WIT changes vs the single-thread version:
+//   - Debuggee.listThreads  -> session.listTids()
+//   - Debuggee.stoppedThread -> session.stoppedTid
+//   - Debuggee.exitFrames(tid) -> per-tid snapshot
+//   - Debuggee.singleStep(tid, resumption) -> session.stepOne(tid)
+//   - Debuggee.continue     -> session.resumeAll()
+//   - EventFuture.finish    -> awaits all-stop "stopped" event, then snapshots
 
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join, basename, dirname } from "node:path";
 import { tmpdir } from "node:os";
-import type { RdpWasmSession, FrameForm } from "../rdp/session.js";
+import type { RdpWasmSession, FrameForm, StoppedEvent } from "../rdp/session.js";
 import { buildSyntheticModule } from "./synthetic-module.js";
 
 function urlBasename(url: string): string {
@@ -55,9 +59,11 @@ export class RdpDebuggee {
   // Temp dir for materialized JS source text (for LLDB source list).
   #tmpDir: string = mkdtempSync(join(tmpdir(), "firefox-lldb-"));
 
-  // Per-stop frame snapshot (innermost-first, wasm+JS frames).
-  #frames: FrameForm[] = [];
-  #frameIndexById = new Map<number, number>();
+  // Per-tid frame snapshots (innermost-first wasm+JS frames, set on each stop).
+  #framesByTid = new Map<number, FrameForm[]>();
+
+  // Frame ref id -> {tid, index} (reset on each stop).
+  #frameInfoById = new Map<number, { tid: number; index: number }>();
 
   // Instance refs (id -> module URL).
   #instanceUrlById = new Map<number, string>();
@@ -68,27 +74,26 @@ export class RdpDebuggee {
   // Global refs (id -> global index in the instance's global index space).
   #globalIndexById = new Map<number, number>();
 
-  // The innermost wasm frame actor of the current pause; memory reads and
-  // local lookups evaluate in this frame's scope (where `memory0` is visible).
-  #topFrameActor: string | null = null;
+  // Per-tid innermost wasm frame actor (for memory/global reads in that thread's scope).
+  #topFrameActorByTid = new Map<number, string | null>();
 
-  // Resolves on the next RDP pause (armed before resume/step/interrupt).
-  #pause: Promise<void> = Promise.resolve();
-  #resolvePause: (() => void) | null = null;
+  // Resolves on the next all-stop "stopped" event (armed before resume/step).
+  #stopped: Promise<StoppedEvent> = Promise.resolve({ tid: 1, pausePacket: {} });
+  #resolveStopped: ((e: StoppedEvent) => void) | null = null;
   #lastPauseReason = "breakpoint";
 
-  // Fired once, on LLDB's first continue (used by the live bridge to drive the
-  // page's wasm export only after a breakpoint is armed and execution resumes,
-  // so the engine pauses inside wasm rather than running the call to completion).
+  // Fired once on LLDB's first continue (drives the page's wasm export
+  // after a breakpoint is armed, so the engine pauses inside wasm).
   #onFirstContinue: (() => void) | null = null;
 
   constructor(session: RdpWasmSession, opts?: { onFirstContinue?: () => void }) {
     this.#session = session;
     this.#onFirstContinue = opts?.onFirstContinue ?? null;
-    session.on("paused", (p: { why?: { type?: string } }) => {
-      this.#lastPauseReason = p?.why?.type ?? "breakpoint";
-      this.#resolvePause?.();
-      this.#resolvePause = null;
+
+    session.on("stopped", (e: StoppedEvent) => {
+      this.#lastPauseReason = (e.pausePacket as { why?: { type?: string } })?.why?.type ?? "breakpoint";
+      this.#resolveStopped?.(e);
+      this.#resolveStopped = null;
     });
     const tmpDir = this.#tmpDir;
     process.on("exit", () => {
@@ -104,28 +109,40 @@ export class RdpDebuggee {
         return this.#allModules();
       case "Debuggee.allInstances":
         return this.#allInstances();
-      case "Debuggee.exitFrames":
-        return this.#exitFrames();
+      case "Debuggee.listThreads":
+        return this.#session.listTids();
+      case "Debuggee.stoppedThread":
+        return this.#session.stoppedTid;
+      case "Debuggee.exitFrames": {
+        const tid = args[0] as number;
+        return this.#exitFrames(tid);
+      }
       case "Debuggee.continue": {
-        this.#armPause();
-        this.#session.resume().catch(() => {});
+        this.#armStopped();
+        this.#session.armAllStop();
+        this.#session.resumeAll().catch(() => {});
         const cb = this.#onFirstContinue;
         this.#onFirstContinue = null;
         cb?.();
         return this.#eventFutureRef();
       }
-      case "Debuggee.singleStep":
-        this.#armPause();
-        this.#session.step().catch(() => {});
+      case "Debuggee.singleStep": {
+        const tid = args[0] as number;
+        this.#armStopped();
+        this.#session.armAllStop();
+        this.#session.stepOne(tid).catch(() => {});
         return this.#eventFutureRef();
-      case "Debuggee.interrupt":
-        this.#armPause();
-        this.#session.interrupt().catch(() => {});
+      }
+      case "Debuggee.interrupt": {
+        this.#armStopped();
+        this.#session.interrupt(this.#session.stoppedTid).catch(() => {});
         return null;
-      case "EventFuture.finish":
-        await this.#pause;
-        await this.#snapshot();
+      }
+      case "EventFuture.finish": {
+        await this.#stopped;
+        await this.#snapshotAll();
         return { tag: this.#eventTag() };
+      }
 
       case "Module.uniqueId":
         return BigInt(id);
@@ -202,21 +219,19 @@ export class RdpDebuggee {
       case "Frame.getFuncIndex":
         return 0;
       case "Frame.getPc": {
-        const frame = this.#frames[this.#frameIndexById.get(id)!];
-        const line = frame.where!.line;
-        if (frame.type === "call") {
-          // JS frame: add codeOffset so LLDB can subtract it to recover the DWARF address.
+        const fi = this.#frameInfoById.get(id)!;
+        const frame = this.#framesByTid.get(fi.tid)?.[fi.index];
+        const line = frame?.where?.line ?? 0;
+        if (frame?.type === "call") {
           const url = this.#sourceActorToUrl.get(frame.where!.actor) ?? frame.where!.actor;
           return line + (this.#syntheticByUrl.get(url)?.codeOffset ?? 0);
         }
         return line;
       }
       case "Frame.getLocals":
-        return this.#frames[this.#frameIndexById.get(id)!]?.type === "call"
-          ? [] // JS locals not yet supported
-          : this.#localsForFrame(id);
+        return this.#localsForFrame(id);
       case "Frame.getStack":
-        return []; // operand stack not exposed
+        return [];
       case "Frame.parentFrame":
         return this.#parentFrame(id);
 
@@ -243,26 +258,30 @@ export class RdpDebuggee {
 
   // --- modules -------------------------------------------------------------
   async #allModules(): Promise<Ref[]> {
-    const allSources = await this.#session.sources();
+    const allSources = await this.#session.wasmSources();
     this.#sourceActorToUrl.clear();
     const refs: Ref[] = [];
 
     for (const s of allSources) {
       if (s.introductionType === "wasm") {
-        // Real wasm module: track actor -> url, register as real module.
         this.#sourceActorToUrl.set(s.actor, s.url);
         refs.push(this.#moduleRef(s.url));
-        // Keep the wasm actor cache in session in sync.
-        this.#session.cacheWasmActor(s.actor, s.url);
       } else {
-        // JS source: use url if present, else fall back to actor id so that
-        // every frame's source actor is guaranteed to be in #sourceActorToUrl.
         const key = s.url || s.actor;
         this.#sourceActorToUrl.set(s.actor, key);
         await this.#ensureSynthetic(key, s.actor);
         refs.push(this.#moduleRef(key));
       }
     }
+
+    const jsSources = await this.#session.jsSources();
+    for (const s of jsSources) {
+      const key = s.url || s.actor;
+      this.#sourceActorToUrl.set(s.actor, key);
+      await this.#ensureSynthetic(key, s.actor);
+      if (!this.#moduleByUrl.has(key)) refs.push(this.#moduleRef(key));
+    }
+
     return refs;
   }
 
@@ -291,62 +310,74 @@ export class RdpDebuggee {
     return { $res: "Module", id: m.id };
   }
 
+  // --- instances -----------------------------------------------------------
+  async #allInstances(): Promise<Ref[]> {
+    const sources = await this.#session.wasmSources();
+    return sources.length ? [this.#instanceRef(sources[0].url)] : [];
+  }
+
   // --- frames --------------------------------------------------------------
-  async #snapshot(): Promise<void> {
-    let frames: FrameForm[] = [];
-    try {
-      frames = (await this.#session.frames()).filter(
-        (f) => (f.type === "wasmcall" || f.type === "call") && f.where,
+  async #snapshotAll(): Promise<void> {
+    this.#frameInfoById.clear();
+    const tids = this.#session.listTids();
+    for (const tid of tids) {
+      let frames: FrameForm[] = [];
+      try {
+        frames = (await this.#session.frames(tid)).filter(
+          (f) => (f.type === "wasmcall" || f.type === "call") && f.where
+        );
+      } catch {
+        frames = [];
+      }
+      this.#framesByTid.set(tid, frames);
+      this.#topFrameActorByTid.set(
+        tid,
+        frames.find((f) => f.type === "wasmcall")?.actor ?? null
       );
-    } catch {
-      frames = []; // not paused
     }
-    this.#frames = frames;
-    this.#frameIndexById.clear();
-    // topFrameActor is the innermost *wasm* frame for memory/globals access.
-    this.#topFrameActor = frames.find((f) => f.type === "wasmcall")?.actor ?? null;
   }
 
-  async #exitFrames(): Promise<Ref[]> {
-    await this.#snapshot();
-    return this.#frames.length ? [this.#frameRef(0)] : [];
+  async #exitFrames(tid: number): Promise<Ref[]> {
+    const frames = this.#framesByTid.get(tid) ?? [];
+    return frames.length ? [this.#frameRef(tid, 0)] : [];
   }
 
-  #frameRef(index: number): Ref {
+  #frameRef(tid: number, index: number): Ref {
     const id = this.#nextId++;
-    this.#frameIndexById.set(id, index);
+    this.#frameInfoById.set(id, { tid, index });
     return { $res: "Frame", id };
   }
 
   #parentFrame(id: number): Ref | null {
-    const i = this.#frameIndexById.get(id);
-    if (i === undefined || i + 1 >= this.#frames.length) return null;
-    return this.#frameRef(i + 1);
+    const fi = this.#frameInfoById.get(id);
+    if (!fi) return null;
+    const frames = this.#framesByTid.get(fi.tid) ?? [];
+    if (fi.index + 1 >= frames.length) return null;
+    return this.#frameRef(fi.tid, fi.index + 1);
   }
 
   #frameInstance(frameId: number): Ref {
-    const frame = this.#frames[this.#frameIndexById.get(frameId)!];
-    const url = this.#sourceActorToUrl.get(frame.where!.actor) ?? frame.where!.actor;
+    const fi = this.#frameInfoById.get(frameId)!;
+    const frames = this.#framesByTid.get(fi.tid) ?? [];
+    const frame = frames[fi.index];
+    const url = this.#sourceActorToUrl.get(frame?.where?.actor ?? "") ?? frame?.where?.actor ?? "";
     return this.#instanceRef(url);
   }
 
   #instanceRef(url: string): Ref {
-    // Ensure the module exists so getModule/uniqueId resolve.
     this.#moduleRef(url);
     const id = this.#nextId++;
     this.#instanceUrlById.set(id, url);
     return { $res: "Instance", id };
   }
 
-  async #allInstances(): Promise<Ref[]> {
-    const sources = await this.#session.wasmSources();
-    return sources.length ? [this.#instanceRef(sources[0].url)] : [];
-  }
-
-  // --- locals / memory (evaluated in the innermost wasm frame's scope) -------
+  // --- locals / memory -----------------------------------------------------
   async #localsForFrame(frameId: number): Promise<Ref[]> {
-    const frame = this.#frames[this.#frameIndexById.get(frameId)!];
-    if (!frame) return [];
+    const fi = this.#frameInfoById.get(frameId);
+    if (!fi) return [];
+    const frames = this.#framesByTid.get(fi.tid) ?? [];
+    const frame = frames[fi.index];
+    if (!frame || frame.type === "call") return [];
     const env = (await this.#session.frameEnvironment(frame.actor)) as {
       bindings?: { variables?: Record<string, { value?: unknown }> };
     };
@@ -363,11 +394,10 @@ export class RdpDebuggee {
     return this.#valueRef(vars[`global${index}`]?.value);
   }
 
-  // The wasm-instance scope (parent of the frame's function scope) holds
-  // `global0..globalN` and `memory0`.
   async #instanceScopeBindings(): Promise<Record<string, { value?: unknown }>> {
-    if (!this.#topFrameActor) return {};
-    let env = (await this.#session.frameEnvironment(this.#topFrameActor)) as
+    const topActor = this.#topFrameActorByTid.get(this.#session.stoppedTid);
+    if (!topActor) return {};
+    let env = (await this.#session.frameEnvironment(topActor)) as
       | {
           scopeKind?: string;
           parent?: unknown;
@@ -380,9 +410,6 @@ export class RdpDebuggee {
     return env?.bindings?.variables ?? {};
   }
 
-  // RDP reports local/global values as plain JS values without an explicit wasm
-  // type. Infer: bigint -> i64, non-integer number -> f64, else i32. (i32 is
-  // what lldb needs for the frame-base/shadow-stack pointer.)
   #valueRef(raw: unknown): Ref {
     let tag = "wasm-i32";
     let value: number | bigint = 0;
@@ -399,34 +426,47 @@ export class RdpDebuggee {
   }
 
   async #memorySize(): Promise<number> {
-    if (!this.#topFrameActor) return 0;
-    const r = (await this.#session.evaluateInFrame(
-      "memory0.buffer.byteLength",
-      this.#topFrameActor
-    )) as { result?: unknown };
-    return typeof r.result === "number" ? r.result : 0;
+    const topActor = this.#topFrameActorByTid.get(this.#session.stoppedTid);
+    const consoleActor = this.#session.stoppedConsoleActor;
+    if (!topActor || !consoleActor) return 0;
+    try {
+      const r = (await this.#session.evaluateInFrame(
+        "memory0.buffer.byteLength",
+        topActor,
+        consoleActor,
+      )) as { result?: unknown };
+      return typeof r.result === "number" ? r.result : 0;
+    } catch {
+      return 0;
+    }
   }
 
   async #readMemory(addr: number, len: number): Promise<Uint8Array> {
     const out = new Uint8Array(len);
-    if (!this.#topFrameActor) return out;
+    const topActor = this.#topFrameActorByTid.get(this.#session.stoppedTid);
+    const consoleActor = this.#session.stoppedConsoleActor;
+    if (!topActor || !consoleActor) return out;
     const expr =
       `(()=>{const b=memory0.buffer,t=b.byteLength,a=${addr},n=${len},o=new Uint8Array(n);` +
       `if(a<t)o.set(new Uint8Array(b,a,Math.min(n,t-a)));` +
       `let s='';for(const x of o)s+=x.toString(16).padStart(2,'0');return s;})()`;
-    const r = (await this.#session.evaluateInFrame(expr, this.#topFrameActor)) as {
-      result?: unknown;
-    };
-    const hex = typeof r.result === "string" ? r.result : "";
-    for (let i = 0; i < len && i * 2 + 1 < hex.length; i++) {
-      out[i] = parseInt(hex.substr(i * 2, 2), 16);
+    try {
+      const r = (await this.#session.evaluateInFrame(expr, topActor, consoleActor)) as {
+        result?: unknown;
+      };
+      const hex = typeof r.result === "string" ? r.result : "";
+      for (let i = 0; i < len && i * 2 + 1 < hex.length; i++) {
+        out[i] = parseInt(hex.substr(i * 2, 2), 16);
+      }
+    } catch {
+      // evaluation timed out or failed — return zeros
     }
     return out;
   }
 
   // --- resumption ----------------------------------------------------------
-  #armPause(): void {
-    this.#pause = new Promise((resolve) => (this.#resolvePause = resolve));
+  #armStopped(): void {
+    this.#stopped = new Promise((resolve) => (this.#resolveStopped = resolve));
   }
 
   #eventFutureRef(): Ref {
@@ -434,7 +474,6 @@ export class RdpDebuggee {
   }
 
   #eventTag(): string {
-    // RDP "why" types -> debuggee event variants. Most stops are breakpoints.
     switch (this.#lastPauseReason) {
       case "exception":
         return "trap";

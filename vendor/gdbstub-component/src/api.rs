@@ -30,9 +30,9 @@ impl Resumption {
         }
     }
 
-    pub fn single_step(d: &Debuggee, r: ResumptionValue) -> Self {
+    pub fn single_step(d: &Debuggee, tid: u32, r: ResumptionValue) -> Self {
         Resumption {
-            future: d.single_step(r),
+            future: d.single_step(tid, r),
         }
     }
 

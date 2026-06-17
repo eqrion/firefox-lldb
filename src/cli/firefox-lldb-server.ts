@@ -5,10 +5,10 @@
 // LLDB platform server backed by Firefox over RDP.
 
 import { parseArgs } from "node:util";
-import { RspServer, type RspLogger } from "../protocol/rsp-server.js";
+import { RspServer } from "../protocol/rsp-server.js";
 import { GdbServerSpawner, type GdbServerLauncher } from "../platform/gdb-server-spawner.js";
 import { PlatformServer } from "../platform/platform-server.js";
-import { RdpWasmSession, listFirefoxTabs, watchFirefoxTabs, type TabInfo } from "../rdp/session.js";
+import { RdpWasmSession, listFirefoxTabs } from "../rdp/session.js";
 import { RdpDebuggee } from "../gdb/rdp-debuggee.js";
 import { launchFirefox, type FirefoxHandle } from "../rdp/firefox.js";
 // @ts-expect-error - .mjs host has no type declarations
@@ -105,25 +105,11 @@ function parseCliArgs(argv: string[]): Args {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function watchTabs(
-  rdpPort: number,
-  onTabs: (tabs: TabInfo[]) => void,
-): Promise<void> {
-  for (;;) {
-    try {
-      await watchFirefoxTabs(rdpPort, "127.0.0.1", onTabs);
-      break; // connection closed cleanly
-    } catch {
-      await sleep(250);
-    }
-  }
-}
-
-async function connectWithRetry(rdpPort: number, tabActor?: string): Promise<RdpWasmSession> {
+async function connectWithRetry(rdpPort: number): Promise<RdpWasmSession> {
   let lastErr: unknown;
   for (let i = 0; i < 80; i++) {
     try {
-      return await RdpWasmSession.start(rdpPort, "127.0.0.1", tabActor);
+      return await RdpWasmSession.start(rdpPort);
     } catch (err) {
       lastErr = err;
       await sleep(250);
@@ -152,65 +138,40 @@ async function main(): Promise<void> {
       rdpPort: args.rdpPort,
       binary: args.firefox,
       headless: args.headless,
-      url: args.url,
     });
     logger.info("launched Firefox");
   }
 
-  const launcher: GdbServerLauncher = async ({ port, url, tabActor }) => {
-    // tabActor comes from the watcher connection (conn0). Actor IDs are
-    // connection-scoped, so translate to a valid actor on the new session
-    // connection by matching position in currentTabs.
-    let resolvedActor = tabActor;
-    if (tabActor) {
-      const idx = currentTabs.findIndex((t) => t.actor === tabActor);
-      if (idx >= 0) {
-        try {
-          const fresh = await listFirefoxTabs(args.rdpPort);
-          resolvedActor = fresh[idx]?.actor ?? tabActor;
-        } catch {
-          // Fall back to the watcher actor and hope for the best.
-        }
-      }
-    }
-
+  const launcher: GdbServerLauncher = async ({ port, url }) => {
     const session = launching
-      ? await connectWithRetry(args.rdpPort, resolvedActor)
-      : await RdpWasmSession.start(args.rdpPort, "127.0.0.1", resolvedActor);
+      ? await connectWithRetry(args.rdpPort)
+      : await RdpWasmSession.start(args.rdpPort);
 
-    if (url && !tabActor) {
+    if (url) {
       await session.navigate(url);
-      logger.debug(`[rdp] on ${session.targetUrl}`);
+      logger.debug(`[rdp] navigated to ${url}`);
       await waitForWasm(session);
-    } else if (!session.threadActor) {
-      // Wait for target-available-form rather than sleeping a fixed amount.
-      await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          session.off("target", onTarget);
-          reject(new Error("timed out waiting for Firefox thread — is this a wasm page?"));
-        }, 5000);
-        const onTarget = () => {
-          clearTimeout(timer);
-          resolve();
-        };
-        session.once("target", onTarget);
-      });
-    }
-
-    // For the attach case (tabActor provided, no navigation), the tab may be
-    // running. Ensure it is paused so that session.resume() in Debuggee.continue
-    // actually resumes from a stopped state and reaches a breakpoint.
-    if (tabActor && !url) {
-      const isPaused = await session.frames().then(() => true).catch(() => false);
-      if (!isPaused) {
+    } else if (!session.hasThreads()) {
+      await sleep(500);
+    } else {
+      // For the attach case, ensure all threads are paused so that
+      // resumeAll() in Debuggee.continue works from a stopped state.
+      const tids = session.listTids();
+      const isRunning = await session.frames(tids[0]).then(() => false).catch(() => true);
+      if (isRunning) {
         await new Promise<void>((resolve, reject) => {
           const timer = setTimeout(() => {
-            session.off("paused", onPause);
-            reject(new Error("timed out pausing tab for attach"));
+            session.off("stopped", onStopped);
+            reject(new Error("timed out pausing threads for attach"));
           }, 5000);
-          const onPause = () => { clearTimeout(timer); resolve(); };
-          session.once("paused", onPause);
-          session.interrupt().catch((e) => { clearTimeout(timer); session.off("paused", onPause); reject(e); });
+          const onStopped = () => { clearTimeout(timer); resolve(); };
+          session.once("stopped", onStopped);
+          session.armAllStop();
+          session.interrupt(tids[0]).catch((e) => {
+            clearTimeout(timer);
+            session.off("stopped", onStopped);
+            reject(e);
+          });
         });
       }
     }
@@ -239,16 +200,7 @@ async function main(): Promise<void> {
   };
 
   const spawner = new GdbServerSpawner(launcher);
-
-  // currentTabs is updated by the watcher below and read by the platform server
-  // on every qfProcessInfo — both use the same actor IDs from one connection.
-  let currentTabs: TabInfo[] = [];
-  const platformServer = new PlatformServer({
-    spawner,
-    defaultUrl: args.url,
-    listTabs: async () => currentTabs,
-  });
-  const server = new RspServer(platformServer, { logger });
+  const server = new RspServer(new PlatformServer({ spawner, defaultUrl: args.url }), { logger });
 
   const bound = await server.listen(args.port);
   // Stdout is the control channel for the firefox-lldb wrapper; stderr carries logs.
@@ -260,10 +212,7 @@ async function main(): Promise<void> {
     );
   }
 
-  let shutdownCalled = false;
   const shutdown = async () => {
-    if (shutdownCalled) return;
-    shutdownCalled = true;
     await spawner.killAll();
     await server.close();
     await firefox?.close();
@@ -272,21 +221,6 @@ async function main(): Promise<void> {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
   process.on("SIGHUP", () => {});
-  firefox?.exited.then(() => shutdown());
-
-  const hinted = new Set<string>();
-  void watchTabs(args.rdpPort, (tabs) => {
-    currentTabs = tabs;
-    for (const tab of tabs) {
-      if (!hinted.has(tab.actor) && tab.url && tab.url !== "about:blank") {
-        hinted.add(tab.actor);
-        const pid = platformServer.tabPid(tab.actor);
-        process.stderr.write(
-          `\n[info] tab available: ${tab.url} (pid ${pid})\n[info]   run 'platform process list' in lldb, then 'process attach --pid ${pid}'\n`,
-        );
-      }
-    }
-  });
 }
 
 main().catch((err) => {

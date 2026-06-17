@@ -94,7 +94,7 @@ npm run connect
 | Struct/pointer inspection via SB API                 | ✅                                      |
 | Operand stack (`qWasmStackValue`)                    | ✗ — SpiderMonkey does not expose it yet |
 | Expression evaluation (`expr`)                       | ✗ — no wasm JIT backend in lldb         |
-| Multithreading                                       | ✗ — gdbstub-component is single-thread  |
+| Multithreading (pthreads/web workers)                | ✅ — all-stop via per-thread RDP actors  |
 
 ## Development
 

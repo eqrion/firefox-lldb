@@ -129,6 +129,25 @@ committed source (never auto-clobbered). A single jco-generated patch (a jco
 1.24 `currentSubtask` codegen bug) is reapplied idempotently by
 `scripts/patch-generated.mjs`, wired into `npm run component:transpile`.
 
+## Multithreading
+
+Firefox exposes each emscripten pthread worker as a separate RDP target with its
+own `threadActor`. The session watches both `frame` and `worker` target types. On
+each `target-available-form` the session assigns a gdbstub TID (TID 1 = top-level
+frame, TID 2+ = workers). All-stop is implemented by the host: when any thread
+fires a `paused` event, the host sends `interrupt` to all others and awaits their
+acks before emitting a unified `stopped` event to the component.
+
+RDP facts confirmed experimentally:
+- `watchTargets("worker")` surfaces emscripten pthread workers as targets.
+- `observeWasm` is propagated automatically to all workers via watcher session-data.
+- `interrupt` reliably pauses any thread (including idle/Atomics.wait threads) in
+  < 10 ms — no timeout strategy needed.
+- Breakpoints must be set per-thread actor; the watcher does not broadcast.
+- Breakpoints are buffered and replayed to new workers as they arrive.
+- The same wasm module URL appears on every thread; modules are deduped by URL
+  (one `module_id` slot in the address space, one library-list entry).
+
 ## Known limitations
 
 - **Operand stack** (`qWasmStackValue` → empty) — SpiderMonkey does not expose
@@ -137,7 +156,6 @@ committed source (never auto-clobbered). A single jco-generated patch (a jco
   the target, which wasm has no support for. Inspect variables via the SB value
   API (`frame.FindVariable`, `GetChildMemberWithName`, `Dereference`) which reads
   DWARF + linear memory directly.
-- **Multithreading** is not supported — the gdbstub-component is single-thread.
 - **CLI stepping** (`thread step-in/over/out`) does not work; `CommandObjectThread::DoExecute`
   does not dispatch to `QueueThreadPlanForStep*` in batch mode. GUI debuggers and
   DAP adapters use the SB API and work correctly.

@@ -98,9 +98,11 @@ export class Debuggee {
   private constructor();
   allModules(): Array<Module>;
   allInstances(): Array<Instance>;
-  singleStep(resumption: ResumptionValue): EventFuture;
+  listThreads(): Uint32Array;
+  stoppedThread(): number;
+  singleStep(tid: number, resumption: ResumptionValue): EventFuture;
   'continue'(resumption: ResumptionValue): EventFuture;
-  exitFrames(): Array<Frame>;
+  exitFrames(tid: number): Array<Frame>;
 }
 
 export class EventFuture {
