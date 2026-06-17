@@ -9,6 +9,7 @@ import { RspClient } from "./rsp-client.js";
 import { GdbServerSpawner, type GdbServerLauncher } from "../../src/platform/gdb-server-spawner.js";
 import { PlatformServer } from "../../src/platform/platform-server.js";
 import { asciiToHex, hexToAscii } from "../../src/protocol/hex.js";
+import type { TabInfo } from "../../src/rdp/session.js";
 
 // Fake launcher: starts a trivial RspServer on the given port so
 // qLaunchGDBServer tests can verify the spawned port is reachable.
@@ -25,13 +26,17 @@ const fakeLauncher: GdbServerLauncher = async ({ port }) => {
   return { stop: () => srv.close() };
 };
 
+const fakeTabs: TabInfo[] = [
+  { actor: "server1.conn0.tab1", url: "http://localhost:8080/", title: "Test Page" },
+];
+
 let server: RspServer;
 let spawner: GdbServerSpawner;
 let client: RspClient;
 
 before(async () => {
   spawner = new GdbServerSpawner(fakeLauncher);
-  server = new RspServer(new PlatformServer({ spawner }));
+  server = new RspServer(new PlatformServer({ spawner, listTabs: async () => fakeTabs }));
   const port = await server.listen(0);
   client = await RspClient.connect(port);
 });
@@ -68,13 +73,51 @@ test("working directory round-trips through QSetWorkingDir/qGetWorkingDir", asyn
   assert.equal(hexToAscii(await client.requestText("qGetWorkingDir")), dir);
 });
 
-test("qfProcessInfo lists at least one process with hex-encoded name", async () => {
+test("qfProcessInfo lists Firefox tabs as processes with hex-encoded urls", async () => {
   const resp = await client.requestText("qfProcessInfo");
   assert.match(resp, /pid:\d+;/);
   const name = resp.match(/name:([0-9a-f]+);/)![1];
-  assert.equal(hexToAscii(name), "firefox-lldb");
-  // The sole entry exhausts on the next query.
+  assert.equal(hexToAscii(name), "http://localhost:8080/");
   assert.equal(await client.requestText("qsProcessInfo"), "E04");
+});
+
+test("qfProcessInfo assigns stable pids across calls", async () => {
+  const pid1 = (await client.requestText("qfProcessInfo")).match(/pid:(\d+);/)![1];
+  const pid2 = (await client.requestText("qfProcessInfo")).match(/pid:(\d+);/)![1];
+  assert.equal(pid1, pid2);
+});
+
+test("qLaunchGDBServer with pid routes to the correct tab actor", async () => {
+  let capturedTabActor: string | undefined;
+  const capturingLauncher: GdbServerLauncher = async ({ port, tabActor }) => {
+    capturedTabActor = tabActor;
+    const srv = new RspServer(
+      { async handle() { return ""; } },
+      { singleConnection: true },
+    );
+    await srv.listen(port);
+    return { stop: () => srv.close() };
+  };
+  const sp = new GdbServerSpawner(capturingLauncher);
+  const srv = new RspServer(
+    new PlatformServer({
+      spawner: sp,
+      listTabs: async () => [{ actor: "tab-actor-1", url: "http://example.com/", title: "" }],
+    }),
+  );
+  const srvPort = await srv.listen(0);
+  const cl = await RspClient.connect(srvPort);
+
+  const listResp = await cl.requestText("qfProcessInfo");
+  const pid = listResp.match(/pid:(\d+);/)![1];
+
+  const launchResp = await cl.requestText(`qLaunchGDBServer;host:localhost;pid:${pid};`);
+  assert.match(launchResp, /port:\d+;/);
+  assert.equal(capturedTabActor, "tab-actor-1");
+
+  cl.close();
+  await srv.close();
+  await sp.killAll();
 });
 
 test("qLaunchGDBServer spawns a reachable per-tab GDB server", async () => {
