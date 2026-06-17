@@ -26,16 +26,22 @@ npm install
 ### One-command debug session
 
 `firefox-lldb` launches Firefox, starts the platform server, and drops you into
-an interactive lldb prompt already connected to the wasm target:
+an interactive lldb prompt. Once the page loads, the server prints a hint:
 
 ```sh
 LLDB=/path/to/wasm-lldb node --import tsx src/cli/firefox-lldb.ts \
   --launch --url http://localhost:8080/index.html
 ```
 
+```
+[info] tab available: http://localhost:8080/ — run 'platform process list' in lldb
+```
+
 From the lldb prompt:
 
 ```
+(lldb) platform process list        # see open tabs and their PIDs
+(lldb) process attach --pid <N>     # attach to the wasm tab
 (lldb) breakpoint set -n compute_factorial
 (lldb) continue
 ```
@@ -52,7 +58,8 @@ URL=http://localhost:8080/index.html npm run launch
 lldb
 (lldb) platform select remote-gdb-server
 (lldb) platform connect connect://localhost:1234
-(lldb) platform process launch -- http://localhost:8080/index.html
+(lldb) platform process list
+(lldb) process attach --pid <N>
 ```
 
 Connect to an already-running Firefox instead of launching a new one:
@@ -67,7 +74,7 @@ npm run connect
 | ------------------ | ----------------- | --------------------------------------- |
 | `--port`           | `1234`            | Platform server RSP port                |
 | `--rdp-port`       | `6080`            | Firefox RDP port                        |
-| `--url`            | —                 | Page to load when lldb spawns a process |
+| `--url`            | —                 | Page to open in Firefox at startup      |
 | `--firefox`        | system Firefox    | Path to Firefox binary                  |
 | `--headless`       | off               | Run Firefox headlessly                  |
 | `--launch`         | (default)         | Launch a fresh Firefox                  |
