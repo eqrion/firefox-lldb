@@ -66,7 +66,9 @@ impl AddrSpace {
 
     /// Update/create new mappings so that all modules and instances'
     /// memories in the debuggee have mappings.
-    pub fn update(&mut self, d: &Debuggee) -> Result<()> {
+    /// Returns true if any new modules were registered.
+    pub fn update(&mut self, d: &Debuggee) -> Result<bool> {
+        let before = self.modules.len();
         for module in d.all_modules() {
             let _ = self.module_id(&module);
         }
@@ -81,7 +83,7 @@ impl AddrSpace {
                 }
             }
         }
-        Ok(())
+        Ok(self.modules.len() > before)
     }
 
     /// Iterate over each registered module paired with its base `WasmAddr`.

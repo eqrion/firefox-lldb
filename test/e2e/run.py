@@ -552,7 +552,6 @@ class TestControlFlow(TestBase):
                       "after step+continue, should hit the factorial breakpoint")
         self.assertNotIn("compute_", func)
 
-    @unittest.expectedFailure
     def test_step_out_to_js(self):
         """Stepping out of the outermost wasm frame eventually reaches a JS caller."""
         fx = next(f for f in FIXTURES if f["name"] == "factorial")
@@ -610,7 +609,6 @@ class TestSourceListing(TestBase):
         self.assertIn("compute_factorial", content,
                       f"expected compute_factorial in source listing:\n{content}")
 
-    @unittest.expectedFailure
     def test_js_source_listing(self):
         """Source listing on a JS frame shows JavaScript source lines from the temp file."""
         fx = next(f for f in FIXTURES if f["name"] == "factorial")
@@ -704,7 +702,6 @@ class TestEdgeCases(TestBase):
         if wp is not None and wp.IsValid():
             pass  # unexpected success: watchpoints actually work
 
-    @unittest.expectedFailure
     def test_interleaved_js_wasm_frames(self):
         """JS caller frames are visible above the wasm breakpoint frame."""
         fx = next(f for f in FIXTURES if f["name"] == "factorial")

@@ -166,14 +166,6 @@ RDP facts confirmed experimentally:
 - **JS locals/variable inspection** — JS frame locals are not yet exposed (returns empty). JS values don't map cleanly to wasm types; deferred to a future phase.
 - **Per-function JS names** — each JS source is one synthetic module with a file-level subprogram; `GetFunctionName()` returns the filename. Real per-function names (from the per-frame `displayName` RDP already provides) would need multi-subprogram modules with content-versioned unique ids.
 - **Stepping across the JS/wasm boundary** — not yet supported.
-- **JS caller frames not yet visible in the multithreading call stack** — The
-  multithreading gdbstub registers only wasm modules in its address space. JS
-  frames (`call` type) are in the RDP frame list but are excluded from the
-  `qWasmCallStack` response because their synthetic modules are not registered
-  in `addr_space`, which would cause a panic in `frame_to_return_addr`. Adding
-  JS frames requires registering synthetic modules through `allModules()` with
-  careful timing (pre-startup fetch of all JS sources is too slow; lazy
-  registration requires addr_space API changes).
 - **Duplicate frame IDs for recursive JS frames** — `qWasmCallStack` reports only
   PCs; LLDB's wasm plugin derives `GetFrameID()` from the PC alone (no FP/SP
   equivalent for wasm). Multiple JS frames at the same source line (e.g., a

@@ -87,7 +87,7 @@ impl<'a> Debugger<'a> {
         // Load module info and initial thread state from the debuggee. Modules
         // are pre-registered on the debuggee store before the Debuggee is
         // created, so they are visible here without needing to execute any Wasm.
-        self.update_on_stop();
+        let _ = self.update_on_stop();
 
         let listener = TcpListener::bind(&self.options.tcp_address)
             .await
@@ -183,8 +183,8 @@ impl<'a> Debugger<'a> {
         ));
     }
 
-    fn update_on_stop(&mut self) {
-        self.addr_space.update(self.debuggee).unwrap();
+    fn update_on_stop(&mut self) -> bool {
+        let new_modules = self.addr_space.update(self.debuggee).unwrap();
 
         // Identify the thread that triggered the stop and the full live set.
         let stopped_n = self.debuggee.stopped_thread();
@@ -222,6 +222,7 @@ impl<'a> Debugger<'a> {
             ts.current_pc = current_pc;
             ts.frame_cache = frames;
         }
+        new_modules
     }
 
     async fn handle_event<'b>(
@@ -254,13 +255,18 @@ impl<'a> Debugger<'a> {
                     "Event::Breakpoint; stepping_tid = {:?}",
                     self.stepping_tid
                 );
-                self.update_on_stop();
+                let new_modules = self.update_on_stop();
                 let stopped_pc = self
                     .threads
                     .get(&self.stopped_tid)
                     .map(|ts| ts.current_pc)
                     .unwrap_or_else(|| WasmAddr::from_raw(0).unwrap());
-                let stop_reason = if self.stepping_tid.is_some() {
+                // When new synthetic JS modules were registered, signal a
+                // library change so LLDB re-reads qXfer:libraries and loads
+                // the new modules before symbolidating the call stack.
+                let stop_reason = if new_modules {
+                    MultiThreadStopReason::Library(self.stopped_tid)
+                } else if self.stepping_tid.is_some() {
                     MultiThreadStopReason::SignalWithThread {
                         tid: self.stopped_tid,
                         signal: Signal::SIGTRAP,
@@ -277,7 +283,7 @@ impl<'a> Debugger<'a> {
             }
             api::Event::Trap => {
                 trace!("Event::Trap");
-                self.update_on_stop();
+                let _ = self.update_on_stop();
                 let stopped_pc = self
                     .threads
                     .get(&self.stopped_tid)
@@ -301,7 +307,7 @@ impl<'a> Debugger<'a> {
                 trace!("other event: {event:?}");
                 if self.interrupt {
                     self.interrupt = false;
-                    self.update_on_stop();
+                    let _ = self.update_on_stop();
                     let stopped_pc = self
                         .threads
                         .get(&self.stopped_tid)
@@ -345,14 +351,19 @@ impl<'a> Debugger<'a> {
 struct Conn {
     buf: Vec<u8>,
     conn: TcpStream,
+    // Accumulates inbound bytes to reconstruct complete RSP frames for tracing.
+    trace_in: Vec<u8>,
 }
 
 impl Conn {
     fn new(conn: TcpStream) -> Self {
-        Conn { buf: vec![], conn }
+        Conn { buf: vec![], conn, trace_in: vec![] }
     }
 
     async fn flush(&mut self) -> anyhow::Result<()> {
+        if !self.buf.is_empty() {
+            log::trace!(">> {}", String::from_utf8_lossy(&self.buf));
+        }
         self.conn.write_all(&self.buf).await?;
         self.buf.clear();
         Ok(())
@@ -361,7 +372,34 @@ impl Conn {
     async fn read_byte(&mut self) -> Result<Option<u8>> {
         let mut buf = [0u8];
         let len = self.conn.read(&mut buf).await?;
-        if len == 1 { Ok(Some(buf[0])) } else { Ok(None) }
+        if len != 1 {
+            return Ok(None);
+        }
+        let b = buf[0];
+        if log::log_enabled!(log::Level::Trace) {
+            self.log_inbound(b);
+        }
+        Ok(Some(b))
+    }
+
+    fn log_inbound(&mut self, b: u8) {
+        if self.trace_in.is_empty() {
+            match b {
+                b'+' => { log::trace!("<< +"); return; }
+                b'-' => { log::trace!("<< -"); return; }
+                0x03 => { log::trace!("<< interrupt"); return; }
+                _ => {}
+            }
+        }
+        self.trace_in.push(b);
+        // RSP packets are $<body>#<cc>. '#' cannot appear unescaped in the body,
+        // so the first '#' marks end-of-body; two bytes follow for the checksum.
+        if let Some(hash) = self.trace_in.iter().position(|&c| c == b'#') {
+            if self.trace_in.len() >= hash + 3 {
+                log::trace!("<< {}", String::from_utf8_lossy(&self.trace_in));
+                self.trace_in.clear();
+            }
+        }
     }
 }
 

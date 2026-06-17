@@ -24,6 +24,19 @@ wasmtime, which is a manual, rare action. Each edit is commented in place.
   now index `self.threads[&tid]`; `list_active_threads` iterates the full map.
   `get_libraries()` calls `m.name()` instead of `"wasm-{i}"` for real source names.
 - `src/addr.rs` — `modules_with_addrs()` pairs each module with its base address.
+- `src/lib.rs` (RSP tracing) — `Conn` gains a `trace_in: Vec<u8>` field and a
+  `log_inbound` method that reconstructs complete `$<body>#<cc>` RSP frames from
+  individual bytes and emits them via `log::trace!("<< ...")`. `flush` logs
+  `">> ..."` before writing the outbound buffer. Both are gated behind the
+  existing `-v` / `env_logger` trace level, matching the platform server's
+  `>>` / `<<` convention.
+- `src/lib.rs` (library change signal) — `update_on_stop()` now returns `bool`
+  (true when new modules were added to `addr_space`). On `Event::Breakpoint`,
+  if new modules appeared, the stop reply uses `MultiThreadStopReason::Library`
+  instead of `SwBreak`, emitting `library:;` in the T packet so LLDB re-reads
+  `qXfer:libraries` and loads the newly registered synthetic JS modules.
+- `src/addr.rs` — `AddrSpace::update()` now returns `bool` (true when new
+  modules were registered).
 - `wit/world.wit` — extended the `debuggee` resource with `list-threads`,
   `stopped-thread`; `exit-frames` and `single-step` now take an explicit `tid: u32`.
   `resource module` gains `name: func() -> string` for source URL basenames.
