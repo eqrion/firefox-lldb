@@ -70,14 +70,20 @@ class Debuggee {
   allInstances() {
     return rpc("Debuggee", 0, "allInstances", []);
   }
-  exitFrames() {
-    return rpc("Debuggee", 0, "exitFrames", []);
+  listThreads() {
+    return rpc("Debuggee", 0, "listThreads", []);
+  }
+  stoppedThread() {
+    return rpc("Debuggee", 0, "stoppedThread", []);
+  }
+  exitFrames(tid) {
+    return rpc("Debuggee", 0, "exitFrames", [tid]);
   }
   continue(rv) {
     return rpc("Debuggee", 0, "continue", [rv]);
   }
-  singleStep(rv) {
-    return rpc("Debuggee", 0, "singleStep", [rv]);
+  singleStep(tid, rv) {
+    return rpc("Debuggee", 0, "singleStep", [tid, rv]);
   }
   interrupt() {
     return rpc("Debuggee", 0, "interrupt", []);

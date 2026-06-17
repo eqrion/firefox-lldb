@@ -10,7 +10,6 @@ use crate::{
 };
 use anyhow::Result;
 use clap::Parser;
-use futures::{FutureExt, select};
 use gdbstub::{
     common::{Signal, Tid},
     conn::Connection,
@@ -21,6 +20,7 @@ use gdbstub::{
 };
 use gdbstub_arch::wasm::addr::WasmAddr;
 use log::trace;
+use std::collections::BTreeMap;
 use wstd::{
     io::{AsyncRead, AsyncWrite},
     iter::AsyncIterator,
@@ -50,13 +50,12 @@ impl api::exports::bytecodealliance::wasmtime::debugger::Guest for Component {
         }
         let mut debugger = Debugger {
             debuggee: d,
-            tid: Tid::new(1).unwrap(),
+            threads: BTreeMap::new(),
+            stopped_tid: Tid::new(1).unwrap(),
             options,
             running: None,
-            current_pc: WasmAddr::from_raw(0).unwrap(),
             interrupt: false,
-            single_stepping: false,
-            frame_cache: vec![],
+            stepping_tid: None,
             addr_space: AddrSpace::new(),
         };
         wstd::runtime::block_on(async {
@@ -67,24 +66,27 @@ impl api::exports::bytecodealliance::wasmtime::debugger::Guest for Component {
     }
 }
 
+pub(crate) struct ThreadState {
+    pub current_pc: WasmAddr,
+    pub frame_cache: Vec<api::Frame>,
+}
+
 struct Debugger<'a> {
     debuggee: &'a api::Debuggee,
-    tid: Tid,
+    threads: BTreeMap<Tid, ThreadState>,
+    stopped_tid: Tid,
     options: Options,
     running: Option<api::Resumption>,
     addr_space: AddrSpace,
     interrupt: bool,
-    single_stepping: bool,
-    current_pc: WasmAddr,
-    frame_cache: Vec<api::Frame>,
+    stepping_tid: Option<Tid>,
 }
 
 impl<'a> Debugger<'a> {
     async fn run(&mut self) -> Result<()> {
-        // Load module info from the debuggee. Modules are
-        // pre-registered on the debuggee store before the Debuggee is
-        // created, so they are visible here without needing to
-        // execute any Wasm.
+        // Load module info and initial thread state from the debuggee. Modules
+        // are pre-registered on the debuggee store before the Debuggee is
+        // created, so they are visible here without needing to execute any Wasm.
         self.update_on_stop();
 
         let listener = TcpListener::bind(&self.options.tcp_address)
@@ -166,34 +168,59 @@ impl<'a> Debugger<'a> {
     fn start_continue(&mut self, resumption: api::ResumptionValue) {
         assert!(self.running.is_none());
         trace!("continuing");
-        self.single_stepping = false;
+        self.stepping_tid = None;
         self.running = Some(api::Resumption::continue_(self.debuggee, resumption));
     }
 
-    fn start_single_step(&mut self, resumption: api::ResumptionValue) {
+    fn start_single_step(&mut self, tid: Tid, resumption: api::ResumptionValue) {
         assert!(self.running.is_none());
-        trace!("single-stepping");
-        self.single_stepping = true;
-        self.running = Some(api::Resumption::single_step(self.debuggee, resumption));
+        trace!("single-stepping tid={}", tid.get());
+        self.stepping_tid = Some(tid);
+        self.running = Some(api::Resumption::single_step(
+            self.debuggee,
+            tid.get() as u32,
+            resumption,
+        ));
     }
 
     fn update_on_stop(&mut self) {
         self.addr_space.update(self.debuggee).unwrap();
 
-        // Cache all frame handles for the duration of this stop.
-        // The Wasm trait methods take `&self` and need access to
-        // frames by depth, so we eagerly walk the full stack here.
-        self.frame_cache.clear();
-        let mut next = self.debuggee.exit_frames().into_iter().next();
-        while let Some(f) = next {
-            next = f.parent_frame(self.debuggee).unwrap();
-            self.frame_cache.push(f);
+        // Identify the thread that triggered the stop and the full live set.
+        let stopped_n = self.debuggee.stopped_thread();
+        if let Some(tid) = Tid::new(stopped_n as usize) {
+            self.stopped_tid = tid;
         }
+        let live: Vec<u32> = self.debuggee.list_threads();
 
-        if let Some(f) = self.frame_cache.first() {
-            self.current_pc = self.addr_space.frame_to_pc(f, self.debuggee);
-        } else {
-            self.current_pc = WasmAddr::from_raw(0).unwrap();
+        // Drop threads that no longer exist.
+        let live_set: BTreeMap<Tid, ()> = live
+            .iter()
+            .filter_map(|&n| Tid::new(n as usize).map(|t| (t, ())))
+            .collect();
+        self.threads.retain(|tid, _| live_set.contains_key(tid));
+
+        // Refresh the frame cache for every live thread.
+        for n in live {
+            let Some(tid) = Tid::new(n as usize) else {
+                continue;
+            };
+            let mut frames: Vec<api::Frame> = vec![];
+            let mut next = self.debuggee.exit_frames(n).into_iter().next();
+            while let Some(f) = next {
+                next = f.parent_frame(self.debuggee).unwrap();
+                frames.push(f);
+            }
+            let current_pc = frames
+                .first()
+                .map(|f| self.addr_space.frame_to_pc(f, self.debuggee))
+                .unwrap_or_else(|| WasmAddr::from_raw(0).unwrap());
+            let ts = self.threads.entry(tid).or_insert(ThreadState {
+                current_pc: WasmAddr::from_raw(0).unwrap(),
+                frame_cache: vec![],
+            });
+            ts.current_pc = current_pc;
+            ts.frame_cache = frames;
         }
     }
 
@@ -202,10 +229,16 @@ impl<'a> Debugger<'a> {
         event: api::Event,
         inner: GdbStubStateMachineInner<'b, Running, Self, Conn>,
     ) -> Result<GdbStubStateMachine<'b, Self, Conn>> {
+        let stopped_pc = self
+            .threads
+            .get(&self.stopped_tid)
+            .map(|ts| ts.current_pc)
+            .unwrap_or_else(|| WasmAddr::from_raw(0).unwrap());
+
         match event {
             api::Event::Complete => {
                 trace!("Event::Complete");
-                let pc_bytes = self.current_pc.as_raw().to_le_bytes();
+                let pc_bytes = stopped_pc.as_raw().to_le_bytes();
                 let mut regs = core::iter::once((
                     gdbstub_arch::wasm::reg::id::WasmRegId::Pc,
                     pc_bytes.as_slice(),
@@ -218,19 +251,24 @@ impl<'a> Debugger<'a> {
             }
             api::Event::Breakpoint => {
                 trace!(
-                    "Event::Breakpoint; single_stepping = {}",
-                    self.single_stepping
+                    "Event::Breakpoint; stepping_tid = {:?}",
+                    self.stepping_tid
                 );
                 self.update_on_stop();
-                let stop_reason = if self.single_stepping {
+                let stopped_pc = self
+                    .threads
+                    .get(&self.stopped_tid)
+                    .map(|ts| ts.current_pc)
+                    .unwrap_or_else(|| WasmAddr::from_raw(0).unwrap());
+                let stop_reason = if self.stepping_tid.is_some() {
                     MultiThreadStopReason::SignalWithThread {
-                        tid: self.tid,
+                        tid: self.stopped_tid,
                         signal: Signal::SIGTRAP,
                     }
                 } else {
-                    MultiThreadStopReason::SwBreak(self.tid)
+                    MultiThreadStopReason::SwBreak(self.stopped_tid)
                 };
-                let pc_bytes = self.current_pc.as_raw().to_le_bytes();
+                let pc_bytes = stopped_pc.as_raw().to_le_bytes();
                 let mut regs = core::iter::once((
                     gdbstub_arch::wasm::reg::id::WasmRegId::Pc,
                     pc_bytes.as_slice(),
@@ -240,16 +278,20 @@ impl<'a> Debugger<'a> {
             api::Event::Trap => {
                 trace!("Event::Trap");
                 self.update_on_stop();
-                let pc_bytes = self.current_pc.as_raw().to_le_bytes();
+                let stopped_pc = self
+                    .threads
+                    .get(&self.stopped_tid)
+                    .map(|ts| ts.current_pc)
+                    .unwrap_or_else(|| WasmAddr::from_raw(0).unwrap());
+                let pc_bytes = stopped_pc.as_raw().to_le_bytes();
                 let mut regs = core::iter::once((
                     gdbstub_arch::wasm::reg::id::WasmRegId::Pc,
                     pc_bytes.as_slice(),
                 ));
                 Ok(inner.report_stop_with_regs(
                     self,
-                    // We report all traps as SIGSEGV for now.
                     MultiThreadStopReason::SignalWithThread {
-                        tid: self.tid,
+                        tid: self.stopped_tid,
                         signal: Signal::SIGSEGV,
                     },
                     &mut regs,
@@ -260,7 +302,12 @@ impl<'a> Debugger<'a> {
                 if self.interrupt {
                     self.interrupt = false;
                     self.update_on_stop();
-                    let pc_bytes = self.current_pc.as_raw().to_le_bytes();
+                    let stopped_pc = self
+                        .threads
+                        .get(&self.stopped_tid)
+                        .map(|ts| ts.current_pc)
+                        .unwrap_or_else(|| WasmAddr::from_raw(0).unwrap());
+                    let pc_bytes = stopped_pc.as_raw().to_le_bytes();
                     let mut regs = core::iter::once((
                         gdbstub_arch::wasm::reg::id::WasmRegId::Pc,
                         pc_bytes.as_slice(),
@@ -271,8 +318,8 @@ impl<'a> Debugger<'a> {
                         &mut regs,
                     )?)
                 } else {
-                    if self.single_stepping {
-                        self.start_single_step(api::ResumptionValue::Normal);
+                    if let Some(step_tid) = self.stepping_tid {
+                        self.start_single_step(step_tid, api::ResumptionValue::Normal);
                     } else {
                         self.start_continue(api::ResumptionValue::Normal);
                     }

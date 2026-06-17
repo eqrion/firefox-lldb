@@ -76,13 +76,19 @@ impl<'a> Target for Debugger<'a> {
 }
 
 impl<'a> MultiThreadBase for Debugger<'a> {
-    fn read_registers(&mut self, regs: &mut WasmRegisters, _tid: Tid) -> TargetResult<(), Self> {
-        regs.pc = self.current_pc.as_raw();
+    fn read_registers(&mut self, regs: &mut WasmRegisters, tid: Tid) -> TargetResult<(), Self> {
+        regs.pc = self
+            .threads
+            .get(&tid)
+            .map(|ts| ts.current_pc.as_raw())
+            .unwrap_or(0);
         Ok(())
     }
 
-    fn write_registers(&mut self, regs: &WasmRegisters, _tid: Tid) -> TargetResult<(), Self> {
-        self.current_pc = WasmAddr::from_raw(regs.pc).ok_or(TargetError::NonFatal)?;
+    fn write_registers(&mut self, regs: &WasmRegisters, tid: Tid) -> TargetResult<(), Self> {
+        if let Some(ts) = self.threads.get_mut(&tid) {
+            ts.current_pc = WasmAddr::from_raw(regs.pc).ok_or(TargetError::NonFatal)?;
+        }
         Ok(())
     }
 
@@ -127,7 +133,9 @@ impl<'a> MultiThreadBase for Debugger<'a> {
         &mut self,
         thread_is_active: &mut dyn FnMut(Tid),
     ) -> Result<(), Self::Error> {
-        thread_is_active(self.tid);
+        for &tid in self.threads.keys() {
+            thread_is_active(tid);
+        }
         Ok(())
     }
 
@@ -143,13 +151,18 @@ impl<'a> MultiThreadBase for Debugger<'a> {
 impl<'a> SingleRegisterAccess<Tid> for Debugger<'a> {
     fn read_register(
         &mut self,
-        _tid: Tid,
+        tid: Tid,
         reg_id: WasmRegId,
         buf: &mut [u8],
     ) -> TargetResult<usize, Self> {
         match reg_id {
             WasmRegId::Pc => {
-                let bytes = self.current_pc.as_raw().to_le_bytes();
+                let raw = self
+                    .threads
+                    .get(&tid)
+                    .map(|ts| ts.current_pc.as_raw())
+                    .unwrap_or(0);
+                let bytes = raw.to_le_bytes();
                 let n = bytes.len().min(buf.len());
                 buf[..n].copy_from_slice(&bytes[..n]);
                 Ok(n)
@@ -160,7 +173,7 @@ impl<'a> SingleRegisterAccess<Tid> for Debugger<'a> {
 
     fn write_register(
         &mut self,
-        _tid: Tid,
+        tid: Tid,
         reg_id: WasmRegId,
         val: &[u8],
     ) -> TargetResult<(), Self> {
@@ -170,7 +183,10 @@ impl<'a> SingleRegisterAccess<Tid> for Debugger<'a> {
                     return Err(TargetError::NonFatal);
                 }
                 let raw = u64::from_le_bytes(val[..8].try_into().unwrap());
-                self.current_pc = WasmAddr::from_raw(raw).ok_or(TargetError::NonFatal)?;
+                let addr = WasmAddr::from_raw(raw).ok_or(TargetError::NonFatal)?;
+                if let Some(ts) = self.threads.get_mut(&tid) {
+                    ts.current_pc = addr;
+                }
                 Ok(())
             }
             _ => Err(TargetError::NonFatal),
@@ -180,10 +196,11 @@ impl<'a> SingleRegisterAccess<Tid> for Debugger<'a> {
 
 impl<'a> MultiThreadResume for Debugger<'a> {
     fn resume(&mut self) -> Result<(), Self::Error> {
-        self.frame_cache.clear();
-        log::trace!("resume() -> single_stepping = {}", self.single_stepping);
-        if self.single_stepping {
-            self.start_single_step(api::ResumptionValue::Normal);
+        for ts in self.threads.values_mut() {
+            ts.frame_cache.clear();
+        }
+        if let Some(step_tid) = self.stepping_tid {
+            self.start_single_step(step_tid, api::ResumptionValue::Normal);
         } else {
             self.start_continue(api::ResumptionValue::Normal);
         }
@@ -191,7 +208,7 @@ impl<'a> MultiThreadResume for Debugger<'a> {
     }
 
     fn clear_resume_actions(&mut self) -> Result<(), Self::Error> {
-        self.single_stepping = false;
+        self.stepping_tid = None;
         Ok(())
     }
 
@@ -200,7 +217,6 @@ impl<'a> MultiThreadResume for Debugger<'a> {
         _tid: Tid,
         _signal: Option<Signal>,
     ) -> Result<(), Self::Error> {
-        self.single_stepping = false;
         Ok(())
     }
 
@@ -216,17 +232,18 @@ impl<'a> MultiThreadResume for Debugger<'a> {
 impl<'a> MultiThreadSingleStep for Debugger<'a> {
     fn set_resume_action_step(
         &mut self,
-        _tid: Tid,
+        tid: Tid,
         _signal: Option<Signal>,
     ) -> Result<(), Self::Error> {
-        self.single_stepping = true;
+        self.stepping_tid = Some(tid);
         Ok(())
     }
 }
 
 impl<'a> MultiThreadSchedulerLocking for Debugger<'a> {
     fn set_resume_action_scheduler_lock(&mut self) -> Result<(), Self::Error> {
-        // We have a single thread, so scheduler locking is a no-op.
+        // The host handles scheduler locking: single-step(tid) only resumes
+        // the given thread, leaving all others paused.
         Ok(())
     }
 }
@@ -350,9 +367,12 @@ impl<'a> MemoryMap for Debugger<'a> {
 }
 
 impl<'a> Wasm for Debugger<'a> {
-    fn wasm_call_stack(&self, _tid: Tid, callback: &mut dyn FnMut(u64)) -> Result<(), Self::Error> {
+    fn wasm_call_stack(&self, tid: Tid, callback: &mut dyn FnMut(u64)) -> Result<(), Self::Error> {
+        let Some(ts) = self.threads.get(&tid) else {
+            return Ok(());
+        };
         let debuggee = self.debuggee;
-        for (i, f) in self.frame_cache.iter().enumerate() {
+        for (i, f) in ts.frame_cache.iter().enumerate() {
             // For non-innermost frames, report the return address
             // (the instruction after the call) rather than the call
             // instruction's PC. This matches the standard debugger
@@ -372,12 +392,15 @@ impl<'a> Wasm for Debugger<'a> {
 
     fn read_wasm_local(
         &self,
-        _tid: Tid,
+        tid: Tid,
         frame_depth: usize,
         index: usize,
         buf: &mut [u8],
     ) -> Result<usize, Self::Error> {
-        let Some(f) = self.frame_cache.get(frame_depth) else {
+        let Some(ts) = self.threads.get(&tid) else {
+            return Ok(0);
+        };
+        let Some(f) = ts.frame_cache.get(frame_depth) else {
             return Ok(0);
         };
         let Ok(locals) = f.get_locals(self.debuggee) else {
@@ -393,12 +416,15 @@ impl<'a> Wasm for Debugger<'a> {
 
     fn read_wasm_global(
         &self,
-        _tid: Tid,
+        tid: Tid,
         frame_depth: usize,
         index: usize,
         buf: &mut [u8],
     ) -> Result<usize, Self::Error> {
-        let Some(f) = self.frame_cache.get(frame_depth) else {
+        let Some(ts) = self.threads.get(&tid) else {
+            return Ok(0);
+        };
+        let Some(f) = ts.frame_cache.get(frame_depth) else {
             return Ok(0);
         };
         let debuggee = self.debuggee;
@@ -418,12 +444,15 @@ impl<'a> Wasm for Debugger<'a> {
 
     fn read_wasm_stack(
         &self,
-        _tid: Tid,
+        tid: Tid,
         frame_depth: usize,
         index: usize,
         buf: &mut [u8],
     ) -> Result<usize, Self::Error> {
-        let Some(f) = self.frame_cache.get(frame_depth) else {
+        let Some(ts) = self.threads.get(&tid) else {
+            return Ok(0);
+        };
+        let Some(f) = ts.frame_cache.get(frame_depth) else {
             return Ok(0);
         };
         let Ok(stack) = f.get_stack(self.debuggee) else {

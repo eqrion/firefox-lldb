@@ -50,7 +50,17 @@ interface debuggee {
     /// yield an "interrupted" event.
     interrupt: func();
 
-    /// Single-step, returning a future that will yield an event
+    /// List the IDs of all active threads.
+    ///
+    /// If invoked while already running, causes a trap.
+    list-threads: func() -> list<u32>;
+
+    /// Get the ID of the thread that triggered the most recent pause.
+    ///
+    /// If invoked while already running, causes a trap.
+    stopped-thread: func() -> u32;
+
+    /// Single-step the given thread, returning a future that will yield an event
     /// when the single-step execution is complete.
     ///
     /// The `resumption` value indicates any mutations to
@@ -64,7 +74,7 @@ interface debuggee {
     /// future completes.
     ///
     /// If invoked while already running, causes a trap.
-    single-step: func(resumption: resumption-value) -> event-future;
+    single-step: func(tid: u32, resumption: resumption-value) -> event-future;
 
     /// Continue execution, returning a future that will
     /// yield an event when the resumed execution
@@ -83,10 +93,10 @@ interface debuggee {
     /// If invoked while already running, causes a trap.
     continue: func(resumption: resumption-value) -> event-future;
 
-    /// Get the current exit frames for each activation.
+    /// Get the current exit frames for the given thread.
     ///
     /// If invoked while already running, causes a trap.
-    exit-frames: func() -> list<frame>;
+    exit-frames: func(tid: u32) -> list<frame>;
   }
 
   /// A future that represents asynchronous execution of the
