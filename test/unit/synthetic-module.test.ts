@@ -68,13 +68,17 @@ test("codeOffset is past the header, type, function, and code section id+size", 
 
 test("codeOffset < bytecode.length and all source lines are in range", () => {
   const lineCount = 50;
-  const { bytecode, codeOffset } = buildSyntheticModule({ name: "a.js", compDir: "/tmp", lineCount });
+  const { bytecode, codeOffset } = buildSyntheticModule({
+    name: "a.js",
+    compDir: "/tmp",
+    lineCount,
+  });
   assert.ok(codeOffset < bytecode.length);
   // Every valid source line (1..lineCount) as a WasmAddr offset must be < bytecode.length
   for (let line = 1; line <= lineCount; line++) {
     assert.ok(
       codeOffset + line < bytecode.length,
-      `pc for line ${line} = ${codeOffset + line} >= bytecode.length ${bytecode.length}`,
+      `pc for line ${line} = ${codeOffset + line} >= bytecode.length ${bytecode.length}`
     );
   }
 });
@@ -100,7 +104,11 @@ test(".debug_line header version is 4", () => {
 });
 
 test("lineCount=0 is handled gracefully (treated as 1)", () => {
-  const { bytecode, codeOffset } = buildSyntheticModule({ name: "e.js", compDir: "/tmp", lineCount: 0 });
+  const { bytecode, codeOffset } = buildSyntheticModule({
+    name: "e.js",
+    compDir: "/tmp",
+    lineCount: 0,
+  });
   assert.ok(bytecode.length > 0);
   assert.ok(codeOffset < bytecode.length);
 });

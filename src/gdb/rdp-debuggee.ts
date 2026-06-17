@@ -29,7 +29,9 @@ function urlBasename(url: string): string {
   try {
     const name = new URL(url).pathname.split("/").filter(Boolean).pop();
     if (name) return name;
-  } catch { /* fall through */ }
+  } catch {
+    /* fall through */
+  }
   return basename(url) || "source.js";
 }
 
@@ -83,7 +85,8 @@ export class RdpDebuggee {
     this.#onFirstContinue = opts?.onFirstContinue ?? null;
 
     session.on("stopped", (e: StoppedEvent) => {
-      this.#lastPauseReason = (e.pausePacket as { why?: { type?: string } })?.why?.type ?? "breakpoint";
+      this.#lastPauseReason =
+        (e.pausePacket as { why?: { type?: string } })?.why?.type ?? "breakpoint";
       this.#resolveStopped?.(e);
       this.#resolveStopped = null;
     });
@@ -141,16 +144,10 @@ export class RdpDebuggee {
       case "Module.bytecode":
         return this.#session.fetchModuleBytes(this.#moduleById.get(id)!.url);
       case "Module.addBreakpoint":
-        await this.#session.setWasmBreakpoint(
-          this.#moduleById.get(id)!.url,
-          args[0] as number
-        );
+        await this.#session.setWasmBreakpoint(this.#moduleById.get(id)!.url, args[0] as number);
         return null;
       case "Module.removeBreakpoint":
-        await this.#session.removeWasmBreakpoint(
-          this.#moduleById.get(id)!.url,
-          args[0] as number
-        );
+        await this.#session.removeWasmBreakpoint(this.#moduleById.get(id)!.url, args[0] as number);
         return null;
 
       case "Instance.getModule":
@@ -236,7 +233,6 @@ export class RdpDebuggee {
     return refs;
   }
 
-
   #moduleRef(url: string): Ref {
     let m = this.#moduleByUrl.get(url);
     if (!m) {
@@ -260,9 +256,7 @@ export class RdpDebuggee {
     for (const tid of tids) {
       let frames: FrameForm[] = [];
       try {
-        frames = (await this.#session.frames(tid)).filter(
-          (f) => f.type === "wasmcall" && f.where
-        );
+        frames = (await this.#session.frames(tid)).filter((f) => f.type === "wasmcall" && f.where);
       } catch {
         frames = [];
       }
@@ -367,7 +361,7 @@ export class RdpDebuggee {
       const r = (await this.#session.evaluateInFrame(
         "memory0.buffer.byteLength",
         topActor,
-        consoleActor,
+        consoleActor
       )) as { result?: unknown };
       return typeof r.result === "number" ? r.result : 0;
     } catch {

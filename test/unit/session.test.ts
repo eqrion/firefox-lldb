@@ -86,31 +86,31 @@ class FakeRdpServer {
     // Register init-sequence handlers before starting (they match in order).
     this.#on(
       (r) => r.to === "root" && r.type === "listTabs",
-      () => ({ from: "root", tabs: [{ actor: "tab1", selected: true }] }),
+      () => ({ from: "root", tabs: [{ actor: "tab1", selected: true }] })
     );
     this.#on(
       (r) => r.to === "tab1" && r.type === "getWatcher",
-      () => ({ from: "tab1", actor: "watcher1" }),
+      () => ({ from: "tab1", actor: "watcher1" })
     );
     this.#on(
       (r) => r.to === "watcher1" && r.type === "getThreadConfigurationActor",
-      () => ({ from: "watcher1", configuration: "cfg1" }),
+      () => ({ from: "watcher1", configuration: "cfg1" })
     );
     this.#on(
       (r) => r.to === "cfg1" && r.type === "updateConfiguration",
-      () => ({ from: "cfg1" }),
+      () => ({ from: "cfg1" })
     );
     this.#on(
       (r) => r.to === "watcher1" && r.type === "watchTargets" && r.targetType === "frame",
-      () => ({ from: "watcher1" }),
+      () => ({ from: "watcher1" })
     );
     this.#on(
       (r) => r.to === "watcher1" && r.type === "watchTargets" && r.targetType === "worker",
-      () => ({ from: "watcher1" }),
+      () => ({ from: "watcher1" })
     );
     this.#on(
       (r) => r.to === "watcher1" && r.type === "watchResources",
-      () => ({ from: "watcher1" }),
+      () => ({ from: "watcher1" })
     );
 
     // Start the session connection concurrently with waiting for the socket.
@@ -118,7 +118,10 @@ class FakeRdpServer {
 
     // Wait for the connection, then send the root greeting to unblock the client.
     await new Promise<void>((resolve) => {
-      if (this.sock) { resolve(); return; }
+      if (this.sock) {
+        resolve();
+        return;
+      }
       this.pendingConnect = resolve;
     });
     this.send({ from: "root" }); // triggers RdpClient.#ready
@@ -157,9 +160,14 @@ class FakeRdpServer {
 
   // Helpers to push specific event types ---------------------------------
 
-  targetAvailable(threadActor: string, opts: {
-    consoleActor?: string; url?: string; isTopLevel?: boolean;
-  } = {}): void {
+  targetAvailable(
+    threadActor: string,
+    opts: {
+      consoleActor?: string;
+      url?: string;
+      isTopLevel?: boolean;
+    } = {}
+  ): void {
     this.send({
       from: "watcher1",
       type: "target-available-form",
@@ -334,7 +342,7 @@ test("armAllStop → pause from one thread → interrupt others → stopped emit
       // Respond to the interrupt request, then inject the paused event.
       setTimeout(() => srv.paused("threadB", "interrupted"), 5);
       return { from: "threadB" };
-    },
+    }
   );
 
   // Arm all-stop and inject a pause from threadA.
@@ -356,9 +364,7 @@ test("armAllStop → pause from one thread → interrupt others → stopped emit
   assert.equal(stopped.pausePacket.why?.type, "breakpoint");
 
   // An interrupt request was sent to threadB.
-  const interrupts = srv.received.filter(
-    (r) => r.type === "interrupt" && r.to === "threadB",
-  );
+  const interrupts = srv.received.filter((r) => r.type === "interrupt" && r.to === "threadB");
   assert.ok(interrupts.length >= 1, "interrupt sent to threadB");
 
   session.close();
@@ -377,7 +383,7 @@ test("armAllStop fires only once even if multiple paused events arrive", async (
   // Both threads will emit paused, but only the first triggers all-stop.
   srv.onAll(
     (r) => r.type === "interrupt",
-    (r) => ({ from: r.to as string }),
+    (r) => ({ from: r.to as string })
   );
 
   const stoppedEvents: StoppedEvent[] = [];
@@ -404,7 +410,7 @@ test("stoppedTid and stoppedConsoleActor reflect the triggering thread", async (
 
   srv.onAll(
     (r) => r.type === "interrupt",
-    (r) => ({ from: r.to as string }),
+    (r) => ({ from: r.to as string })
   );
 
   session.armAllStop();
@@ -428,11 +434,19 @@ test("stoppedConsoleActor returns null when stopped thread has no console", asyn
   srv.send({
     from: "watcher1",
     type: "target-available-form",
-    target: { threadActor: "threadW", consoleActor: "", url: "http://x.com/", isTopLevelTarget: false },
+    target: {
+      threadActor: "threadW",
+      consoleActor: "",
+      url: "http://x.com/",
+      isTopLevelTarget: false,
+    },
   });
   await sleep(20);
 
-  srv.onAll((r) => r.type === "interrupt", (r) => ({ from: r.to as string }));
+  srv.onAll(
+    (r) => r.type === "interrupt",
+    (r) => ({ from: r.to as string })
+  );
   session.armAllStop();
   srv.paused("threadW", "breakpoint");
   await sleep(50);
@@ -478,7 +492,10 @@ test("allStop does not send interrupt to already-paused thread", async () => {
   srv.paused("threadB", "interrupted");
   await sleep(20);
 
-  srv.onAll((r) => r.type === "interrupt", (r) => ({ from: r.to as string }));
+  srv.onAll(
+    (r) => r.type === "interrupt",
+    (r) => ({ from: r.to as string })
+  );
 
   const stoppedEvents: StoppedEvent[] = [];
   session.on("stopped", (e: StoppedEvent) => stoppedEvents.push(e));
@@ -487,9 +504,7 @@ test("allStop does not send interrupt to already-paused thread", async () => {
   await sleep(100);
 
   assert.equal(stoppedEvents.length, 1, "stopped emitted");
-  const interrupts = srv.received.filter(
-    (r) => r.type === "interrupt" && r.to === "threadB",
-  );
+  const interrupts = srv.received.filter((r) => r.type === "interrupt" && r.to === "threadB");
   assert.equal(interrupts.length, 0, "threadB did not receive interrupt");
   session.close();
   srv.close();
@@ -507,7 +522,7 @@ test("setWasmBreakpoint buffers breakpoint and applies it to new workers", async
   // Respond to all setBreakpoint requests.
   srv.onAll(
     (r) => r.type === "setBreakpoint",
-    (r) => ({ from: r.to as string }),
+    (r) => ({ from: r.to as string })
   );
 
   // Set a breakpoint before any workers appear.
@@ -518,9 +533,7 @@ test("setWasmBreakpoint buffers breakpoint and applies it to new workers", async
   await sleep(30);
 
   // The setBreakpoint request should have been sent to workerT.
-  const bps = srv.received.filter(
-    (r) => r.type === "setBreakpoint" && r.to === "workerT",
-  );
+  const bps = srv.received.filter((r) => r.type === "setBreakpoint" && r.to === "workerT");
   assert.ok(bps.length >= 1, "setBreakpoint sent to new worker");
   const loc = bps[0].location as { sourceUrl: string; line: number; column: number };
   assert.equal(loc.sourceUrl, "http://host/mod.wasm");
@@ -541,7 +554,7 @@ test("setWasmBreakpoint sends to all existing threads at call time", async () =>
 
   srv.onAll(
     (r) => r.type === "setBreakpoint",
-    (r) => ({ from: r.to as string }),
+    (r) => ({ from: r.to as string })
   );
 
   await session.setWasmBreakpoint("http://host/mod.wasm", 999);
@@ -565,7 +578,7 @@ test("removeWasmBreakpoint sends to all threads and removes from buffer", async 
 
   srv.onAll(
     (r) => r.type === "setBreakpoint" || r.type === "removeBreakpoint",
-    (r) => ({ from: r.to as string }),
+    (r) => ({ from: r.to as string })
   );
 
   await session.setWasmBreakpoint("http://host/mod.wasm", 42);
@@ -578,9 +591,7 @@ test("removeWasmBreakpoint sends to all threads and removes from buffer", async 
   srv.targetAvailable("workerNew");
   await sleep(30);
 
-  const newBps = srv.received.filter(
-    (r) => r.type === "setBreakpoint" && r.to === "workerNew",
-  );
+  const newBps = srv.received.filter((r) => r.type === "setBreakpoint" && r.to === "workerNew");
   assert.equal(newBps.length, 0, "removed breakpoint not applied to new worker");
 
   session.close();
@@ -608,7 +619,7 @@ test("resumeAll sends resume to all paused threads", async () => {
   // resumeAll should send resume to both.
   srv.onAll(
     (r) => r.type === "resume",
-    (r) => ({ from: r.to as string }),
+    (r) => ({ from: r.to as string })
   );
   await session.resumeAll();
 
@@ -657,7 +668,7 @@ test("resumed event removes thread from paused set; resumeAll skips it", async (
 
   srv.onAll(
     (r) => r.type === "resume",
-    (r) => ({ from: r.to as string }),
+    (r) => ({ from: r.to as string })
   );
 
   const before = srv.received.length;
@@ -691,7 +702,7 @@ test("target-destroyed-form removes thread from paused set; resumeAll skips it",
 
   srv.onAll(
     (r) => r.type === "resume",
-    (r) => ({ from: r.to as string }),
+    (r) => ({ from: r.to as string })
   );
 
   const before = srv.received.length;
@@ -724,18 +735,14 @@ test("stepOne sends resume with resumeLimit:step only to the specified thread", 
 
   srv.onAll(
     (r) => r.type === "resume",
-    (r) => ({ from: r.to as string }),
+    (r) => ({ from: r.to as string })
   );
 
   const tidA = session.listTids()[0]; // threadA registered first → TID 1
   await session.stepOne(tidA);
 
-  const resumesA = srv.received.filter(
-    (r) => r.type === "resume" && r.to === "threadA",
-  );
-  const resumesB = srv.received.filter(
-    (r) => r.type === "resume" && r.to === "threadB",
-  );
+  const resumesA = srv.received.filter((r) => r.type === "resume" && r.to === "threadA");
+  const resumesB = srv.received.filter((r) => r.type === "resume" && r.to === "threadB");
 
   assert.ok(resumesA.length >= 1, "threadA got a resume");
   const limit = resumesA[resumesA.length - 1].resumeLimit as { type: string } | undefined;

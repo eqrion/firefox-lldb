@@ -58,15 +58,15 @@ URL=http://localhost:8080/index.html npm run launch
 
 ## What works / doesn't
 
-| Feature                         | Status                                   |
-| ------------------------------- | ---------------------------------------- |
-| Call stack + DWARF symbols      | done                                     |
-| Breakpoints (name, file:line)   | done                                     |
-| Continue / step in/over/out     | done (SB API only; CLI step is upstream) |
-| Locals, globals, linear memory  | done                                     |
-| Struct/pointer inspection       | done                                     |
-| Operand stack (qWasmStackValue) | blocked on SpiderMonkey                  |
-| Expression evaluation (expr)    | not supported (no wasm JIT in lldb)      |
+| Feature                         | Status                                    |
+| ------------------------------- | ----------------------------------------- |
+| Call stack + DWARF symbols      | done                                      |
+| Breakpoints (name, file:line)   | done                                      |
+| Continue / step in/over/out     | done (SB API only; CLI step is upstream)  |
+| Locals, globals, linear memory  | done                                      |
+| Struct/pointer inspection       | done                                      |
+| Operand stack (qWasmStackValue) | blocked on SpiderMonkey                   |
+| Expression evaluation (expr)    | not supported (no wasm JIT in lldb)       |
 | Multithreading                  | done — all-stop via per-thread RDP actors |
 
 ## Key gotchas

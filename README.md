@@ -70,17 +70,17 @@ npm run connect
 
 ### Flags
 
-| Flag               | Default           | Description                             |
-| ------------------ | ----------------- | --------------------------------------- |
-| `--port`           | `1234`            | Platform server RSP port                |
-| `--rdp-port`       | `6080`            | Firefox RDP port                        |
-| `--url`            | —                 | Page to open in Firefox at startup      |
-| `--firefox`        | system Firefox    | Path to Firefox binary                  |
-| `--headless`       | off               | Run Firefox headlessly                  |
-| `--launch`         | (default)         | Launch a fresh Firefox                  |
-| `--connect`        | —                 | Connect to an already-running Firefox   |
-| `--verbose` / `-v` | off               | Log debug output                        |
-| `--lldb`           | `$LLDB` or `lldb` | lldb binary (wrapper only)              |
+| Flag               | Default           | Description                           |
+| ------------------ | ----------------- | ------------------------------------- |
+| `--port`           | `1234`            | Platform server RSP port              |
+| `--rdp-port`       | `6080`            | Firefox RDP port                      |
+| `--url`            | —                 | Page to open in Firefox at startup    |
+| `--firefox`        | system Firefox    | Path to Firefox binary                |
+| `--headless`       | off               | Run Firefox headlessly                |
+| `--launch`         | (default)         | Launch a fresh Firefox                |
+| `--connect`        | —                 | Connect to an already-running Firefox |
+| `--verbose` / `-v` | off               | Log debug output                      |
+| `--lldb`           | `$LLDB` or `lldb` | lldb binary (wrapper only)            |
 
 ## What works
 
@@ -94,7 +94,7 @@ npm run connect
 | Struct/pointer inspection via SB API                 | ✅                                      |
 | Operand stack (`qWasmStackValue`)                    | ✗ — SpiderMonkey does not expose it yet |
 | Expression evaluation (`expr`)                       | ✗ — no wasm JIT backend in lldb         |
-| Multithreading (pthreads/web workers)                | ✅ — all-stop via per-thread RDP actors  |
+| Multithreading (pthreads/web workers)                | ✅ — all-stop via per-thread RDP actors |
 
 ## Development
 

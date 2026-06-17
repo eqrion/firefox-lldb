@@ -51,21 +51,37 @@ function customSection(name: string, payload: number[]): number[] {
 function debugAbbrev(): number[] {
   return [
     // Abbrev 1: DW_TAG_compile_unit (0x11), has children
-    ...uleb(1), ...uleb(0x11), 0x01,
-    ...uleb(0x25), ...uleb(0x08), // DW_AT_producer,  DW_FORM_string
-    ...uleb(0x13), ...uleb(0x05), // DW_AT_language,  DW_FORM_data2
-    ...uleb(0x03), ...uleb(0x08), // DW_AT_name,      DW_FORM_string
-    ...uleb(0x1b), ...uleb(0x08), // DW_AT_comp_dir,  DW_FORM_string
-    ...uleb(0x11), ...uleb(0x01), // DW_AT_low_pc,    DW_FORM_addr
-    ...uleb(0x12), ...uleb(0x01), // DW_AT_high_pc,   DW_FORM_addr
-    ...uleb(0x10), ...uleb(0x17), // DW_AT_stmt_list, DW_FORM_sec_offset
-    0x00, 0x00,
+    ...uleb(1),
+    ...uleb(0x11),
+    0x01,
+    ...uleb(0x25),
+    ...uleb(0x08), // DW_AT_producer,  DW_FORM_string
+    ...uleb(0x13),
+    ...uleb(0x05), // DW_AT_language,  DW_FORM_data2
+    ...uleb(0x03),
+    ...uleb(0x08), // DW_AT_name,      DW_FORM_string
+    ...uleb(0x1b),
+    ...uleb(0x08), // DW_AT_comp_dir,  DW_FORM_string
+    ...uleb(0x11),
+    ...uleb(0x01), // DW_AT_low_pc,    DW_FORM_addr
+    ...uleb(0x12),
+    ...uleb(0x01), // DW_AT_high_pc,   DW_FORM_addr
+    ...uleb(0x10),
+    ...uleb(0x17), // DW_AT_stmt_list, DW_FORM_sec_offset
+    0x00,
+    0x00,
     // Abbrev 2: DW_TAG_subprogram (0x2e), no children
-    ...uleb(2), ...uleb(0x2e), 0x00,
-    ...uleb(0x03), ...uleb(0x08), // DW_AT_name,    DW_FORM_string
-    ...uleb(0x11), ...uleb(0x01), // DW_AT_low_pc,  DW_FORM_addr
-    ...uleb(0x12), ...uleb(0x01), // DW_AT_high_pc, DW_FORM_addr
-    0x00, 0x00,
+    ...uleb(2),
+    ...uleb(0x2e),
+    0x00,
+    ...uleb(0x03),
+    ...uleb(0x08), // DW_AT_name,    DW_FORM_string
+    ...uleb(0x11),
+    ...uleb(0x01), // DW_AT_low_pc,  DW_FORM_addr
+    ...uleb(0x12),
+    ...uleb(0x01), // DW_AT_high_pc, DW_FORM_addr
+    0x00,
+    0x00,
     0x00, // end of abbreviation table
   ];
 }
@@ -73,18 +89,18 @@ function debugAbbrev(): number[] {
 function debugInfo(name: string, compDir: string, lineCount: number): number[] {
   const body: number[] = [
     0x01, // abbrev 1 = compile_unit
-    ...cstr("firefox-lldb"),     // DW_AT_producer
-    ...u16le(0x000c),            // DW_AT_language = DW_LANG_C99
-    ...cstr(name),               // DW_AT_name
-    ...cstr(compDir),            // DW_AT_comp_dir
-    ...u32le(1),                 // DW_AT_low_pc
-    ...u32le(lineCount + 1),     // DW_AT_high_pc (exclusive)
-    ...u32le(0),                 // DW_AT_stmt_list = 0
+    ...cstr("firefox-lldb"), // DW_AT_producer
+    ...u16le(0x000c), // DW_AT_language = DW_LANG_C99
+    ...cstr(name), // DW_AT_name
+    ...cstr(compDir), // DW_AT_comp_dir
+    ...u32le(1), // DW_AT_low_pc
+    ...u32le(lineCount + 1), // DW_AT_high_pc (exclusive)
+    ...u32le(0), // DW_AT_stmt_list = 0
     // child: subprogram
     0x02, // abbrev 2 = subprogram
-    ...cstr(name),               // DW_AT_name
-    ...u32le(1),                 // DW_AT_low_pc
-    ...u32le(lineCount + 1),     // DW_AT_high_pc
+    ...cstr(name), // DW_AT_name
+    ...u32le(1), // DW_AT_low_pc
+    ...u32le(lineCount + 1), // DW_AT_high_pc
     0x00, // end of children
   ];
   // v4 CU header: unit_length(4) + version(2) + abbrev_offset(4) + addr_size(1) = 11 bytes
@@ -92,9 +108,9 @@ function debugInfo(name: string, compDir: string, lineCount: number): number[] {
   const unitLength = 2 + 4 + 1 + body.length;
   return [
     ...u32le(unitLength),
-    ...u16le(4),   // version
-    ...u32le(0),   // debug_abbrev_offset
-    0x04,          // address_size = 4 (wasm32)
+    ...u16le(4), // version
+    ...u32le(0), // debug_abbrev_offset
+    0x04, // address_size = 4 (wasm32)
     ...body,
   ];
 }
@@ -113,17 +129,28 @@ function debugLine(name: string, lineCount: number): number[] {
 
   // Header content (everything after the header_length field):
   const headerContent: number[] = [
-    0x01,          // minimum_instruction_length
-    0x01,          // maximum_operations_per_instruction (required v4)
-    0x01,          // default_is_stmt
+    0x01, // minimum_instruction_length
+    0x01, // maximum_operations_per_instruction (required v4)
+    0x01, // default_is_stmt
     lineBase & 0xff, // line_base as signed byte
-    lineRange,     // line_range
-    opcodeBase,    // opcode_base
+    lineRange, // line_range
+    opcodeBase, // opcode_base
     // standard_opcode_lengths for opcodes 1-12:
-    0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1,
-    0x00,          // include_directories terminator
+    0,
+    1,
+    1,
+    1,
+    1,
+    0,
+    0,
+    0,
+    1,
+    0,
+    0,
+    1,
+    0x00, // include_directories terminator
     ...fileEntry,
-    0x00,          // file_names terminator
+    0x00, // file_names terminator
   ];
 
   // Line number program:
@@ -138,7 +165,9 @@ function debugLine(name: string, lineCount: number): number[] {
     0x0a, // DW_LNS_set_prologue_end
     0x01, // DW_LNS_copy → emit row (addr=1, line=1)
     ...new Array(safeLineCount - 1).fill(specialOpcode),
-    0x00, 0x01, 0x01, // DW_LNE_end_sequence
+    0x00,
+    0x01,
+    0x01, // DW_LNE_end_sequence
   ];
 
   const body = [...headerContent, ...program];
@@ -146,7 +175,7 @@ function debugLine(name: string, lineCount: number): number[] {
   // unit_length = 2 + 4 + body.length; header_length = headerContent.length
   return [
     ...u32le(2 + 4 + body.length), // unit_length
-    ...u16le(4),                    // version
+    ...u16le(4), // version
     ...u32le(headerContent.length), // header_length
     ...body,
   ];
@@ -169,14 +198,16 @@ export function buildSyntheticModule(opts: {
   const magic = [0x00, 0x61, 0x73, 0x6d];
   const version = [0x01, 0x00, 0x00, 0x00];
   const typeSection = wasmSection(1, [0x01, 0x60, 0x00, 0x00]); // () -> ()
-  const funcSection = wasmSection(3, [0x01, 0x00]);              // func 0: type 0
+  const funcSection = wasmSection(3, [0x01, 0x00]); // func 0: type 0
   const codeSectionSizeUleb = uleb(codeSectionPayload.length);
   // codeOffset = magic + version + typeSection + funcSection + code_id(1) + code_size_uleb
   const codeOffset =
-    magic.length + version.length +
+    magic.length +
+    version.length +
     typeSection.length +
     funcSection.length +
-    1 + codeSectionSizeUleb.length;
+    1 +
+    codeSectionSizeUleb.length;
 
   const codeSection = [0x0a, ...codeSectionSizeUleb, ...codeSectionPayload];
 

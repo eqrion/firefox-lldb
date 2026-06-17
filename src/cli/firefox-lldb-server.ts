@@ -157,14 +157,20 @@ async function main(): Promise<void> {
       // For the attach case, ensure all threads are paused so that
       // resumeAll() in Debuggee.continue works from a stopped state.
       const tids = session.listTids();
-      const isRunning = await session.frames(tids[0]).then(() => false).catch(() => true);
+      const isRunning = await session
+        .frames(tids[0])
+        .then(() => false)
+        .catch(() => true);
       if (isRunning) {
         await new Promise<void>((resolve, reject) => {
           const timer = setTimeout(() => {
             session.off("stopped", onStopped);
             reject(new Error("timed out pausing threads for attach"));
           }, 5000);
-          const onStopped = () => { clearTimeout(timer); resolve(); };
+          const onStopped = () => {
+            clearTimeout(timer);
+            resolve();
+          };
           session.once("stopped", onStopped);
           session.armAllStop();
           session.interrupt(tids[0]).catch((e) => {
@@ -208,7 +214,9 @@ async function main(): Promise<void> {
 
   if (!launching) {
     listFirefoxTabs(args.rdpPort).catch(() =>
-      logger.warn(`could not reach Firefox RDP on port ${args.rdpPort} — is Firefox running with --start-debugger-server ${args.rdpPort}?`)
+      logger.warn(
+        `could not reach Firefox RDP on port ${args.rdpPort} — is Firefox running with --start-debugger-server ${args.rdpPort}?`
+      )
     );
   }
 

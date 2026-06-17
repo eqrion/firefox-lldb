@@ -22,9 +22,9 @@ function bringToForeground(pid: number): void {
               "-e",
               `tell application "System Events" to set frontmost of (first process whose unix id is ${pid}) to true`,
             ],
-            { stdio: "ignore" },
+            { stdio: "ignore" }
           ),
-        1500,
+        1500
       );
       break;
   }

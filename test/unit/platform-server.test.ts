@@ -92,8 +92,12 @@ test("qLaunchGDBServer with pid routes to the correct tab actor", async () => {
   const capturingLauncher: GdbServerLauncher = async ({ port, tabActor }) => {
     capturedTabActor = tabActor;
     const srv = new RspServer(
-      { async handle() { return ""; } },
-      { singleConnection: true },
+      {
+        async handle() {
+          return "";
+        },
+      },
+      { singleConnection: true }
     );
     await srv.listen(port);
     return { stop: () => srv.close() };
@@ -103,7 +107,7 @@ test("qLaunchGDBServer with pid routes to the correct tab actor", async () => {
     new PlatformServer({
       spawner: sp,
       listTabs: async () => [{ actor: "tab-actor-1", url: "http://example.com/", title: "" }],
-    }),
+    })
   );
   const srvPort = await srv.listen(0);
   const cl = await RspClient.connect(srvPort);

@@ -173,9 +173,7 @@ export class RdpWasmSession extends EventEmitter {
         if (!threadActor) break;
 
         // Check if this actor is already known (re-announce after navigation).
-        const existing = [...this.#threads.values()].find(
-          (t) => t.threadActor === threadActor
-        );
+        const existing = [...this.#threads.values()].find((t) => t.threadActor === threadActor);
         if (existing) break;
 
         const tid = this.#nextTid++;
@@ -198,9 +196,7 @@ export class RdpWasmSession extends EventEmitter {
         const target = p.target as { threadActor?: string };
         const threadActor = target?.threadActor;
         if (!threadActor) break;
-        const entry = [...this.#threads.entries()].find(
-          ([, t]) => t.threadActor === threadActor
-        );
+        const entry = [...this.#threads.entries()].find(([, t]) => t.threadActor === threadActor);
         if (entry) {
           this.#threads.delete(entry[0]);
           this.#pausedTids.delete(entry[0]);
@@ -210,9 +206,7 @@ export class RdpWasmSession extends EventEmitter {
       }
       case "paused": {
         const fromActor = p.from as string;
-        const entry = [...this.#threads.entries()].find(
-          ([, t]) => t.threadActor === fromActor
-        );
+        const entry = [...this.#threads.entries()].find(([, t]) => t.threadActor === fromActor);
         if (!entry) break;
         const [tid] = entry;
         this.#pausedTids.add(tid);
@@ -221,9 +215,7 @@ export class RdpWasmSession extends EventEmitter {
       }
       case "resumed": {
         const fromActor = p.from as string;
-        const entry = [...this.#threads.entries()].find(
-          ([, t]) => t.threadActor === fromActor
-        );
+        const entry = [...this.#threads.entries()].find(([, t]) => t.threadActor === fromActor);
         if (entry) {
           const [tid] = entry;
           this.#pausedTids.delete(tid);
@@ -392,14 +384,15 @@ export class RdpWasmSession extends EventEmitter {
 
     const snappedOffset = await this.#snapOffset(sourceUrl, offset);
     await Promise.all(
-      [...this.#threads.values()].map((t) =>
-        this.#client
-          .request(t.threadActor, {
-            type: "setBreakpoint",
-            location: { sourceUrl, line: snappedOffset, column: 1 },
-            options: {},
-          })
-          .catch(() => {}) // ignore stale actors
+      [...this.#threads.values()].map(
+        (t) =>
+          this.#client
+            .request(t.threadActor, {
+              type: "setBreakpoint",
+              location: { sourceUrl, line: snappedOffset, column: 1 },
+              options: {},
+            })
+            .catch(() => {}) // ignore stale actors
       )
     );
   }
@@ -540,7 +533,10 @@ export class RdpWasmSession extends EventEmitter {
         // (e.g. a futex-blocked worker whose JS loop is frozen).
         const paused = new Promise<void>((resolve) => {
           const timer = setTimeout(resolve, 3000);
-          this.once(`paused:${tid}`, () => { clearTimeout(timer); resolve(); });
+          this.once(`paused:${tid}`, () => {
+            clearTimeout(timer);
+            resolve();
+          });
         });
         await Promise.race([
           this.#client.request(info.threadActor, { type: "interrupt", when: {} }),
@@ -594,11 +590,10 @@ export class RdpWasmSession extends EventEmitter {
   async evaluateInFrame(
     text: string,
     frameActor: string,
-    consoleActorOverride?: string,
+    consoleActorOverride?: string
   ): Promise<RdpPacket> {
     const consoleActor =
-      consoleActorOverride ??
-      [...this.#threads.values()].find((t) => t.consoleActor)?.consoleActor;
+      consoleActorOverride ?? [...this.#threads.values()].find((t) => t.consoleActor)?.consoleActor;
     if (!consoleActor) throw new Error("no console actor");
     this.#client.registerEventType("evaluationResult");
     const ack = await this.#client.request(consoleActor, {
@@ -608,15 +603,12 @@ export class RdpWasmSession extends EventEmitter {
     });
     const resultID = (ack as { resultID?: string }).resultID;
     return new Promise<RdpPacket>((resolve, reject) => {
-      const timer = setTimeout(
-        () => { this.#client.off("event", onEvent); reject(new Error("evaluateInFrame timeout")); },
-        500,
-      );
+      const timer = setTimeout(() => {
+        this.#client.off("event", onEvent);
+        reject(new Error("evaluateInFrame timeout"));
+      }, 500);
       const onEvent = (p: RdpPacket) => {
-        if (
-          p.type === "evaluationResult" &&
-          (p as { resultID?: string }).resultID === resultID
-        ) {
+        if (p.type === "evaluationResult" && (p as { resultID?: string }).resultID === resultID) {
           clearTimeout(timer);
           this.#client.off("event", onEvent);
           resolve(p);
