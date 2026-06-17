@@ -147,3 +147,14 @@ committed source (never auto-clobbered). A single jco-generated patch (a jco
 - **JS locals/variable inspection** — JS frame locals are not yet exposed (returns empty). JS values don't map cleanly to wasm types; deferred to a future phase.
 - **Per-function JS names** — each JS source is one synthetic module with a file-level subprogram; `GetFunctionName()` returns the filename. Real per-function names (from the per-frame `displayName` RDP already provides) would need multi-subprogram modules with content-versioned unique ids.
 - **Stepping across the JS/wasm boundary** — not yet supported.
+- **Duplicate frame IDs for recursive JS frames** — `qWasmCallStack` reports only
+  PCs; LLDB's wasm plugin derives `GetFrameID()` from the PC alone (no FP/SP
+  equivalent for wasm). Multiple JS frames at the same source line (e.g., a
+  recursive call where every frame is at `math.js:725`) all report the same PC →
+  LLDB assigns them the same frame ID. Native debugging avoids this because the
+  frame pointer distinguishes each call frame even when the PC is identical. The
+  clean fix is per-depth virtual module IDs (unique `module_id` per (url, depth)
+  in the `WasmAddr`), but that requires a Rust change to register those modules in
+  `update_on_stop()` before `frame_to_pc()` runs. Alternatively, fixing LLDB's
+  wasm plugin to use the call-stack index rather than the PC as the frame ID would
+  solve it upstream.

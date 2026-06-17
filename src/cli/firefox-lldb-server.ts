@@ -36,7 +36,8 @@ Options:
 LLDB attach sequence:
   (lldb) platform select remote-gdb-server
   (lldb) platform connect connect://localhost:<port>
-  (lldb) platform process launch -- <url>
+  (lldb) platform process list          # list open tabs
+  (lldb) process attach --pid <N>       # attach to a wasm tab
 `;
 
 interface Args {
@@ -196,6 +197,24 @@ async function main(): Promise<void> {
       });
     }
 
+    // For the attach case (tabActor provided, no navigation), the tab may be
+    // running. Ensure it is paused so that session.resume() in Debuggee.continue
+    // actually resumes from a stopped state and reaches a breakpoint.
+    if (tabActor && !url) {
+      const isPaused = await session.frames().then(() => true).catch(() => false);
+      if (!isPaused) {
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            session.off("paused", onPause);
+            reject(new Error("timed out pausing tab for attach"));
+          }, 5000);
+          const onPause = () => { clearTimeout(timer); resolve(); };
+          session.once("paused", onPause);
+          session.interrupt().catch((e) => { clearTimeout(timer); session.off("paused", onPause); reject(e); });
+        });
+      }
+    }
+
     const fire = args.fire;
     const onFirstContinue = fire
       ? () => {
@@ -235,6 +254,12 @@ async function main(): Promise<void> {
   // Stdout is the control channel for the firefox-lldb wrapper; stderr carries logs.
   process.stdout.write(`platform server ready on connect://localhost:${bound}\n`);
 
+  if (!launching) {
+    listFirefoxTabs(args.rdpPort).catch(() =>
+      logger.warn(`could not reach Firefox RDP on port ${args.rdpPort} — is Firefox running with --start-debugger-server ${args.rdpPort}?`)
+    );
+  }
+
   let shutdownCalled = false;
   const shutdown = async () => {
     if (shutdownCalled) return;
@@ -246,6 +271,7 @@ async function main(): Promise<void> {
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
+  process.on("SIGHUP", () => {});
   firefox?.exited.then(() => shutdown());
 
   const hinted = new Set<string>();
@@ -256,7 +282,7 @@ async function main(): Promise<void> {
         hinted.add(tab.actor);
         const pid = platformServer.tabPid(tab.actor);
         process.stderr.write(
-          `\n[info] tab available: ${tab.url}\n[info]   process attach --pid ${pid}\n`,
+          `\n[info] tab available: ${tab.url} (pid ${pid})\n[info]   run 'platform process list' in lldb, then 'process attach --pid ${pid}'\n`,
         );
       }
     }

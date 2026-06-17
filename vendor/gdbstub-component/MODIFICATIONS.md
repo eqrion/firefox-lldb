@@ -19,6 +19,12 @@ wasmtime, which is a manual, rare action. Each edit is commented in place.
   until the next event (bridged synchronously by the host worker RPC).
 - `src/lib.rs` — the Running-state arm drops the wstd `select!` over a wasi
   pollable + the connection; it awaits `resumption.result()` directly.
+- `wit/world.wit` — `resource module` gains a `name: func() -> string` method so
+  the host can supply the source URL basename for each module.
+- `src/addr.rs` — `modules_with_addrs()` iterator replaces the old
+  `module_base_addrs()` call site in `get_libraries`.
+- `src/target.rs` — `get_libraries()` calls `m.name()` instead of formatting
+  `"wasm-{i}"`, so LLDB's module list shows real source names.
 
 To diff against pristine upstream: re-fetch the upstream files and compare, or
 keep this list current when editing.

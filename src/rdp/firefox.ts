@@ -76,11 +76,11 @@ export async function launchFirefox(opts: {
     String(opts.rdpPort),
     opts.url ?? "about:blank",
   ];
-  if (opts.headless ?? true) args.unshift("--headless");
+  if (opts.headless ?? false) args.unshift("--headless");
 
   const child: ChildProcess = spawn(binary, args, { stdio: "ignore" });
 
-  if (!(opts.headless ?? true) && child.pid !== undefined) {
+  if (!(opts.headless ?? false) && child.pid !== undefined) {
     bringToForeground(child.pid);
   }
 

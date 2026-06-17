@@ -139,6 +139,8 @@ export class PlatformServer implements RspHandler {
       return "OK";
     }
 
+    if (data.startsWith("qUserName:")) return asciiToHex(os.userInfo().username);
+
     // Empty response means "unsupported packet".
     return "";
   }

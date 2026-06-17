@@ -162,6 +162,7 @@ export class Module {
   removeBreakpoint(d: Debuggee, pc: number): void;
   clone(): Module;
   uniqueId(): bigint;
+  name(): string;
 }
 
 export class WasmException {

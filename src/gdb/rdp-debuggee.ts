@@ -129,6 +129,10 @@ export class RdpDebuggee {
 
       case "Module.uniqueId":
         return BigInt(id);
+      case "Module.name": {
+        const { url } = this.#moduleById.get(id)!;
+        return urlBasename(url);
+      }
       case "Module.bytecode": {
         const { url } = this.#moduleById.get(id)!;
         const syn = this.#syntheticByUrl.get(url);

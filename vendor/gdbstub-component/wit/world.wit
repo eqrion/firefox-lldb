@@ -212,6 +212,9 @@ interface debuggee {
 
     /// Get the unique ID of this module to allow equality and hashing.
     unique-id: func() -> u64;
+
+    /// Get a human-readable name for this module (e.g. the source URL basename).
+    name: func() -> string;
   }
 
   resource memory {

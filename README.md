@@ -34,7 +34,7 @@ LLDB=/path/to/wasm-lldb node --import tsx src/cli/firefox-lldb.ts \
 ```
 
 ```
-[info] tab available: http://localhost:8080/ — run 'platform process list' in lldb
+[info] tab available: http://localhost:8080/ (pid 1) — run 'platform process list' in lldb, then 'process attach --pid 1'
 ```
 
 From the lldb prompt:
@@ -58,8 +58,8 @@ URL=http://localhost:8080/index.html npm run launch
 lldb
 (lldb) platform select remote-gdb-server
 (lldb) platform connect connect://localhost:1234
-(lldb) platform process list
-(lldb) process attach --pid <N>
+(lldb) platform process list          # find the tab's PID
+(lldb) process attach --pid <N>       # server pauses the tab automatically
 ```
 
 Connect to an already-running Firefox instead of launching a new one:

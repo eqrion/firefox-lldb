@@ -84,10 +84,12 @@ impl AddrSpace {
         Ok(())
     }
 
-    /// Iterate over the base `WasmAddr` of every registered module.
-    pub fn module_base_addrs(&self) -> impl Iterator<Item = WasmAddr> + '_ {
-        (0..self.modules.len())
-            .map(|idx| WasmAddr::new(WasmAddrType::Object, u32::try_from(idx).unwrap(), 0).unwrap())
+    /// Iterate over each registered module paired with its base `WasmAddr`.
+    pub fn modules_with_addrs(&self) -> impl Iterator<Item = (&Module, WasmAddr)> + '_ {
+        self.modules.iter().enumerate().map(|(idx, m)| {
+            let addr = WasmAddr::new(WasmAddrType::Object, u32::try_from(idx).unwrap(), 0).unwrap();
+            (m, addr)
+        })
     }
 
     /// Build the GDB memory-map XML describing all known regions.
