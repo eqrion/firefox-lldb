@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Wasm Threaded Debugger Test</title>
+  <style>
+    body { font-family: monospace; max-width: 700px; margin: 2rem auto; padding: 0 1rem; }
+    button { margin-left: 0.5rem; }
+    .result { margin-top: 0.5rem; color: #080; white-space: pre; }
+    .row { margin: 1.2rem 0; }
+    label { display: inline-block; width: 8rem; }
+    input[type=number] { width: 3rem; }
+    #status { color: #888; margin-top: 1rem; }
+  </style>
+</head>
+<body>
+  <h1>Wasm Threaded Debugger Test</h1>
+  <p>64x64 matrix multiply using pthreads (SharedArrayBuffer + Atomics required).</p>
+
+  <div class="row">
+    <label>threads:</label>
+    <input id="nthreads" type="number" value="4" min="1" max="8">
+  </div>
+
+  <div class="row">
+    <button onclick="runMatmul()">matmul_threaded(n)</button>
+    <div class="result" id="matmul-result"></div>
+  </div>
+
+  <div class="row">
+    <button onclick="runDot()">dot_rows_threaded(n)</button>
+    <div class="result" id="dot-result"></div>
+  </div>
+
+  <div id="status">Loading wasm module...</div>
+
+  <script src="matmul.js"></script>
+  <script>
+    let mod;
+
+    MatMulModule().then(m => {
+      mod = m;
+      mod.cwrap('init_matrices', null, [])();
+      document.getElementById('status').textContent = 'Ready.';
+    });
+
+    function nthreads() {
+      return parseInt(document.getElementById('nthreads').value);
+    }
+
+    function runMatmul() {
+      const n = nthreads();
+      const t0 = performance.now();
+      mod.cwrap('matmul_threaded', null, ['number'])(n);
+      const ms = (performance.now() - t0).toFixed(1);
+
+      const get = mod.cwrap('get_result', 'number', ['number', 'number']);
+      let out = `matmul_threaded(${n} threads) in ${ms}ms\n`;
+      out += 'C[0][0..3]: ';
+      for (let j = 0; j < 4; j++) out += get(0, j).toFixed(4) + '  ';
+      out += '\nC[63][63]:  ' + get(63, 63).toFixed(4);
+      document.getElementById('matmul-result').textContent = out;
+    }
+
+    function runDot() {
+      const n = nthreads();
+      const t0 = performance.now();
+      const sum = mod.cwrap('dot_rows_threaded', 'number', ['number'])(n);
+      const ms = (performance.now() - t0).toFixed(1);
+      document.getElementById('dot-result').textContent =
+        `dot_rows_threaded(${n} threads) in ${ms}ms\nsum = ${sum.toFixed(4)}`;
+    }
+  </script>
+</body>
+</html>
