@@ -9,13 +9,21 @@
 //     server-side targets and applies thread-config session data at creation;
 //   - set observeWasm/observeAsmJS thread-config BEFORE navigation, so the
 //     page's own wasm compiles with debug support;
-//   - watchTargets("frame") + watchResources("source") to track the current
-//     top-level target and its sources across navigation;
-//   - thread.setBreakpoint / frames / resume / interrupt, and paused/resumed
-//     events scoped to the current thread.
+//   - watchTargets("frame") + watchTargets("worker") + watchResources("source")
+//     to track all targets (top-level frame + web workers) and their sources;
+//   - per-thread setBreakpoint / frames / resume / interrupt, plus all-stop
+//     coordination on any pause (interrupt all other running threads).
 //
 // Wasm specifics: a wasm breakpoint location is {sourceUrl, line:<byteOffset>,
 // column:1}; a paused wasm frame reports where.line as the byte offset.
+//
+// Thread model:
+//   - TID 1 = the top-level frame target (the page's JS thread).
+//   - TIDs 2+ = web worker targets (emscripten pthreads pool), assigned in
+//     arrival order.
+//   - "Stopped" means the thread that triggered the pause; all-stop interrupts
+//     the rest and waits for their acks (interrupt is reliable in < 10 ms even
+//     for threads blocked in Atomics.wait).
 
 import { RdpClient } from "./client.js";
 import type { RdpPacket } from "./transport.js";
@@ -39,28 +47,62 @@ export interface PauseEvent {
   frame?: FrameForm;
 }
 
+interface ThreadInfo {
+  tid: number;
+  threadActor: string;
+  consoleActor: string;
+  url: string;
+  isTopLevel: boolean;
+}
+
+// All-stop event: one thread paused and all others have been interrupted.
+export interface StoppedEvent {
+  tid: number;
+  pausePacket: PauseEvent;
+}
+
 export class RdpWasmSession extends EventEmitter {
   #client: RdpClient;
   #tabActor!: string;
   #watcher!: string;
-  #threadActor: string | null = null;
-  #consoleActor: string | null = null;
-  #targetUrl = "";
-  #wasmActorByUrl = new Map<string, string>();
+
+  // tid -> ThreadInfo (including the top-level frame target)
+  #threads = new Map<number, ThreadInfo>();
+  #nextTid = 1;
+
+  // tid of the thread that triggered the most recent all-stop pause
+  #stoppedTid = 1;
+
+  // tids that we interrupted during all-stop (to be resumed on next continue)
+  #interruptedTids = new Set<number>();
+  // tids that are currently paused (breakpoint, step, or interrupt)
+  #pausedTids = new Set<number>();
+
+  // breakpoints buffered so new workers inherit them
+  #breakpoints = new Map<string, Set<number>>(); // sourceUrl -> set of offsets
+
+  #wasmActorByUrl = new Map<string, string>(); // url -> source actor (any thread)
 
   private constructor(client: RdpClient) {
     super();
     this.#client = client;
   }
 
-  get threadActor(): string | null {
-    return this.#threadActor;
-  }
-  get targetUrl(): string {
-    return this.#targetUrl;
+  // --- public accessors ---
+
+  get stoppedTid(): number {
+    return this.#stoppedTid;
   }
 
-  /** Connect, enable wasm observation, and start watching the selected tab. */
+  hasThreads(): boolean {
+    return this.#threads.size > 0;
+  }
+
+  listTids(): number[] {
+    return [...this.#threads.keys()];
+  }
+
+  /** Connect, enable wasm observation, and start watching targets. */
   static async start(port = 6080, host = "127.0.0.1"): Promise<RdpWasmSession> {
     const client = await RdpClient.connect(port, host);
     const session = new RdpWasmSession(client);
@@ -74,15 +116,15 @@ export class RdpWasmSession extends EventEmitter {
     };
     this.#tabActor = (tabs.find((t) => t.selected) ?? tabs[0]).actor;
 
-    // Server target switching is what makes the watcher instantiate targets and
-    // apply thread-config (observeWasm) before page scripts run.
     const { actor: watcher } = await this.#client.request(this.#tabActor, {
       type: "getWatcher",
       isServerTargetSwitchingEnabled: true,
     });
     this.#watcher = watcher as string;
 
-    const cfg = await this.#client.request(this.#watcher, { type: "getThreadConfigurationActor" });
+    const cfg = await this.#client.request(this.#watcher, {
+      type: "getThreadConfigurationActor",
+    });
     const configActor = ((cfg.configuration as { actor?: string })?.actor ??
       cfg.configuration) as string;
     await this.#client.request(configActor, {
@@ -92,6 +134,7 @@ export class RdpWasmSession extends EventEmitter {
 
     this.#client.on("event", (p) => this.#onEvent(p));
     await this.#client.request(this.#watcher, { type: "watchTargets", targetType: "frame" });
+    await this.#client.request(this.#watcher, { type: "watchTargets", targetType: "worker" });
     await this.#client.request(this.#watcher, {
       type: "watchResources",
       resourceTypes: ["source"],
@@ -107,28 +150,85 @@ export class RdpWasmSession extends EventEmitter {
           consoleActor?: string;
           isTopLevelTarget?: boolean;
         };
-        if (target?.isTopLevelTarget) {
-          this.#threadActor = target.threadActor ?? null;
-          this.#consoleActor = target.consoleActor ?? null;
-          this.#targetUrl = target.url ?? "";
-          this.emit("target", target);
+        const threadActor = target?.threadActor;
+        if (!threadActor) break;
+
+        // Check if this actor is already known (re-announce after navigation).
+        const existing = [...this.#threads.values()].find(
+          (t) => t.threadActor === threadActor
+        );
+        if (existing) break;
+
+        const tid = this.#nextTid++;
+        const info: ThreadInfo = {
+          tid,
+          threadActor,
+          consoleActor: target.consoleActor ?? "",
+          url: target.url ?? "",
+          isTopLevel: target.isTopLevelTarget ?? false,
+        };
+        this.#threads.set(tid, info);
+
+        // Apply any buffered breakpoints to the new worker.
+        void this.#applyBreakpoints(info);
+
+        this.emit("target", info);
+        break;
+      }
+      case "target-destroyed-form": {
+        const target = p.target as { threadActor?: string };
+        const threadActor = target?.threadActor;
+        if (!threadActor) break;
+        const entry = [...this.#threads.entries()].find(
+          ([, t]) => t.threadActor === threadActor
+        );
+        if (entry) {
+          this.#threads.delete(entry[0]);
+          this.#pausedTids.delete(entry[0]);
+          this.#interruptedTids.delete(entry[0]);
         }
         break;
       }
-      case "paused":
-        if (p.from === this.#threadActor) this.emit("paused", p as PauseEvent);
+      case "paused": {
+        const fromActor = p.from as string;
+        const entry = [...this.#threads.entries()].find(
+          ([, t]) => t.threadActor === fromActor
+        );
+        if (!entry) break;
+        const [tid] = entry;
+        this.#pausedTids.add(tid);
+        this.emit(`paused:${tid}`, p as PauseEvent);
         break;
-      case "resumed":
-        if (p.from === this.#threadActor) this.emit("resumed");
+      }
+      case "resumed": {
+        const fromActor = p.from as string;
+        const entry = [...this.#threads.entries()].find(
+          ([, t]) => t.threadActor === fromActor
+        );
+        if (entry) {
+          const [tid] = entry;
+          this.#pausedTids.delete(tid);
+        }
         break;
+      }
     }
   }
 
-  /** Navigate the tab; resolves once the new top-level target is available. */
+  /** Navigate the tab; resolves once a top-level target with the given URL arrives. */
   async navigate(url: string): Promise<void> {
+    // Remove stale top-level target (pre-navigation). Workers are managed
+    // by Firefox's own target-destroyed-form events.
+    for (const [tid, t] of this.#threads) {
+      if (t.isTopLevel && t.url !== url) {
+        this.#threads.delete(tid);
+        this.#pausedTids.delete(tid);
+        this.#interruptedTids.delete(tid);
+      }
+    }
+
     const target = new Promise<void>((resolve) => {
-      const onTarget = (t: { url?: string }) => {
-        if (t.url === url) {
+      const onTarget = (t: ThreadInfo) => {
+        if (t.isTopLevel && t.url === url) {
           this.off("target", onTarget);
           resolve();
         }
@@ -139,9 +239,11 @@ export class RdpWasmSession extends EventEmitter {
     await target;
   }
 
-  #thread(): string {
-    if (!this.#threadActor) throw new Error("no active thread (no target yet)");
-    return this.#threadActor;
+  /** Find the ThreadInfo for a tid; throw if unknown. */
+  #info(tid: number): ThreadInfo {
+    const info = this.#threads.get(tid);
+    if (!info) throw new Error(`no thread for tid ${tid}`);
+    return info;
   }
 
   /** Send a raw request to an actor (escape hatch for actor-specific packets). */
@@ -149,62 +251,90 @@ export class RdpWasmSession extends EventEmitter {
     return this.#client.request(actor, packet);
   }
 
-  async sources(): Promise<SourceForm[]> {
-    const { sources } = await this.#client.request(this.#thread(), { type: "sources" });
-    return sources as SourceForm[];
-  }
+  // --- wasm sources ---
 
-  async wasmSources(): Promise<SourceForm[]> {
-    const wasm = (await this.sources()).filter((s) => s.introductionType === "wasm");
+  /** Wasm sources from the given thread. */
+  async wasmSourcesForTid(tid: number): Promise<SourceForm[]> {
+    const { sources } = await this.#client.request(this.#info(tid).threadActor, {
+      type: "sources",
+    });
+    const wasm = (sources as SourceForm[]).filter((s) => s.introductionType === "wasm");
     for (const s of wasm) this.#wasmActorByUrl.set(s.url, s.actor);
     return wasm;
   }
 
-  /** Fetch a module's bytes by URL (the source actor cannot serve wasm binary). */
+  /** Wasm sources deduped by URL across all known threads. */
+  async wasmSources(): Promise<SourceForm[]> {
+    // Use the top-level thread (lowest tid, always has the full source list).
+    const tids = [...this.#threads.keys()].sort((a, b) => a - b);
+    if (tids.length === 0) return [];
+    try {
+      return await this.wasmSourcesForTid(tids[0]);
+    } catch {
+      // Try any other thread.
+      for (const tid of tids.slice(1)) {
+        try {
+          return await this.wasmSourcesForTid(tid);
+        } catch {}
+      }
+      return [];
+    }
+  }
+
   async fetchModuleBytes(url: string): Promise<Uint8Array> {
     return new Uint8Array(await (await fetch(url)).arrayBuffer());
   }
 
-  async frames(start = 0, count = 1000): Promise<FrameForm[]> {
-    const { frames } = await this.#client.request(this.#thread(), { type: "frames", start, count });
+  // --- frames ---
+
+  async frames(tid: number, start = 0, count = 1000): Promise<FrameForm[]> {
+    const timeout = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("frames timeout")), 5000)
+    );
+    const req = this.#client.request(this.#info(tid).threadActor, {
+      type: "frames",
+      start,
+      count,
+    });
+    const { frames } = (await Promise.race([req, timeout])) as { frames?: unknown };
     return (frames ?? []) as FrameForm[];
   }
 
-  /**
-   * Set a wasm breakpoint at a byte offset (column is always 1 for wasm).
-   *
-   * LLDB resolves a breakpoint to a DWARF prologue-end offset, which is not
-   * necessarily one of the engine's valid breakpoint positions; setting at an
-   * invalid offset is a silent no-op in Firefox. Snap to the nearest valid
-   * position so the breakpoint actually arms.
-   */
+  // --- breakpoints ---
+
   async setWasmBreakpoint(sourceUrl: string, offset: number): Promise<void> {
-    const actor = this.#wasmActorByUrl.get(sourceUrl);
-    let line = offset;
-    if (actor) {
-      const positions = await this.wasmBreakpointOffsets(actor);
-      if (positions.length && !positions.includes(offset)) {
-        line = positions.reduce(
-          (best, p) => (Math.abs(p - offset) < Math.abs(best - offset) ? p : best),
-          positions[0]
-        );
-      }
-    }
-    await this.#client.request(this.#thread(), {
-      type: "setBreakpoint",
-      location: { sourceUrl, line, column: 1 },
-      options: {},
-    });
+    // Buffer so new workers inherit it.
+    if (!this.#breakpoints.has(sourceUrl)) this.#breakpoints.set(sourceUrl, new Set());
+    this.#breakpoints.get(sourceUrl)!.add(offset);
+
+    const snappedOffset = await this.#snapOffset(sourceUrl, offset);
+    await Promise.all(
+      [...this.#threads.values()].map((t) =>
+        this.#client
+          .request(t.threadActor, {
+            type: "setBreakpoint",
+            location: { sourceUrl, line: snappedOffset, column: 1 },
+            options: {},
+          })
+          .catch(() => {}) // ignore stale actors
+      )
+    );
   }
 
   async removeWasmBreakpoint(sourceUrl: string, offset: number): Promise<void> {
-    await this.#client.request(this.#thread(), {
-      type: "removeBreakpoint",
-      location: { sourceUrl, line: offset, column: 1 },
-    });
+    this.#breakpoints.get(sourceUrl)?.delete(offset);
+    await Promise.all(
+      [...this.#threads.values()].map((t) =>
+        this.#client
+          .request(t.threadActor, {
+            type: "removeBreakpoint",
+            location: { sourceUrl, line: offset, column: 1 },
+          })
+          .catch(() => {})
+      )
+    );
   }
 
-  /** Valid breakpoint byte offsets for a wasm source (the line numbers). */
   async wasmBreakpointOffsets(sourceActor: string): Promise<number[]> {
     const { positions } = await this.#client.request(sourceActor, {
       type: "getBreakpointPositionsCompressed",
@@ -215,20 +345,157 @@ export class RdpWasmSession extends EventEmitter {
       .sort((a, b) => a - b);
   }
 
-  resume(): Promise<RdpPacket> {
-    return this.#client.request(this.#thread(), { type: "resume" });
-  }
-  step(): Promise<RdpPacket> {
-    return this.#client.request(this.#thread(), { type: "resume", resumeLimit: { type: "step" } });
-  }
-  interrupt(): Promise<RdpPacket> {
-    return this.#client.request(this.#thread(), { type: "interrupt", when: {} });
+  async #snapOffset(sourceUrl: string, offset: number): Promise<number> {
+    const actor = this.#wasmActorByUrl.get(sourceUrl);
+    if (!actor) return offset;
+    const positions = await this.wasmBreakpointOffsets(actor);
+    if (!positions.length || positions.includes(offset)) return offset;
+    return positions.reduce(
+      (best, p) => (Math.abs(p - offset) < Math.abs(best - offset) ? p : best),
+      positions[0]
+    );
   }
 
-  /** Evaluate JS in the page (used to drive wasm calls during bring-up/tests). */
+  /** Apply all buffered breakpoints to a newly-arrived thread. */
+  async #applyBreakpoints(info: ThreadInfo): Promise<void> {
+    for (const [sourceUrl, offsets] of this.#breakpoints) {
+      for (const offset of offsets) {
+        const snapped = await this.#snapOffset(sourceUrl, offset);
+        await this.#client
+          .request(info.threadActor, {
+            type: "setBreakpoint",
+            location: { sourceUrl, line: snapped, column: 1 },
+            options: {},
+          })
+          .catch(() => {});
+      }
+    }
+  }
+
+  // --- resume / step / interrupt (all-stop) ---
+
+  /**
+   * Resume all previously-paused threads (after an all-stop).
+   * The top-level continue call — resumes every thread we own.
+   */
+  async resumeAll(): Promise<void> {
+    const toResume = [...this.#pausedTids];
+    this.#interruptedTids.clear();
+    await Promise.all(
+      toResume.map((tid) => {
+        const info = this.#threads.get(tid);
+        if (!info) return;
+        return this.#client.request(info.threadActor, { type: "resume" }).catch(() => {});
+      })
+    );
+  }
+
+  /**
+   * Single-step a specific thread (all-stop: all other threads stay paused).
+   * If they are already paused (from a prior all-stop), just step this one.
+   */
+  async stepOne(tid: number): Promise<void> {
+    const info = this.#info(tid);
+    await this.#client
+      .request(info.threadActor, { type: "resume", resumeLimit: { type: "step" } })
+      .catch(() => {});
+  }
+
+  /**
+   * Wait for ANY thread to pause, then interrupt all others and wait for
+   * their acks. Emits "stopped" with the triggering tid once all threads are
+   * paused. This is the all-stop implementation.
+   */
+  armAllStop(): void {
+    let fired = false;
+    const perTidHandlers = new Map<number, (p: PauseEvent) => void>();
+    let onNewTarget: ((info: ThreadInfo) => void) | null = null;
+
+    const cleanup = () => {
+      for (const [tid, h] of perTidHandlers) this.off(`paused:${tid}`, h);
+      perTidHandlers.clear();
+      if (onNewTarget) {
+        this.off("target", onNewTarget);
+        onNewTarget = null;
+      }
+    };
+
+    const onPaused = (tid: number, packet: PauseEvent) => {
+      if (fired) return;
+      fired = true;
+      cleanup();
+      void this.#allStop(tid, packet);
+    };
+
+    const addTid = (tid: number) => {
+      if (fired) return;
+      const h = (p: PauseEvent) => onPaused(tid, p);
+      perTidHandlers.set(tid, h);
+      this.on(`paused:${tid}`, h);
+    };
+
+    onNewTarget = (info: ThreadInfo) => addTid(info.tid);
+    this.on("target", onNewTarget);
+
+    for (const tid of this.#threads.keys()) addTid(tid);
+  }
+
+  async #allStop(stoppedTid: number, packet: PauseEvent): Promise<void> {
+    this.#stoppedTid = stoppedTid;
+
+    // Interrupt all other running threads and wait for their pauses.
+    const others = [...this.#threads.keys()].filter(
+      (tid) => tid !== stoppedTid && !this.#pausedTids.has(tid)
+    );
+
+    await Promise.all(
+      others.map(async (tid) => {
+        const info = this.#threads.get(tid);
+        if (!info) return;
+        // Send interrupt and wait for the paused event. Interrupt is normally
+        // < 10 ms, but cap at 3 s for threads that may not be interruptible
+        // (e.g. a futex-blocked worker whose JS loop is frozen).
+        const paused = new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, 3000);
+          this.once(`paused:${tid}`, () => { clearTimeout(timer); resolve(); });
+        });
+        await Promise.race([
+          this.#client.request(info.threadActor, { type: "interrupt", when: {} }),
+          new Promise<void>((resolve) => setTimeout(resolve, 3000)),
+        ]).catch(() => {});
+        await paused;
+        if (this.#pausedTids.has(tid)) this.#interruptedTids.add(tid);
+      })
+    );
+
+    this.emit("stopped", { tid: stoppedTid, pausePacket: packet } as StoppedEvent);
+  }
+
+  interrupt(tid: number): Promise<RdpPacket> {
+    return this.#client.request(this.#info(tid).threadActor, { type: "interrupt", when: {} });
+  }
+
+  // --- console ---
+
+  /** Evaluate JS in the page (used to drive wasm calls during tests). */
   async evaluate(text: string): Promise<void> {
-    if (!this.#consoleActor) throw new Error("no console actor");
-    await this.#client.request(this.#consoleActor, { type: "evaluateJSAsync", text });
+    // Use the first thread with a console actor.
+    const info = [...this.#threads.values()].find((t) => t.consoleActor);
+    if (!info) throw new Error("no console actor");
+    await this.#client.request(info.consoleActor, { type: "evaluateJSAsync", text });
+  }
+
+  get consoleActor(): string | null {
+    return [...this.#threads.values()].find((t) => t.consoleActor)?.consoleActor ?? null;
+  }
+
+  /** Console actor of the thread that triggered the last all-stop, for
+   * evaluations that must run in that thread's context.
+   * Returns null if the thread has no console (avoids falling back to the
+   * main-frame console, which may be paused and unresponsive). */
+  get stoppedConsoleActor(): string | null {
+    const actor = this.#threads.get(this.#stoppedTid)?.consoleActor;
+    return actor || null;
   }
 
   /** Fetch a frame's environment form (with the parent scope chain). */
@@ -236,20 +503,38 @@ export class RdpWasmSession extends EventEmitter {
     return this.#client.request(frameActor, { type: "getEnvironment" });
   }
 
-  /** Evaluate JS in a frame's scope (so wasm-instance bindings like `memory0`
-   *  are visible) and resolve with the result packet. */
-  async evaluateInFrame(text: string, frameActor: string): Promise<RdpPacket> {
-    if (!this.#consoleActor) throw new Error("no console actor");
+  /** Evaluate JS in a frame's scope and resolve with the result packet.
+   * @param consoleActorOverride Use a specific console actor (e.g. the stopped
+   * thread's, not the main thread's — the main thread may be paused and unable
+   * to service evaluations in all-stop mode).
+   */
+  async evaluateInFrame(
+    text: string,
+    frameActor: string,
+    consoleActorOverride?: string,
+  ): Promise<RdpPacket> {
+    const consoleActor =
+      consoleActorOverride ??
+      [...this.#threads.values()].find((t) => t.consoleActor)?.consoleActor;
+    if (!consoleActor) throw new Error("no console actor");
     this.#client.registerEventType("evaluationResult");
-    const ack = await this.#client.request(this.#consoleActor, {
+    const ack = await this.#client.request(consoleActor, {
       type: "evaluateJSAsync",
       text,
       frameActor,
     });
     const resultID = (ack as { resultID?: string }).resultID;
-    return new Promise<RdpPacket>((resolve) => {
+    return new Promise<RdpPacket>((resolve, reject) => {
+      const timer = setTimeout(
+        () => { this.#client.off("event", onEvent); reject(new Error("evaluateInFrame timeout")); },
+        500,
+      );
       const onEvent = (p: RdpPacket) => {
-        if (p.type === "evaluationResult" && (p as { resultID?: string }).resultID === resultID) {
+        if (
+          p.type === "evaluationResult" &&
+          (p as { resultID?: string }).resultID === resultID
+        ) {
+          clearTimeout(timer);
           this.#client.off("event", onEvent);
           resolve(p);
         }

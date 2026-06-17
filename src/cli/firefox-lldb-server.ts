@@ -148,9 +148,9 @@ async function main(): Promise<void> {
 
     if (url) {
       await session.navigate(url);
-      logger.debug(`[rdp] on ${session.targetUrl}`);
+      logger.debug(`[rdp] navigated to ${url}`);
       await waitForWasm(session);
-    } else if (!session.threadActor) {
+    } else if (!session.hasThreads()) {
       await sleep(500);
     }
 
