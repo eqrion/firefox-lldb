@@ -34,17 +34,25 @@ LLDB=/path/to/wasm-lldb node --import tsx src/cli/firefox-lldb.ts \
 ```
 
 ```
-[info] tab available: http://localhost:8080/ (pid 1) — run 'platform process list' in lldb, then 'process attach --pid 1'
+[info] tab available: http://localhost:8080/
+[info]   process attach --plugin wasm --pid 1
 ```
 
-From the lldb prompt:
+From the lldb prompt (`attach` is aliased to `process attach --plugin wasm`, so
+the plugin is supplied for you):
 
 ```
 (lldb) platform process list        # see open tabs and their PIDs
-(lldb) process attach --pid <N>     # attach to the wasm tab
+(lldb) attach --pid <N>             # attach to the wasm tab
 (lldb) breakpoint set -n compute_factorial
 (lldb) continue
 ```
+
+Wasm targets must be driven through LLDB's `wasm` process plugin. If you attach
+with the bare `process attach` (no `--plugin wasm`), LLDB falls back to the
+generic gdb-remote plugin, which misreads the wasm address space — the session
+will not work. The server bounds the bogus reads such a plugin produces so it
+fails instead of exhausting memory; run with `-v` to trace the protocol.
 
 ### Manual two-step
 
@@ -59,8 +67,11 @@ lldb
 (lldb) platform select remote-gdb-server
 (lldb) platform connect connect://localhost:1234
 (lldb) platform process list          # find the tab's PID
-(lldb) process attach --pid <N>       # server pauses the tab automatically
+(lldb) process attach --plugin wasm --pid <N>   # server pauses the tab automatically
 ```
+
+(In your own lldb the `attach` alias is not defined, so pass `--plugin wasm`
+explicitly.)
 
 Connect to an already-running Firefox instead of launching a new one:
 
