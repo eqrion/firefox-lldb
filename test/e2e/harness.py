@@ -267,6 +267,7 @@ def start_static_server(page_dir):
 
 
 _TEST_TIMEOUT = 120  # seconds — each test launches Firefox + LLDB
+_WATCHDOG_GRACE = 15  # extra slack before the thread watchdog force-kills
 
 
 def _timeout_handler(signum, frame):
@@ -280,13 +281,36 @@ class TestBase(unittest.TestCase):
         self.dbg = lldb.SBDebugger.Create()
         self.dbg.SetAsync(False)
         self._tmpdir = tempfile.mkdtemp(prefix="ff-bridge-")
+        self._procs = []
+        # A hung LLDB call blocks in C, where SIGALRM can't interrupt it — the
+        # test would hang forever and leak its server + Firefox. A daemon thread
+        # runs independently of that blocked C call, so on timeout it force-kills
+        # the spawned servers; dropping the gdb connection unblocks the call, the
+        # test fails, and tearDown cleans up instead of leaking.
+        self._done = threading.Event()
+        self._watchdog = threading.Thread(target=self._watchdog_run, daemon=True)
+        self._watchdog.start()
         signal.signal(signal.SIGALRM, _timeout_handler)
         signal.alarm(_TEST_TIMEOUT)
 
     def tearDown(self):
         signal.alarm(0)  # cancel the alarm
+        self._done.set()  # stop the watchdog
+        self._kill_procs(signal.SIGTERM)
         lldb.SBDebugger.Destroy(self.dbg)
         shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _kill_procs(self, sig):
+        """Kill every spawned server's process group (server + Firefox children)."""
+        for proc in self._procs:
+            try:
+                os.killpg(os.getpgid(proc.pid), sig)
+            except (ProcessLookupError, OSError):
+                pass
+
+    def _watchdog_run(self):
+        if not self._done.wait(_TEST_TIMEOUT + _WATCHDOG_GRACE):
+            self._kill_procs(signal.SIGKILL)
 
     def _spawn(self, argv, *, ready, timeout=30):
         """Start a subprocess; block until `ready` string appears in output."""
@@ -298,15 +322,11 @@ class TestBase(unittest.TestCase):
             text=True,
             # New process group so killpg() also kills Firefox children.
             preexec_fn=os.setsid,
+            # The server is session-detached, so if this test process is killed
+            # it would orphan the server + Firefox. Tell it to exit when orphaned.
+            env={**os.environ, "FIREFOX_LLDB_EXIT_WHEN_ORPHANED": "1"},
         )
-
-        def _kill_group():
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-
-        self.addCleanup(_kill_group)
+        self._procs.append(proc)
         deadline = time.time() + timeout
         while time.time() < deadline:
             line = proc.stdout.readline()

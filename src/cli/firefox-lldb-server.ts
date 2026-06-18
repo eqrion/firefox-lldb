@@ -293,6 +293,19 @@ async function main(): Promise<void> {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
   process.on("SIGHUP", () => {});
+
+  // When launched session-detached (e.g. the e2e harness uses setsid), a killed
+  // parent does not signal us, so we would orphan the launched Firefox. Poll for
+  // reparenting to init/launchd (ppid 1) and shut down cleanly when it happens.
+  if (process.env.FIREFOX_LLDB_EXIT_WHEN_ORPHANED) {
+    const timer = setInterval(() => {
+      if (process.ppid === 1) {
+        logger.warn("parent process exited; shutting down to release Firefox");
+        void shutdown();
+      }
+    }, 1000);
+    timer.unref();
+  }
 }
 
 main().catch((err) => {

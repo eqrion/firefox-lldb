@@ -17,11 +17,16 @@ Environment variables (forwarded to each worker):
 import argparse
 import concurrent.futures
 import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+
+# Backstop timeout per module. The per-test watchdog in harness.py bounds each
+# test, so this only fires if that fails; on timeout we kill the module's group.
+_MODULE_TIMEOUT = int(os.environ.get("FIREFOX_LLDB_MODULE_TIMEOUT", "900"))
 
 # Core tests run on every PR.
 CORE_MODULES = [
@@ -60,14 +65,30 @@ _ENV = _build_env()
 
 
 def _run_module(module):
-    result = subprocess.run(
+    # Own session so a timeout can kill the whole module group. Servers it spawns
+    # are themselves session-detached, so they survive the killpg but self-exit
+    # via FIREFOX_LLDB_EXIT_WHEN_ORPHANED once their parent is gone.
+    proc = subprocess.Popen(
         [sys.executable, "-m", "unittest", module, "-v"],
         cwd=str(HERE),
         env=_ENV,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         text=True,
+        start_new_session=True,
     )
-    return module, result.returncode, result.stdout + result.stderr
+    try:
+        output, _ = proc.communicate(timeout=_MODULE_TIMEOUT)
+        return module, proc.returncode, output
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            pass
+        output, _ = proc.communicate()
+        return module, 1, (output or "") + (
+            "\n[runner] module timed out after %ds and was killed\n" % _MODULE_TIMEOUT
+        )
 
 
 def main():
