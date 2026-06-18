@@ -168,7 +168,17 @@ impl<'a> MultiThreadBase for Debugger<'a> {
                     Err(_) => Err(TargetError::NonFatal),
                 }
             }
-            AddrSpaceLookup::Empty => Err(TargetError::NonFatal),
+            AddrSpaceLookup::Empty => {
+                // Before any wasm loads, LLDB reads at 0x0 to disassemble the
+                // initial frame. Return zeroes instead of an error so the user
+                // doesn't see a scary "memory read failed" on every session.
+                if !self.addr_space.has_modules() {
+                    data.fill(0);
+                    Ok(data.len())
+                } else {
+                    Err(TargetError::NonFatal)
+                }
+            }
         }
     }
 
@@ -313,6 +323,7 @@ impl<'a> SwBreakpoint for Debugger<'a> {
             module
                 .add_breakpoint(debuggee, wasm_addr.offset())
                 .map_err(|_| TargetError::NonFatal)?;
+            self.sw_breakpoints.insert(wasm_addr);
             Ok(true)
         } else {
             Ok(false)
@@ -329,6 +340,7 @@ impl<'a> SwBreakpoint for Debugger<'a> {
             module
                 .remove_breakpoint(debuggee, wasm_addr.offset())
                 .map_err(|_| TargetError::NonFatal)?;
+            self.sw_breakpoints.remove(&wasm_addr);
             Ok(true)
         } else {
             Ok(false)

@@ -86,6 +86,10 @@ impl AddrSpace {
         Ok(self.modules.len() > before)
     }
 
+    pub fn has_modules(&self) -> bool {
+        !self.modules.is_empty()
+    }
+
     /// Iterate over each registered module paired with its base `WasmAddr`.
     pub fn modules_with_addrs(&self) -> impl Iterator<Item = (&Module, WasmAddr)> + '_ {
         self.modules.iter().enumerate().map(|(idx, m)| {
