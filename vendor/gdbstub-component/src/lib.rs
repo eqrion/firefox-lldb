@@ -20,7 +20,7 @@ use gdbstub::{
 };
 use gdbstub_arch::wasm::addr::WasmAddr;
 use log::trace;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use wstd::{
     io::{AsyncRead, AsyncWrite},
     iter::AsyncIterator,
@@ -56,6 +56,7 @@ impl api::exports::bytecodealliance::wasmtime::debugger::Guest for Component {
             running: None,
             interrupt: false,
             stepping_tid: None,
+            sw_breakpoints: HashSet::new(),
             addr_space: AddrSpace::new(),
         };
         wstd::runtime::block_on(async {
@@ -80,6 +81,7 @@ struct Debugger<'a> {
     addr_space: AddrSpace,
     interrupt: bool,
     stepping_tid: Option<Tid>,
+    sw_breakpoints: HashSet<WasmAddr>,
 }
 
 impl<'a> Debugger<'a> {
@@ -256,25 +258,56 @@ impl<'a> Debugger<'a> {
                     self.stepping_tid
                 );
                 let new_modules = self.update_on_stop();
+                // stopped_pc is the snapped address Firefox actually fired at.
                 let stopped_pc = self
                     .threads
                     .get(&self.stopped_tid)
                     .map(|ts| ts.current_pc)
                     .unwrap_or_else(|| WasmAddr::from_raw(0).unwrap());
+
+                // Firefox snaps breakpoints to the nearest valid wasm instruction
+                // boundary, so the stopped PC may be a few bytes after the DWARF
+                // low_pc that LLDB used when it registered its BreakpointSite. Use
+                // the registered pre-snap address in the T05 stop reply so LLDB's
+                // BreakpointSite lookup matches and reports eStopReasonBreakpoint.
+                // We keep current_pc = stopped_pc (snapped) for register reads and
+                // qWasmCallStack so LLDB's DWARF line table lookup (which has
+                // entries at snapped positions) returns the correct source location.
+                //
+                // Only do this when not stepping: DoPlanExplainsStop in the wasm
+                // step plan returns false for eStopReasonBreakpoint, handing off to
+                // the breakpoint handler. During a step we always use stopped_pc
+                // so the step plan can check the call-stack depth and complete.
+                let (is_sw_break, t05_pc) = if self.stepping_tid.is_none() {
+                    let nearest = self.sw_breakpoints.iter().copied().find(|&bp| {
+                        bp.addr_type() == stopped_pc.addr_type()
+                            && bp.module_index() == stopped_pc.module_index()
+                            && {
+                                let delta = (stopped_pc.offset() as i64) - (bp.offset() as i64);
+                                delta >= 0 && delta <= 8
+                            }
+                    });
+                    (nearest.is_some(), nearest.unwrap_or(stopped_pc))
+                } else {
+                    (false, stopped_pc)
+                };
+
                 // When new synthetic JS modules were registered, signal a
                 // library change so LLDB re-reads qXfer:libraries and loads
                 // the new modules before symbolidating the call stack.
                 let stop_reason = if new_modules {
                     MultiThreadStopReason::Library(self.stopped_tid)
                 } else if self.stepping_tid.is_some() {
+                    // Step completion. is_sw_break is always false here (see above).
                     MultiThreadStopReason::SignalWithThread {
                         tid: self.stopped_tid,
                         signal: Signal::SIGTRAP,
                     }
                 } else {
+                    // Breakpoint hit.
                     MultiThreadStopReason::SwBreak(self.stopped_tid)
                 };
-                let pc_bytes = stopped_pc.as_raw().to_le_bytes();
+                let pc_bytes = t05_pc.as_raw().to_le_bytes();
                 let mut regs = core::iter::once((
                     gdbstub_arch::wasm::reg::id::WasmRegId::Pc,
                     pc_bytes.as_slice(),

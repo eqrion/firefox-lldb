@@ -14067,19 +14067,6 @@ null,
 },
 );
 function trampoline24(handle) {
-  const handleEntry = rscTableRemove(handleTable10, handle);
-  if (handleEntry.own) {
-    
-    const rsc = captureTable10.get(handleEntry.rep);
-    if (rsc) {
-      if (rsc[symbolDispose]) rsc[symbolDispose]();
-      captureTable10.delete(handleEntry.rep);
-    } else if (WasmFunc[symbolCabiDispose]) {
-      WasmFunc[symbolCabiDispose](handleEntry.rep);
-    }
-  }
-}
-function trampoline25(handle) {
   const handleEntry = rscTableRemove(handleTable7, handle);
   if (handleEntry.own) {
     
@@ -14089,6 +14076,19 @@ function trampoline25(handle) {
       captureTable7.delete(handleEntry.rep);
     } else if (Debuggee[symbolCabiDispose]) {
       Debuggee[symbolCabiDispose](handleEntry.rep);
+    }
+  }
+}
+function trampoline25(handle) {
+  const handleEntry = rscTableRemove(handleTable10, handle);
+  if (handleEntry.own) {
+    
+    const rsc = captureTable10.get(handleEntry.rep);
+    if (rsc) {
+      if (rsc[symbolDispose]) rsc[symbolDispose]();
+      captureTable10.delete(handleEntry.rep);
+    } else if (WasmFunc[symbolCabiDispose]) {
+      WasmFunc[symbolCabiDispose](handleEntry.rep);
     }
   }
 }
@@ -18924,7 +18924,7 @@ Promise.all([module0, module1, module2]).catch(() => {});
     '[method]wasm-value.unwrap-i32': trampoline13,
     '[method]wasm-value.unwrap-i64': trampoline14,
     '[method]wasm-value.unwrap-v128': exports0['15'],
-    '[resource-drop]debuggee': trampoline25,
+    '[resource-drop]debuggee': trampoline24,
     '[resource-drop]event-future': trampoline4,
     '[resource-drop]frame': trampoline11,
     '[resource-drop]global': trampoline9,
@@ -18932,7 +18932,7 @@ Promise.all([module0, module1, module2]).catch(() => {});
     '[resource-drop]memory': trampoline6,
     '[resource-drop]module': trampoline5,
     '[resource-drop]wasm-exception': trampoline2,
-    '[resource-drop]wasm-func': trampoline24,
+    '[resource-drop]wasm-func': trampoline25,
     '[resource-drop]wasm-value': trampoline8,
     '[static]event-future.finish': exports0['16'],
   },
