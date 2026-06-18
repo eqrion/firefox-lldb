@@ -355,6 +355,33 @@ class TestBase(unittest.TestCase):
         gdb_port = launch_gdb_server(platform_port)
         return self._connect(gdb_port)
 
+    def _attach_via_platform(self, platform_port, pid=1):
+        """Attach through the platform's `process attach` path (vAttach + wasm plugin).
+
+        Exercises a different code path than _connect_via_platform: LLDB drives
+        the session through ProcessGDBRemote with the wasm plugin and the
+        component's vAttach support, rather than `process connect`.
+        """
+        target = self.dbg.CreateTarget("")
+        ci = self.dbg.GetCommandInterpreter()
+
+        def run(cmd):
+            res = lldb.SBCommandReturnObject()
+            ci.HandleCommand(cmd, res)
+            self.assertTrue(res.Succeeded(), "%s: %s" % (cmd, res.GetError()))
+            return res
+
+        run("platform select remote-gdb-server")
+        run("platform connect connect://127.0.0.1:%d" % platform_port)
+        # `process attach --pid N` triggers qLaunchGDBServer;pid:N. The platform
+        # resolves the tab (or, for an as-yet-unlisted tab, falls back to the
+        # configured launch URL) and spawns the stub, which we drive with the
+        # wasm plugin. No prior `platform process list` is required.
+        run("process attach --plugin wasm --pid %d" % pid)
+        process = target.GetProcess()
+        self.assertTrue(process.IsValid(), "attached process is valid")
+        return target, process
+
     def _stopped_at_breakpoint(self, fx):
         platform_port = self._start_platform(fx)
         target, process = self._connect_via_platform(platform_port)

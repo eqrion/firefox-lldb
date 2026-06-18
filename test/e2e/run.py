@@ -32,6 +32,7 @@ CORE_MODULES = [
 
 # Extended tests run on push to main or on demand.
 EXTENDED_MODULES = [
+    "test_attach",
     "test_inspect_types",
     "test_inspect_heap",
     "test_recursion",
