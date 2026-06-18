@@ -1,0 +1,86 @@
+{
+  "sandbox": {
+    "enabled": true,
+    "filesystem": {
+      "allowWrite": [".", "/tmp"],
+      "denyRead": [
+        "~/.ssh",
+        "~/.gnupg",
+        "~/.aws",
+        "~/.azure",
+        "~/.config/gh",
+        "~/.config/gcloud",
+        "~/.kube",
+        "~/.netrc",
+        "~/.npmrc",
+        "~/.cargo/credentials.toml",
+        "~/.vault-token"
+      ]
+    },
+    "network": {
+      "allowedDomains": [
+        "github.com",
+        "api.github.com",
+        "raw.githubusercontent.com",
+        "registry.npmjs.org",
+        "crates.io",
+        "static.crates.io",
+        "index.crates.io",
+        "searchfox.org",
+        "llvm.org",
+        "lldb.llvm.org"
+      ]
+    }
+  },
+  "permissions": {
+    "allow": [
+      "Bash(npm run test*)",
+      "Bash(npm run format*)",
+      "Bash(npm run check*)",
+      "Bash(npm run typecheck*)",
+      "Bash(npm run build*)",
+      "Bash(npm run component*)",
+      "Bash(npm run launch*)",
+      "Bash(npm run connect*)",
+      "Bash(npm ci)",
+      "Bash(node *)",
+      "Bash(npx jco *)",
+      "Bash(python3 test/e2e/*)",
+      "Bash(tsc *)",
+      "Bash(cargo build *)",
+      "Bash(rg *)",
+      "Bash(find *)",
+      "Bash(ls*)",
+      "Bash(mkdir *)",
+      "Bash(cp *)",
+      "Bash(mv *)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git show*)",
+      "Bash(git branch*)",
+      "Bash(git stash*)",
+      "Bash(git add *)",
+      "Bash(git commit*)",
+      "Bash(gh issue list*)",
+      "Bash(gh issue view*)",
+      "Bash(gh pr list*)",
+      "Bash(gh pr view*)",
+      "Bash(gh pr checks*)",
+      "Bash(gh run list*)",
+      "Bash(gh run view*)",
+      "Bash(gh run watch*)",
+      "Bash(gh workflow list*)",
+      "Bash(gh workflow view*)",
+      "Bash(gh repo view*)"
+    ],
+    "deny": [
+      "Bash(npm publish*)",
+      "Bash(git push*)",
+      "Bash(git reset --hard*)",
+      "Bash(git checkout -- *)",
+      "Bash(git clean -f*)",
+      "Bash(sudo *)"
+    ]
+  }
+}

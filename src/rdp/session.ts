@@ -52,7 +52,7 @@ export async function listFirefoxTabs(port = 6080, host = "127.0.0.1"): Promise<
 export async function watchFirefoxTabs(
   port = 6080,
   host = "127.0.0.1",
-  onTabs: (tabs: TabInfo[]) => void,
+  onTabs: (tabs: TabInfo[]) => void
 ): Promise<void> {
   const client = await RdpClient.connect(port, host);
   client.registerEventType("tabListChanged");
@@ -77,7 +77,7 @@ export async function watchFirefoxTabs(
     client.on("close", () => {
       clearTimeout(startupRetry);
       resolve();
-    }),
+    })
   );
 }
 
@@ -156,11 +156,7 @@ export class RdpWasmSession extends EventEmitter {
   }
 
   /** Connect, enable wasm observation, and start watching targets. */
-  static async start(
-    port = 6080,
-    host = "127.0.0.1",
-    tabActor?: string,
-  ): Promise<RdpWasmSession> {
+  static async start(port = 6080, host = "127.0.0.1", tabActor?: string): Promise<RdpWasmSession> {
     const client = await RdpClient.connect(port, host);
     const session = new RdpWasmSession(client);
     await session.#init(tabActor);

@@ -622,6 +622,7 @@ test("resumeAll sends resume to all paused threads", async () => {
     (r) => ({ from: r.to as string })
   );
   await session.resumeAll();
+  await sleep(20);
 
   const resumes = srv.received.filter((r) => r.type === "resume");
   const actors = new Set(resumes.map((r) => r.to));
@@ -673,6 +674,7 @@ test("resumed event removes thread from paused set; resumeAll skips it", async (
 
   const before = srv.received.length;
   await session.resumeAll();
+  await sleep(20);
 
   const resumes = srv.received.slice(before).filter((r) => r.type === "resume");
   const actors = new Set(resumes.map((r) => r.to));
@@ -707,6 +709,7 @@ test("target-destroyed-form removes thread from paused set; resumeAll skips it",
 
   const before = srv.received.length;
   await session.resumeAll();
+  await sleep(20);
 
   const resumes = srv.received.slice(before).filter((r) => r.type === "resume");
   const actors = new Set(resumes.map((r) => r.to));
@@ -740,6 +743,7 @@ test("stepOne sends resume with resumeLimit:step only to the specified thread", 
 
   const tidA = session.listTids()[0]; // threadA registered first → TID 1
   await session.stepOne(tidA);
+  await sleep(20);
 
   const resumesA = srv.received.filter((r) => r.type === "resume" && r.to === "threadA");
   const resumesB = srv.received.filter((r) => r.type === "resume" && r.to === "threadB");

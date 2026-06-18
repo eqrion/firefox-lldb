@@ -118,10 +118,7 @@ async function connectWithRetry(rdpPort: number, tabActor?: string): Promise<Rdp
   throw new Error(`could not connect to Firefox RDP on ${rdpPort}: ${lastErr}`);
 }
 
-async function watchTabs(
-  rdpPort: number,
-  onTabs: (tabs: TabInfo[]) => void,
-): Promise<void> {
+async function watchTabs(rdpPort: number, onTabs: (tabs: TabInfo[]) => void): Promise<void> {
   for (;;) {
     try {
       await watchFirefoxTabs(rdpPort, "127.0.0.1", onTabs);
@@ -206,11 +203,7 @@ async function main(): Promise<void> {
             };
             session.once("stopped", onStopped);
             session.armAllStop();
-            session.interrupt(tids[0]).catch((e) => {
-              clearTimeout(timer);
-              session.off("stopped", onStopped);
-              reject(e);
-            });
+            session.interrupt(tids[0]);
           });
         }
       }
@@ -270,7 +263,7 @@ async function main(): Promise<void> {
         hinted.add(tab.actor);
         const pid = platformServer.tabPid(tab.actor);
         process.stderr.write(
-          `\n[info] tab available: ${tab.url}\n[info]   process attach --pid ${pid}\n`,
+          `\n[info] tab available: ${tab.url}\n[info]   process attach --pid ${pid}\n`
         );
       }
     }
