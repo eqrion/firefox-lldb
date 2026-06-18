@@ -26,8 +26,8 @@ Modes (default: --launch):
 Options:
   -p, --port <N>      Platform server RSP port (default: 1234).
   --rdp-port <N>      Firefox RDP port (default: 6080).
-  --url <U>           Starting URL (navigated to when LLDB spawns a process;
-                      also loaded at startup in --launch mode).
+  --url <U>           URL navigated to when LLDB spawns a process (connect or
+                      attach). Firefox itself starts on about:blank.
   --firefox <path>    Firefox binary override.
   --headless          Run Firefox headlessly.
   --fire <js>         Evaluate JS after the first breakpoint arms (test use).
@@ -152,11 +152,11 @@ async function main(): Promise<void> {
       rdpPort: args.rdpPort,
       binary: args.firefox,
       headless: args.headless,
-      // Open the page at startup (issue #4). Otherwise Firefox sits on
-      // about:blank until the first attach, which shows the wrong name in
-      // `platform process list` and — headless — cannot even be listed over RDP
-      // (a blank tab has no window global), breaking `process attach --pid N`.
-      url: args.url,
+      // NOTE: deliberately not passing url here. Launching Firefox at the page
+      // (issue #4) makes the connect launcher's navigate() a reload of an
+      // already-loaded tab, which hangs the session. Re-introduce only alongside
+      // skipping that redundant navigate, once `process attach` actually works
+      // (blocked on the LLDB wasm-plugin relocation bug).
     });
     logger.info("launched Firefox");
   }
