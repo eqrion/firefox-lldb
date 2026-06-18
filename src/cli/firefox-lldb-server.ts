@@ -8,7 +8,7 @@ import { parseArgs } from "node:util";
 import { RspServer } from "../protocol/rsp-server.js";
 import { GdbServerSpawner, type GdbServerLauncher } from "../platform/gdb-server-spawner.js";
 import { PlatformServer } from "../platform/platform-server.js";
-import { RdpWasmSession, listFirefoxTabs } from "../rdp/session.js";
+import { RdpWasmSession, listFirefoxTabs, watchFirefoxTabs, type TabInfo } from "../rdp/session.js";
 import { RdpDebuggee } from "../gdb/rdp-debuggee.js";
 import { launchFirefox, type FirefoxHandle } from "../rdp/firefox.js";
 // @ts-expect-error - .mjs host has no type declarations
@@ -105,17 +105,31 @@ function parseCliArgs(argv: string[]): Args {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function connectWithRetry(rdpPort: number): Promise<RdpWasmSession> {
+async function connectWithRetry(rdpPort: number, tabActor?: string): Promise<RdpWasmSession> {
   let lastErr: unknown;
   for (let i = 0; i < 80; i++) {
     try {
-      return await RdpWasmSession.start(rdpPort);
+      return await RdpWasmSession.start(rdpPort, "127.0.0.1", tabActor);
     } catch (err) {
       lastErr = err;
       await sleep(250);
     }
   }
   throw new Error(`could not connect to Firefox RDP on ${rdpPort}: ${lastErr}`);
+}
+
+async function watchTabs(
+  rdpPort: number,
+  onTabs: (tabs: TabInfo[]) => void,
+): Promise<void> {
+  for (;;) {
+    try {
+      await watchFirefoxTabs(rdpPort, "127.0.0.1", onTabs);
+      break;
+    } catch {
+      await sleep(250);
+    }
+  }
 }
 
 async function waitForWasm(session: RdpWasmSession): Promise<void> {
@@ -142,10 +156,25 @@ async function main(): Promise<void> {
     logger.info("launched Firefox");
   }
 
-  const launcher: GdbServerLauncher = async ({ port, url }) => {
+  // currentTabs is updated by the watcher below and read by the platform server
+  // to satisfy `platform process list` and resolve `process attach --pid N`.
+  let currentTabs: TabInfo[] = [];
+
+  const launcher: GdbServerLauncher = async ({ port, url, tabActor }) => {
+    // Actor IDs are scoped to an RDP connection. The watcher uses a separate
+    // connection from the launcher, so re-resolve by position in currentTabs.
+    let resolvedActor = tabActor;
+    if (tabActor) {
+      const idx = currentTabs.findIndex((t) => t.actor === tabActor);
+      if (idx !== -1) {
+        const fresh = await listFirefoxTabs(args.rdpPort).catch(() => currentTabs);
+        resolvedActor = fresh[idx]?.actor ?? tabActor;
+      }
+    }
+
     const session = launching
-      ? await connectWithRetry(args.rdpPort)
-      : await RdpWasmSession.start(args.rdpPort);
+      ? await connectWithRetry(args.rdpPort, resolvedActor)
+      : await RdpWasmSession.start(args.rdpPort, "127.0.0.1", resolvedActor);
 
     if (url) {
       await session.navigate(url);
@@ -206,7 +235,12 @@ async function main(): Promise<void> {
   };
 
   const spawner = new GdbServerSpawner(launcher);
-  const server = new RspServer(new PlatformServer({ spawner, defaultUrl: args.url }), { logger });
+  const platformServer = new PlatformServer({
+    spawner,
+    defaultUrl: args.url,
+    listTabs: async () => currentTabs,
+  });
+  const server = new RspServer(platformServer, { logger });
 
   const bound = await server.listen(args.port);
   // Stdout is the control channel for the firefox-lldb wrapper; stderr carries logs.
@@ -219,6 +253,20 @@ async function main(): Promise<void> {
       )
     );
   }
+
+  const hinted = new Set<string>();
+  void watchTabs(args.rdpPort, (tabs) => {
+    currentTabs = tabs;
+    for (const tab of tabs) {
+      if (!hinted.has(tab.actor) && tab.url && tab.url !== "about:blank") {
+        hinted.add(tab.actor);
+        const pid = platformServer.tabPid(tab.actor);
+        process.stderr.write(
+          `\n[info] tab available: ${tab.url}\n[info]   process attach --pid ${pid}\n`,
+        );
+      }
+    }
+  });
 
   const shutdown = async () => {
     await spawner.killAll();

@@ -48,6 +48,39 @@ export async function listFirefoxTabs(port = 6080, host = "127.0.0.1"): Promise<
   }
 }
 
+/** Watch tab list changes, calling onTabs on every change. Resolves when the connection closes. */
+export async function watchFirefoxTabs(
+  port = 6080,
+  host = "127.0.0.1",
+  onTabs: (tabs: TabInfo[]) => void,
+): Promise<void> {
+  const client = await RdpClient.connect(port, host);
+  client.registerEventType("tabListChanged");
+
+  const query = async () => {
+    const { tabs } = (await client.request("root", { type: "listTabs" })) as {
+      tabs: { actor: string; url?: string; title?: string }[];
+    };
+    onTabs(tabs.map((t) => ({ actor: t.actor, url: t.url ?? "", title: t.title ?? "" })));
+  };
+
+  client.on("event", (p) => {
+    if (p.type === "tabListChanged" || p.type === "tabNavigated") void query();
+  });
+
+  await query();
+  // One delayed re-query to handle the startup race where Firefox hadn't
+  // created any tabs yet when we first connected (listTabs returned []).
+  const startupRetry = setTimeout(() => void query().catch(() => {}), 2000);
+
+  await new Promise<void>((resolve) =>
+    client.on("close", () => {
+      clearTimeout(startupRetry);
+      resolve();
+    }),
+  );
+}
+
 export interface SourceForm {
   actor: string;
   url: string;
@@ -122,18 +155,26 @@ export class RdpWasmSession extends EventEmitter {
   }
 
   /** Connect, enable wasm observation, and start watching targets. */
-  static async start(port = 6080, host = "127.0.0.1"): Promise<RdpWasmSession> {
+  static async start(
+    port = 6080,
+    host = "127.0.0.1",
+    tabActor?: string,
+  ): Promise<RdpWasmSession> {
     const client = await RdpClient.connect(port, host);
     const session = new RdpWasmSession(client);
-    await session.#init();
+    await session.#init(tabActor);
     return session;
   }
 
-  async #init(): Promise<void> {
+  async #init(tabActor?: string): Promise<void> {
     const { tabs } = (await this.#client.request("root", { type: "listTabs" })) as {
       tabs: { actor: string; selected: boolean }[];
     };
-    this.#tabActor = (tabs.find((t) => t.selected) ?? tabs[0]).actor;
+    const tab =
+      (tabActor ? tabs.find((t) => t.actor === tabActor) : undefined) ??
+      tabs.find((t) => t.selected) ??
+      tabs[0];
+    this.#tabActor = tab.actor;
 
     const { actor: watcher } = await this.#client.request(this.#tabActor, {
       type: "getWatcher",
