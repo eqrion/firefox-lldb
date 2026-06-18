@@ -215,18 +215,24 @@ def launch_gdb_server(platform_port, attempts=4, backoff=1.0):
     for attempt in range(attempts):
         s = socket.socket()
         s.connect(("127.0.0.1", platform_port))
-        s.settimeout(30)
+        # Generous per-attempt timeout: a cold launch chains connectWithRetry
+        # (up to ~20s), navigate, and waitForWasm (~8s) before replying.
+        s.settimeout(60)
         try:
             resp = send_rsp(s, "qLaunchGDBServer:port:0;host:localhost;")
+            m = re.search(r"port:(\d+)", resp)
+            if m:
+                return int(m.group(1))
+            last = f"returned {resp!r}"
+        except OSError as e:
+            # socket timeout / connection reset: the launch lost the cold-start
+            # race. Retry with a fresh connection.
+            last = repr(e)
         finally:
             s.close()
-        m = re.search(r"port:(\d+)", resp)
-        if m:
-            return int(m.group(1))
-        last = resp
         if attempt + 1 < attempts:
             time.sleep(backoff)
-    raise RuntimeError(f"qLaunchGDBServer returned: {last!r} after {attempts} attempts")
+    raise RuntimeError(f"qLaunchGDBServer failed: {last} after {attempts} attempts")
 
 
 def start_static_server(page_dir):
