@@ -157,15 +157,14 @@ RDP facts confirmed experimentally:
   the target, which wasm has no support for. Inspect variables via the SB value
   API (`frame.FindVariable`, `GetChildMemberWithName`, `Dereference`) which reads
   DWARF + linear memory directly.
-- **CLI stepping** (`thread step-in/over/out`) does not work; `CommandObjectThread::DoExecute`
-  does not dispatch to `QueueThreadPlanForStep*` in batch mode. GUI debuggers and
-  DAP adapters use the SB API and work correctly.
+- **Stepping across the JS/wasm boundary at step-in** — stepping into a wasm
+  call from JS (or vice versa) is not supported; `thread step-in` at the boundary
+  behaves like step-over.
 - **Local/global type inference** is heuristic — RDP reports values as plain JS
   numbers without wasm types. Integer numbers are treated as i32, non-integers as
   f64, bigints as i64.
 - **JS locals/variable inspection** — JS frame locals are not yet exposed (returns empty). JS values don't map cleanly to wasm types; deferred to a future phase.
 - **Per-function JS names** — each JS source is one synthetic module with a file-level subprogram; `GetFunctionName()` returns the filename. Real per-function names (from the per-frame `displayName` RDP already provides) would need multi-subprogram modules with content-versioned unique ids.
-- **Stepping across the JS/wasm boundary** — not yet supported.
 - **Duplicate frame IDs for recursive JS frames** — `qWasmCallStack` reports only
   PCs; LLDB's wasm plugin derives `GetFrameID()` from the PC alone (no FP/SP
   equivalent for wasm). Multiple JS frames at the same source line (e.g., a
