@@ -157,14 +157,15 @@ RDP facts confirmed experimentally:
   the target, which wasm has no support for. Inspect variables via the SB value
   API (`frame.FindVariable`, `GetChildMemberWithName`, `Dereference`) which reads
   DWARF + linear memory directly.
-- **Stepping across the JS/wasm boundary at step-in** — stepping into a wasm
-  call from JS (or vice versa) is not supported; `thread step-in` at the boundary
-  behaves like step-over.
-- **JS step-in degrades to step-over** — inside a JS frame, stepping uses RDP
-  `{type:"next"}` (step-over by source line), so `thread step-in` cannot descend
-  into a called JS function. Single-subprogram synthetic modules can't
+- **Stepping across the JS/wasm boundary at step-in** — `thread step-in` from a
+  JS frame at a wasm call site does cross the boundary and enter the wasm function.
+  The inverse (step-in from wasm into a JS caller) is not supported.
+- **JS step-in degrades to step-over within JS** — inside a JS frame, stepping
+  uses RDP `{type:"next"}` (step-over by source line), so `thread step-in` cannot
+  descend into a called *JS* function. Single-subprogram synthetic modules can't
   distinguish JS functions anyway (`GetFunctionName()` returns the filename), so
-  there is nothing finer to step into.
+  there is nothing finer to step into. Stepping into a *wasm* callee from JS does
+  work (LLDB's step-in plan overrides the RDP granularity at the boundary).
 - **Local/global type inference** is heuristic — RDP reports values as plain JS
   numbers without wasm types. Integer numbers are treated as i32, non-integers as
   f64, bigints as i64.
