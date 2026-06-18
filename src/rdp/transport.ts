@@ -17,6 +17,20 @@ export interface RdpPacket {
   [key: string]: unknown;
 }
 
+// Process-wide RDP wire tracing, toggled by the server when run with `-v`
+// (or DEBUG=1). Emits `>>`/`<<` lines matching the RSP tracer convention so the
+// Firefox RDP channel can be inspected alongside the LLDB-facing protocols.
+let traceEnabled = false;
+export function setRdpTrace(on: boolean): void {
+  traceEnabled = on;
+}
+
+function trace(dir: ">>" | "<<", json: string): void {
+  if (!traceEnabled) return;
+  const text = json.length > 2000 ? `${json.slice(0, 2000)}…(${json.length} bytes)` : json;
+  console.error(`[rdp] ${dir} ${text}`);
+}
+
 export class RdpTransport extends EventEmitter {
   #socket: net.Socket;
   #buffer: Buffer = Buffer.alloc(0);
@@ -37,7 +51,9 @@ export class RdpTransport extends EventEmitter {
   }
 
   send(packet: RdpPacket): void {
-    const json = Buffer.from(JSON.stringify(packet), "utf8");
+    const body = JSON.stringify(packet);
+    trace(">>", body);
+    const json = Buffer.from(body, "utf8");
     this.#socket.write(`${json.length}:`);
     this.#socket.write(json);
   }
@@ -59,6 +75,7 @@ export class RdpTransport extends EventEmitter {
       if (this.#buffer.length < start + len) return; // wait for the full body
       const body = this.#buffer.subarray(start, start + len).toString("utf8");
       this.#buffer = this.#buffer.subarray(start + len);
+      trace("<<", body);
       try {
         this.emit("packet", JSON.parse(body) as RdpPacket);
       } catch (err) {

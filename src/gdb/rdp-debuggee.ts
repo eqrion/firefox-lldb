@@ -53,6 +53,17 @@ export interface RpcRequest {
   args: unknown[];
 }
 
+// Upper bound on a single memory read. LLDB chunks reads to its negotiated
+// packet size, far below this, so a request above it means the session is being
+// driven by the generic gdb-remote plugin (not `--plugin wasm`), which
+// misinterprets the wasm address space and asks for absurd lengths. Reject those
+// instead of allocating gigabytes and OOM-ing the worker.
+const MAX_MEMORY_READ = 16 * 1024 * 1024;
+
+function outOfBounds(): Error {
+  return Object.assign(new Error("out-of-bounds"), { payload: "out-of-bounds" });
+}
+
 type Ref = { $res: string; id: number };
 
 export class RdpDebuggee {
@@ -214,9 +225,7 @@ export class RdpDebuggee {
       case "Instance.getMemory": {
         const iUrl = this.#instanceUrlById.get(id)!;
         if (this.#syntheticByUrl.has(iUrl) || (args[0] as number) !== 0) {
-          return Promise.reject(
-            Object.assign(new Error("out-of-bounds"), { payload: "out-of-bounds" })
-          );
+          return Promise.reject(outOfBounds());
         }
         return { $res: "Memory", id: this.#nextId++ };
       }
@@ -510,6 +519,7 @@ export class RdpDebuggee {
   }
 
   async #readMemory(addr: number, len: number): Promise<Uint8Array> {
+    if (len < 0 || len > MAX_MEMORY_READ) throw outOfBounds();
     const out = new Uint8Array(len);
     const topActor = this.#topFrameActorByTid.get(this.#session.stoppedTid);
     const consoleActor = this.#session.stoppedConsoleActor;

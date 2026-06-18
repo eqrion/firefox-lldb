@@ -9,6 +9,7 @@ import { RspServer } from "../protocol/rsp-server.js";
 import { GdbServerSpawner, type GdbServerLauncher } from "../platform/gdb-server-spawner.js";
 import { PlatformServer } from "../platform/platform-server.js";
 import { RdpWasmSession, listFirefoxTabs, watchFirefoxTabs, type TabInfo } from "../rdp/session.js";
+import { setRdpTrace } from "../rdp/transport.js";
 import { RdpDebuggee } from "../gdb/rdp-debuggee.js";
 import { launchFirefox, type FirefoxHandle } from "../rdp/firefox.js";
 // @ts-expect-error - .mjs host has no type declarations
@@ -140,7 +141,9 @@ async function waitForWasm(session: RdpWasmSession): Promise<void> {
 
 async function main(): Promise<void> {
   const args = parseCliArgs(process.argv.slice(2));
-  const logger = consoleLogger(args.verbose || process.env.DEBUG === "1");
+  const verbose = args.verbose || process.env.DEBUG === "1";
+  const logger = consoleLogger(verbose);
+  setRdpTrace(verbose);
   const launching = !args.connect;
 
   let firefox: FirefoxHandle | undefined;
@@ -149,6 +152,11 @@ async function main(): Promise<void> {
       rdpPort: args.rdpPort,
       binary: args.firefox,
       headless: args.headless,
+      // Open the page at startup (issue #4). Otherwise Firefox sits on
+      // about:blank until the first attach, which shows the wrong name in
+      // `platform process list` and — headless — cannot even be listed over RDP
+      // (a blank tab has no window global), breaking `process attach --pid N`.
+      url: args.url,
     });
     logger.info("launched Firefox");
   }
@@ -177,9 +185,14 @@ async function main(): Promise<void> {
     // throws (e.g. waitForWasm times out) leaks the RDP watcher connection, and
     // a retried qLaunchGDBServer accumulates dead sessions against Firefox.
     try {
-      if (url) {
-        await session.navigate(url);
-        logger.debug(`[rdp] navigated to ${url}`);
+      // Connect supplies an explicit url and always navigates (unchanged). Attach
+      // (tabActor set, no url) navigates to the configured --url only if the tab
+      // has not yet loaded a wasm page, so `process attach` works against a
+      // freshly launched Firefox; an already-loaded tab keeps its content.
+      const navTo = url ?? ((await session.wasmSources()).length ? undefined : args.url);
+      if (navTo) {
+        await session.navigate(navTo);
+        logger.debug(`[rdp] navigated to ${navTo}`);
         await waitForWasm(session);
       } else if (!session.hasThreads()) {
         await sleep(500);
@@ -221,6 +234,7 @@ async function main(): Promise<void> {
         dispatch: (req: unknown) => debuggee.dispatch(req as never),
         port,
         onInfo: (m: string) => logger.debug(`[component] ${m}`),
+        verbose,
       });
       await ready;
       return {
@@ -263,7 +277,8 @@ async function main(): Promise<void> {
         hinted.add(tab.actor);
         const pid = platformServer.tabPid(tab.actor);
         process.stderr.write(
-          `\n[info] tab available: ${tab.url}\n[info]   process attach --pid ${pid}\n`
+          `\n[info] tab available: ${tab.url}\n` +
+            `[info]   process attach --plugin wasm --pid ${pid}\n`
         );
       }
     }

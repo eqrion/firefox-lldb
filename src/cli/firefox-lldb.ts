@@ -78,10 +78,12 @@ function resolveServerScript(): string {
 }
 
 // Send qLaunchGDBServer to the platform RSP server and return the spawned
-// GDB stub port. Uses the same approach as the e2e test harness so that lldb
-// can use `process connect --plugin wasm` instead of `process attach`, which
-// goes through ProcessGDBRemote and sends vAttach/attachment-verification
-// packets the gdbstub-component does not handle.
+// GDB stub port. For the --url flow we connect directly to this port with
+// `process connect --plugin wasm`: the launcher navigates Firefox and waits for
+// wasm to load before the stub is ready, so the session is live on connect.
+// (`process attach` is also supported now — the gdbstub-component implements
+// vAttach — but the attach path does not pre-navigate, so connect is preferred
+// when we know the URL.)
 function launchGdbStub(platformPort: number): Promise<number> {
   const rspFrame = (s: string) => {
     const cs = [...s].reduce((a, c) => (a + c.charCodeAt(0)) & 0xff, 0);
@@ -172,13 +174,17 @@ async function main(): Promise<void> {
     "platform select remote-gdb-server",
     "-o",
     `platform connect connect://localhost:${port}`,
+    // Wasm targets must be driven through LLDB's `wasm` process plugin; the
+    // generic gdb-remote plugin misreads the segmented wasm address space. Alias
+    // `attach` to inject `--plugin wasm` so users can `attach --pid N` without
+    // remembering the flag. (`process attach` cannot be transparently shadowed.)
+    "-o",
+    "command alias attach process attach --plugin wasm",
   ];
 
-  // When a URL is known, pre-launch the GDB stub now (the launcher will
-  // navigate Firefox, wait for wasm, then start the stub). This lets lldb use
-  // `process connect --plugin wasm` — the only path the gdbstub-component
-  // supports — instead of `process attach`, which goes through ProcessGDBRemote
-  // and sends vAttach/attachment-verification packets the component rejects.
+  // When a URL is known, pre-launch the GDB stub now (the launcher navigates
+  // Firefox, waits for wasm, then starts the stub) and connect with the wasm
+  // plugin — the session is live immediately, no user input needed.
   if (args.url) {
     process.stderr.write("[info] waiting for wasm to load...\n");
     try {
@@ -186,7 +192,7 @@ async function main(): Promise<void> {
       lldbArgs.push("-o", `process connect --plugin wasm connect://localhost:${stubPort}`);
     } catch (err) {
       process.stderr.write(`[warn] could not pre-launch GDB stub: ${err}\n`);
-      // Fall through — user can attach manually.
+      // Fall through — user can `attach --pid N` manually (alias adds --plugin wasm).
     }
   } else {
     lldbArgs.push("-o", "platform process list");

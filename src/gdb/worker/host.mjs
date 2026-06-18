@@ -48,7 +48,13 @@ export function startGdbServer({ dispatch, port, onInfo, verbose }) {
       } catch (e) {
         resp = { ok: false, error: String(e?.message || e) };
       }
-      const out = encode(resp);
+      let out = encode(resp);
+      if (out.length > data.length) {
+        // A response that overflows the shared buffer (e.g. an unreasonable
+        // memory read produced by a non-wasm-plugin session) would throw on
+        // data.set and kill the worker. Reply with an error instead.
+        out = encode({ ok: false, error: "out-of-bounds" });
+      }
       data.set(out, 0);
       Atomics.store(ctrl, CTRL_LEN, out.length);
       Atomics.store(ctrl, CTRL_STATE, STATE_RESPONSE);
@@ -60,7 +66,18 @@ export function startGdbServer({ dispatch, port, onInfo, verbose }) {
       if (/listening/i.test(m.info)) resolveReady();
     }
   });
-  worker.on("error", (e) => console.error("[gdb worker error]", e));
+  worker.on("error", (e) => {
+    if (e?.code === "ERR_WORKER_OUT_OF_MEMORY") {
+      console.error(
+        "[gdb worker] out of memory — the session was likely driven by the generic " +
+          "gdb-remote plugin, which misreads the wasm address space. Reconnect with " +
+          "the wasm plugin: `attach --pid N` (firefox-lldb) or " +
+          "`process attach --plugin wasm` / `process connect --plugin wasm`."
+      );
+    } else {
+      console.error("[gdb worker error]", e);
+    }
+  });
 
   return { ready, stop: () => worker.terminate() };
 }
