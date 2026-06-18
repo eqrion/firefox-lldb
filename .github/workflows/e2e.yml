@@ -32,7 +32,14 @@ jobs:
       # ubuntu-24.04 runner (pre-installed python3-lldb-18 leaves a stale
       # partial module in sys.modules that we haven't been able to clear).
       # Re-enable once the root cause is understood.
-      # - name: Run e2e tests
+      # - name: Run core e2e tests (PR)
+      #   if: github.event_name == 'pull_request'
       #   env:
       #     LLDB: lldb-18
-      #   run: npm run test:e2e
+      #   run: python3 test/e2e/run.py --core -j 4
+      #
+      # - name: Run full e2e tests (main)
+      #   if: github.event_name == 'push'
+      #   env:
+      #     LLDB: lldb-18
+      #   run: python3 test/e2e/run.py -j 4
