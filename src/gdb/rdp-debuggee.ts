@@ -152,7 +152,14 @@ export class RdpDebuggee {
         const tid = args[0] as number;
         this.#armStopped();
         this.#session.armAllStop();
-        this.#session.stepOne(tid).catch(() => {});
+        // A JS (`call`) innermost frame is JIT-compiled: RDP "step" advances one
+        // wasm instruction, which jumps an arbitrary number of JS source lines.
+        // Use "next" (RDP step-over by source line) so a step lands on the next
+        // JS line. This degrades JS step-in to step-over (single-subprogram
+        // synthetic modules can't distinguish JS functions anyway).
+        const innermost = this.#framesByTid.get(tid)?.[0];
+        const limit = innermost?.type === "call" ? "next" : "step";
+        this.#session.stepOne(tid, limit).catch(() => {});
         return this.#eventFutureRef();
       }
       case "Debuggee.interrupt": {

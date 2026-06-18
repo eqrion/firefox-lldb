@@ -204,17 +204,29 @@ def send_rsp(sock, packet):
             return rest[s + 1 : e].decode("latin-1")
 
 
-def launch_gdb_server(platform_port):
-    """Connect to the platform RSP server, send qLaunchGDBServer, return the spawned port."""
-    s = socket.socket()
-    s.connect(("127.0.0.1", platform_port))
-    s.settimeout(30)
-    resp = send_rsp(s, "qLaunchGDBServer:port:0;host:localhost;")
-    s.close()
-    m = re.search(r"port:(\d+)", resp)
-    if not m:
-        raise RuntimeError(f"qLaunchGDBServer returned: {resp!r}")
-    return int(m.group(1))
+def launch_gdb_server(platform_port, attempts=4, backoff=1.0):
+    """Connect to the platform RSP server, send qLaunchGDBServer, return the spawned port.
+
+    Retries on a transient E01: under suite-wide load a single launch can lose
+    the Firefox cold-start / wasm-observe race in the launcher even though the
+    platform server itself is healthy. Each attempt uses a fresh connection.
+    """
+    last = None
+    for attempt in range(attempts):
+        s = socket.socket()
+        s.connect(("127.0.0.1", platform_port))
+        s.settimeout(30)
+        try:
+            resp = send_rsp(s, "qLaunchGDBServer:port:0;host:localhost;")
+        finally:
+            s.close()
+        m = re.search(r"port:(\d+)", resp)
+        if m:
+            return int(m.group(1))
+        last = resp
+        if attempt + 1 < attempts:
+            time.sleep(backoff)
+    raise RuntimeError(f"qLaunchGDBServer returned: {last!r} after {attempts} attempts")
 
 
 def start_static_server(page_dir):

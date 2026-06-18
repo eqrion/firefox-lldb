@@ -134,6 +134,7 @@ export class RdpWasmSession extends EventEmitter {
   #breakpoints = new Map<string, Set<number>>(); // sourceUrl -> set of offsets
 
   #wasmActorByUrl = new Map<string, string>(); // url -> source actor (any thread)
+  #jsActorByUrl = new Map<string, string>(); // url -> JS source actor (any thread)
 
   private constructor(client: RdpClient) {
     super();
@@ -359,12 +360,13 @@ export class RdpWasmSession extends EventEmitter {
   }
 
   async setJsBreakpoint(sourceUrl: string, line: number): Promise<void> {
+    const loc = await this.#snapJsLocation(sourceUrl, line);
     await Promise.all(
       [...this.#threads.values()].map((t) =>
         this.#client
           .request(t.threadActor, {
             type: "setBreakpoint",
-            location: { sourceUrl, line, column: 1 },
+            location: { sourceUrl, line: loc.line, column: loc.column },
             options: {},
           })
           .catch(() => {})
@@ -373,16 +375,49 @@ export class RdpWasmSession extends EventEmitter {
   }
 
   async removeJsBreakpoint(sourceUrl: string, line: number): Promise<void> {
+    const loc = await this.#snapJsLocation(sourceUrl, line);
     await Promise.all(
       [...this.#threads.values()].map((t) =>
         this.#client
           .request(t.threadActor, {
             type: "removeBreakpoint",
-            location: { sourceUrl, line, column: 1 },
+            location: { sourceUrl, line: loc.line, column: loc.column },
           })
           .catch(() => {})
       )
     );
+  }
+
+  /**
+   * Snap a JS source line to a real breakpoint position. Firefox only fires a
+   * breakpoint set at a valid (line, column) entry point; an arbitrary column
+   * binds to nothing and never hits. Pick the nearest line with positions
+   * (preferring forward, so the fired line stays within the component's
+   * pre-snap breakpoint-match tolerance) and its first column.
+   */
+  async #snapJsLocation(
+    sourceUrl: string,
+    line: number
+  ): Promise<{ line: number; column?: number }> {
+    const actor = this.#jsActorByUrl.get(sourceUrl);
+    if (!actor) return { line };
+    let positions: Record<string, number[]>;
+    try {
+      const resp = await this.#client.request(actor, {
+        type: "getBreakpointPositionsCompressed",
+        query: { start: { line: 0 }, end: { line: 1e7 } },
+      });
+      positions = (resp.positions ?? {}) as Record<string, number[]>;
+    } catch {
+      return { line };
+    }
+    const lines = Object.keys(positions)
+      .map(Number)
+      .sort((a, b) => a - b);
+    if (!lines.length) return { line };
+    const snLine = lines.find((l) => l >= line) ?? lines[lines.length - 1];
+    const cols = (positions[String(snLine)] ?? []).slice().sort((a, b) => a - b);
+    return { line: snLine, column: cols[0] };
   }
 
   async jsSources(): Promise<SourceForm[]> {
@@ -393,9 +428,11 @@ export class RdpWasmSession extends EventEmitter {
       const { sources } = (await this.#client.request(info.threadActor, {
         type: "sources",
       })) as { sources?: unknown[] };
-      return ((sources ?? []) as SourceForm[]).filter(
+      const js = ((sources ?? []) as SourceForm[]).filter(
         (s) => s.url && s.introductionType !== "wasm"
       );
+      for (const s of js) this.#jsActorByUrl.set(s.url, s.actor);
+      return js;
     } catch {
       return [];
     }
@@ -510,11 +547,16 @@ export class RdpWasmSession extends EventEmitter {
   /**
    * Single-step a specific thread (all-stop: all other threads stay paused).
    * If they are already paused (from a prior all-stop), just step this one.
+   *
+   * `limit` selects the RDP resume granularity: "step" advances one wasm
+   * instruction (correct for wasm frames); "next" advances one JS source line
+   * (correct for JIT-compiled JS frames, where "step" would jump an arbitrary
+   * distance into a callee).
    */
-  async stepOne(tid: number): Promise<void> {
+  async stepOne(tid: number, limit: "step" | "next" = "step"): Promise<void> {
     const info = this.#info(tid);
     await this.#client
-      .request(info.threadActor, { type: "resume", resumeLimit: { type: "step" } })
+      .request(info.threadActor, { type: "resume", resumeLimit: { type: limit } })
       .catch(() => {});
   }
 

@@ -176,62 +176,70 @@ async function main(): Promise<void> {
       ? await connectWithRetry(args.rdpPort, resolvedActor)
       : await RdpWasmSession.start(args.rdpPort, "127.0.0.1", resolvedActor);
 
-    if (url) {
-      await session.navigate(url);
-      logger.debug(`[rdp] navigated to ${url}`);
-      await waitForWasm(session);
-    } else if (!session.hasThreads()) {
-      await sleep(500);
-    } else {
-      // For the attach case, ensure all threads are paused so that
-      // resumeAll() in Debuggee.continue works from a stopped state.
-      const tids = session.listTids();
-      const isRunning = await session
-        .frames(tids[0])
-        .then(() => false)
-        .catch(() => true);
-      if (isRunning) {
-        await new Promise<void>((resolve, reject) => {
-          const timer = setTimeout(() => {
-            session.off("stopped", onStopped);
-            reject(new Error("timed out pausing threads for attach"));
-          }, 5000);
-          const onStopped = () => {
-            clearTimeout(timer);
-            resolve();
-          };
-          session.once("stopped", onStopped);
-          session.armAllStop();
-          session.interrupt(tids[0]).catch((e) => {
-            clearTimeout(timer);
-            session.off("stopped", onStopped);
-            reject(e);
+    // Close the session on any failure past this point; otherwise a launch that
+    // throws (e.g. waitForWasm times out) leaks the RDP watcher connection, and
+    // a retried qLaunchGDBServer accumulates dead sessions against Firefox.
+    try {
+      if (url) {
+        await session.navigate(url);
+        logger.debug(`[rdp] navigated to ${url}`);
+        await waitForWasm(session);
+      } else if (!session.hasThreads()) {
+        await sleep(500);
+      } else {
+        // For the attach case, ensure all threads are paused so that
+        // resumeAll() in Debuggee.continue works from a stopped state.
+        const tids = session.listTids();
+        const isRunning = await session
+          .frames(tids[0])
+          .then(() => false)
+          .catch(() => true);
+        if (isRunning) {
+          await new Promise<void>((resolve, reject) => {
+            const timer = setTimeout(() => {
+              session.off("stopped", onStopped);
+              reject(new Error("timed out pausing threads for attach"));
+            }, 5000);
+            const onStopped = () => {
+              clearTimeout(timer);
+              resolve();
+            };
+            session.once("stopped", onStopped);
+            session.armAllStop();
+            session.interrupt(tids[0]).catch((e) => {
+              clearTimeout(timer);
+              session.off("stopped", onStopped);
+              reject(e);
+            });
           });
-        });
-      }
-    }
-
-    const fire = args.fire;
-    const onFirstContinue = fire
-      ? () => {
-          const wrapped = `(function poll(){try{${fire}}catch(e){setTimeout(poll,20);}})()`;
-          session.evaluate(wrapped).catch(() => {});
         }
-      : undefined;
+      }
 
-    const debuggee = new RdpDebuggee(session, onFirstContinue ? { onFirstContinue } : undefined);
-    const { ready, stop } = startGdbServer({
-      dispatch: (req: unknown) => debuggee.dispatch(req as never),
-      port,
-      onInfo: (m: string) => logger.debug(`[component] ${m}`),
-    });
-    await ready;
-    return {
-      stop: () => {
-        stop();
-        session.close();
-      },
-    };
+      const fire = args.fire;
+      const onFirstContinue = fire
+        ? () => {
+            const wrapped = `(function poll(){try{${fire}}catch(e){setTimeout(poll,20);}})()`;
+            session.evaluate(wrapped).catch(() => {});
+          }
+        : undefined;
+
+      const debuggee = new RdpDebuggee(session, onFirstContinue ? { onFirstContinue } : undefined);
+      const { ready, stop } = startGdbServer({
+        dispatch: (req: unknown) => debuggee.dispatch(req as never),
+        port,
+        onInfo: (m: string) => logger.debug(`[component] ${m}`),
+      });
+      await ready;
+      return {
+        stop: () => {
+          stop();
+          session.close();
+        },
+      };
+    } catch (err) {
+      session.close();
+      throw err;
+    }
   };
 
   const spawner = new GdbServerSpawner(launcher);
