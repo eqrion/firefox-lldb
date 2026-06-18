@@ -159,12 +159,12 @@ export class RdpDebuggee {
         // synthetic modules can't distinguish JS functions anyway).
         const innermost = this.#framesByTid.get(tid)?.[0];
         const limit = innermost?.type === "call" ? "next" : "step";
-        this.#session.stepOne(tid, limit).catch(() => {});
+        this.#session.stepOne(tid, limit);
         return this.#eventFutureRef();
       }
       case "Debuggee.interrupt": {
         this.#armStopped();
-        this.#session.interrupt(this.#session.stoppedTid).catch(() => {});
+        this.#session.interrupt(this.#session.stoppedTid);
         return null;
       }
       case "EventFuture.finish": {
@@ -329,30 +329,36 @@ export class RdpDebuggee {
   async #snapshotAll(): Promise<void> {
     this.#frameInfoById.clear();
     this.#envCacheByActor.clear();
-    const tids = this.#session.listTids();
-    for (const tid of tids) {
+    const stoppedTid = this.#session.stoppedTid;
+    for (const tid of this.#session.listTids()) {
       let frames: FrameForm[] = [];
-      try {
-        const rawFrames = (await this.#session.frames(tid)).filter(
-          (f) => (f.type === "wasmcall" || f.type === "call") && f.where
-        );
-        for (const f of rawFrames) {
-          if (f.type === "call") {
-            const actor = f.where!.actor;
-            if (!this.#sourceActorToUrl.has(actor)) {
-              await this.#refreshJsSources();
+      // Only fetch frames for the stopped thread. Other threads may be running
+      // or in mid-resume transition in Firefox, and calling frames() on them
+      // causes a "resumed" event response (in EVENT_TYPES) that never resolves
+      // the pending request, leading to 5-second timeouts per thread. Workers
+      // that were interrupted are typically in Atomics.wait (no wasm frames),
+      // so skipping them is equivalent.
+      if (tid === stoppedTid) {
+        try {
+          const rawFrames = (await this.#session.frames(tid)).filter(
+            (f) => (f.type === "wasmcall" || f.type === "call") && f.where
+          );
+          for (const f of rawFrames) {
+            if (f.type === "call") {
+              const actor = f.where!.actor;
+              if (!this.#sourceActorToUrl.has(actor)) {
+                await this.#refreshJsSources();
+              }
+              const url = this.#sourceActorToUrl.get(actor) ?? actor;
+              await this.#ensureSynthetic(url, actor);
             }
-            const url = this.#sourceActorToUrl.get(actor) ?? actor;
-            await this.#ensureSynthetic(url, actor);
           }
+          frames = rawFrames;
+        } catch {
+          frames = [];
         }
-        frames = rawFrames;
-      } catch {
-        frames = [];
       }
       this.#framesByTid.set(tid, frames);
-      // Use the innermost wasm frame for memory/global access, not frames[0],
-      // since frames[0] might be a JS call frame with no wasm scope.
       this.#topFrameActorByTid.set(tid, frames.find((f) => f.type === "wasmcall")?.actor ?? null);
     }
   }

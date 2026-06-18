@@ -535,13 +535,11 @@ export class RdpWasmSession extends EventEmitter {
   async resumeAll(): Promise<void> {
     const toResume = [...this.#pausedTids];
     this.#interruptedTids.clear();
-    await Promise.all(
-      toResume.map((tid) => {
-        const info = this.#threads.get(tid);
-        if (!info) return;
-        return this.#client.request(info.threadActor, { type: "resume" }).catch(() => {});
-      })
-    );
+    for (const tid of toResume) {
+      const info = this.#threads.get(tid);
+      if (!info) continue;
+      this.#client.send(info.threadActor, { type: "resume" });
+    }
   }
 
   /**
@@ -553,11 +551,9 @@ export class RdpWasmSession extends EventEmitter {
    * (correct for JIT-compiled JS frames, where "step" would jump an arbitrary
    * distance into a callee).
    */
-  async stepOne(tid: number, limit: "step" | "next" = "step"): Promise<void> {
+  stepOne(tid: number, limit: "step" | "next" = "step"): void {
     const info = this.#info(tid);
-    await this.#client
-      .request(info.threadActor, { type: "resume", resumeLimit: { type: limit } })
-      .catch(() => {});
+    this.#client.send(info.threadActor, { type: "resume", resumeLimit: { type: limit } });
   }
 
   /**
@@ -621,10 +617,7 @@ export class RdpWasmSession extends EventEmitter {
             resolve();
           });
         });
-        await Promise.race([
-          this.#client.request(info.threadActor, { type: "interrupt", when: {} }),
-          new Promise<void>((resolve) => setTimeout(resolve, 3000)),
-        ]).catch(() => {});
+        this.#client.send(info.threadActor, { type: "interrupt", when: {} });
         await paused;
         if (this.#pausedTids.has(tid)) this.#interruptedTids.add(tid);
       })
@@ -633,8 +626,8 @@ export class RdpWasmSession extends EventEmitter {
     this.emit("stopped", { tid: stoppedTid, pausePacket: packet } as StoppedEvent);
   }
 
-  interrupt(tid: number): Promise<RdpPacket> {
-    return this.#client.request(this.#info(tid).threadActor, { type: "interrupt", when: {} });
+  interrupt(tid: number): void {
+    this.#client.send(this.#info(tid).threadActor, { type: "interrupt", when: {} });
   }
 
   // --- console ---

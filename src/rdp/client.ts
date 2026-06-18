@@ -10,6 +10,11 @@
 // packets whose `type` is a known unsolicited notification (e.g. the watcher's
 // "target-available-form", the thread's "paused"). Callers register event types
 // they care about; everything else from an actor is treated as a reply.
+//
+// Important: resume and interrupt are sent as fire-and-forget (send(), not
+// request()) because Firefox responds to them with "resumed"/"paused" events
+// (in EVENT_TYPES), not with a pending-queue reply. Using request() for these
+// would leave stale entries in the pending queue that corrupt subsequent replies.
 
 import { RdpTransport, type RdpPacket } from "./transport.js";
 import { EventEmitter } from "node:events";
@@ -90,6 +95,15 @@ export class RdpClient extends EventEmitter {
       queue.push({ resolve, reject });
       this.#transport.send({ to, ...packet });
     });
+  }
+
+  /**
+   * Fire-and-forget send: transmit a packet without adding a pending-queue
+   * entry. Use for packets whose response is an event (resume → "resumed",
+   * interrupt → "paused") so we don't pollute the FIFO reply queue.
+   */
+  send(to: string, packet: Record<string, unknown>): void {
+    this.#transport.send({ to, ...packet });
   }
 
   registerEventType(type: string): void {
