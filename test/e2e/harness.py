@@ -7,7 +7,6 @@ Individual test modules import with ``from harness import *``.
 
 import json
 import os
-import re
 import shutil
 import signal
 import socket
@@ -178,63 +177,6 @@ def free_port():
     return port
 
 
-def send_rsp(sock, packet):
-    """Send one RSP packet (ack mode) and return the response payload."""
-    data = packet.encode("latin-1")
-    checksum = sum(data) % 256
-    framed = b"$" + data + b"#" + ("%02x" % checksum).encode()
-    sock.sendall(framed)
-    buf = b""
-    while True:
-        chunk = sock.recv(4096)
-        if not chunk:
-            raise ConnectionError("socket closed waiting for RSP response")
-        buf += chunk
-        # Skip ack/nak bytes at the front.
-        i = 0
-        while i < len(buf) and buf[i : i + 1] in (b"+", b"-"):
-            i += 1
-        rest = buf[i:]
-        s = rest.find(b"$")
-        if s < 0:
-            continue
-        e = rest.find(b"#", s + 1)
-        if e >= 0 and len(rest) >= e + 3:
-            sock.sendall(b"+")
-            return rest[s + 1 : e].decode("latin-1")
-
-
-def launch_gdb_server(platform_port, attempts=4, backoff=1.0):
-    """Connect to the platform RSP server, send qLaunchGDBServer, return the spawned port.
-
-    Retries on a transient E01: under suite-wide load a single launch can lose
-    the Firefox cold-start / wasm-observe race in the launcher even though the
-    platform server itself is healthy. Each attempt uses a fresh connection.
-    """
-    last = None
-    for attempt in range(attempts):
-        s = socket.socket()
-        s.connect(("127.0.0.1", platform_port))
-        # Generous per-attempt timeout: a cold launch chains connectWithRetry
-        # (up to ~20s), navigate, and waitForWasm (~8s) before replying.
-        s.settimeout(60)
-        try:
-            resp = send_rsp(s, "qLaunchGDBServer:port:0;host:localhost;")
-            m = re.search(r"port:(\d+)", resp)
-            if m:
-                return int(m.group(1))
-            last = f"returned {resp!r}"
-        except OSError as e:
-            # socket timeout / connection reset: the launch lost the cold-start
-            # race. Retry with a fresh connection.
-            last = repr(e)
-        finally:
-            s.close()
-        if attempt + 1 < attempts:
-            time.sleep(backoff)
-    raise RuntimeError(f"qLaunchGDBServer failed: {last} after {attempts} attempts")
-
-
 def start_static_server(page_dir):
     """HTTP server with COOP/COEP headers for a page directory. Returns (server, port)."""
 
@@ -358,53 +300,45 @@ class TestBase(unittest.TestCase):
         )
         return platform_port
 
-    def _connect(self, port):
-        target = self.dbg.CreateTarget("")
-        error = lldb.SBError()
-        process = target.ConnectRemote(
-            self.dbg.GetListener(),
-            "connect://127.0.0.1:%d" % port,
-            "wasm",
-            error,
-        )
-        self.assertTrue(error.Success(), "connect: %s" % error.GetCString())
-        return target, process
-
-    def _connect_via_platform(self, platform_port):
-        """Trigger qLaunchGDBServer on the platform then connect to the spawned gdb server."""
-        gdb_port = launch_gdb_server(platform_port)
-        return self._connect(gdb_port)
-
     def _attach_via_platform(self, platform_port, pid=1):
-        """Attach through the platform's `process attach` path (vAttach + wasm plugin).
+        """Attach to a wasm tab via the platform's native `process attach` path.
 
-        Exercises a different code path than _connect_via_platform: LLDB drives
-        the session through ProcessGDBRemote with the wasm plugin and the
-        component's vAttach support, rather than `process connect`.
+        The server fronts each spawned stub with an RSP shim that emulates an
+        unattached gdb server until vAttach, so LLDB drives the standard attach
+        handshake (qLaunchGDBServer -> connect -> vAttach) and the wasm plugin
+        relocates the module correctly. See src/protocol/attach-shim.ts.
         """
-        target = self.dbg.CreateTarget("")
         ci = self.dbg.GetCommandInterpreter()
 
-        def run(cmd):
+        def run(cmd, check=True):
             res = lldb.SBCommandReturnObject()
             ci.HandleCommand(cmd, res)
-            self.assertTrue(res.Succeeded(), "%s: %s" % (cmd, res.GetError()))
+            if check:
+                self.assertTrue(res.Succeeded(), "%s: %s" % (cmd, res.GetError()))
             return res
 
         run("platform select remote-gdb-server")
         run("platform connect connect://127.0.0.1:%d" % platform_port)
-        # `process attach --pid N` triggers qLaunchGDBServer;pid:N. The platform
-        # resolves the tab (or, for an as-yet-unlisted tab, falls back to the
-        # configured launch URL) and spawns the stub, which we drive with the
-        # wasm plugin. No prior `platform process list` is required.
-        run("process attach --plugin wasm --pid %d" % pid)
-        process = target.GetProcess()
-        self.assertTrue(process.IsValid(), "attached process is valid")
-        return target, process
+        # `process attach --pid N` triggers qLaunchGDBServer; the platform
+        # resolves the tab (or falls back to the configured launch URL) and
+        # spawns the stub. Under parallel suite load a cold launch can exceed
+        # LLDB's qLaunchGDBServer timeout, so retry a few times with a fresh
+        # target each attempt.
+        last_err = ""
+        for attempt in range(4):
+            target = self.dbg.CreateTarget("")
+            res = run("process attach --plugin wasm --pid %d" % pid, check=False)
+            process = target.GetProcess()
+            if res.Succeeded() and process.IsValid():
+                return target, process
+            last_err = res.GetError() or "attached process is not valid"
+            self.dbg.DeleteTarget(target)
+            time.sleep(1.0)
+        self.fail("process attach failed after retries: %s" % last_err)
 
     def _stopped_at_breakpoint(self, fx):
         platform_port = self._start_platform(fx)
-        target, process = self._connect_via_platform(platform_port)
+        target, process = self._attach_via_platform(platform_port)
         bp = target.BreakpointCreateByName(fx["break_func"])
         self.assertTrue(
             bp.IsValid() and bp.GetNumLocations() >= 1,

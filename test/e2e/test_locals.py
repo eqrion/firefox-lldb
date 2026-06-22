@@ -53,7 +53,7 @@ class TestLocals(TestBase):
         """apply_transaction(txn): txn->amount == 30 (struct through pointer)."""
         fx = next(f for f in FIXTURES if f["name"] == "ledger")
         platform_port = self._start_platform(fx)
-        target, process = self._connect_via_platform(platform_port)
+        target, process = self._attach_via_platform(platform_port)
         target.BreakpointCreateByName("apply_transaction")
         process.Continue()
         f0 = process.GetThreadAtIndex(0).GetFrameAtIndex(0)
@@ -68,7 +68,7 @@ class TestLocals(TestBase):
         """g_accounts[] is accessible as a static global via target symbols."""
         fx = next(f for f in FIXTURES if f["name"] == "ledger")
         platform_port = self._start_platform(fx)
-        target, process = self._connect_via_platform(platform_port)
+        target, process = self._attach_via_platform(platform_port)
         target.BreakpointCreateByName("apply_transaction")
         process.Continue()
         self.assertEqual(process.GetState(), lldb.eStateStopped)

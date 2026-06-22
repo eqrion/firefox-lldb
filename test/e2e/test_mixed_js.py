@@ -59,7 +59,7 @@ class TestAppJsSourceDiscovery(TestBase):
 
     def _sources_at_breakpoint(self):
         platform_port = self._start_platform(MIXED_FX)
-        target, process = self._connect_via_platform(platform_port)
+        target, process = self._attach_via_platform(platform_port)
         target.BreakpointCreateByName("compute_factorial")
         process.Continue()
         self.assertEqual(process.GetState(), lldb.eStateStopped)
@@ -96,7 +96,7 @@ class TestAppJsBreakpoints(TestBase):
         """Stop at compute_factorial, set a JS breakpoint, enable a second runApp() call."""
         fx = {**MIXED_FX, "fire": "runApp(); setTimeout(runApp, 600)"}
         platform_port = self._start_platform(fx)
-        target, process = self._connect_via_platform(platform_port)
+        target, process = self._attach_via_platform(platform_port)
 
         wasm_bp = target.BreakpointCreateByName("compute_factorial")
         process.Continue()
@@ -113,7 +113,7 @@ class TestAppJsBreakpoints(TestBase):
     def test_app_js_breakpoint_resolves(self):
         """Breakpoint on app.js:%d resolves to at least one location.""" % APP_JS_BREAKLINE
         platform_port = self._start_platform(MIXED_FX)
-        target, process = self._connect_via_platform(platform_port)
+        target, process = self._attach_via_platform(platform_port)
         wasm_bp = target.BreakpointCreateByName("compute_factorial")
         process.Continue()
         self.assertEqual(process.GetState(), lldb.eStateStopped)
@@ -159,7 +159,7 @@ class TestJsVariableInspection(TestBase):
         """Return (process, frame0) stopped at app.js:APP_JS_BREAKLINE."""
         fx = {**MIXED_FX, "fire": "runApp(); setTimeout(runApp, 600)"}
         platform_port = self._start_platform(fx)
-        target, process = self._connect_via_platform(platform_port)
+        target, process = self._attach_via_platform(platform_port)
 
         wasm_bp = target.BreakpointCreateByName("compute_factorial")
         process.Continue()
@@ -216,7 +216,7 @@ class TestStepIntoWasmFromJs(TestBase):
         """
         fx = {**MIXED_FX, "fire": "runApp(); setTimeout(runApp, 600)"}
         platform_port = self._start_platform(fx)
-        target, process = self._connect_via_platform(platform_port)
+        target, process = self._attach_via_platform(platform_port)
 
         wasm_bp = target.BreakpointCreateByName("compute_factorial")
         process.Continue()
@@ -263,7 +263,7 @@ class TestSimultaneousBreakpoints(TestBase):
         """Set a wasm bp; on first stop, arm a JS bp; continue; JS bp fires."""
         fx = {**MIXED_FX, "fire": "runApp(); setTimeout(runApp, 600)"}
         platform_port = self._start_platform(fx)
-        target, process = self._connect_via_platform(platform_port)
+        target, process = self._attach_via_platform(platform_port)
 
         wasm_bp = target.BreakpointCreateByName("compute_factorial")
         self.assertTrue(wasm_bp.IsValid() and wasm_bp.GetNumLocations() >= 1)
@@ -294,7 +294,7 @@ class TestSimultaneousBreakpoints(TestBase):
         """Removing the wasm breakpoint doesn't break the JS breakpoint."""
         fx = {**MIXED_FX, "fire": "runApp(); setTimeout(runApp, 600)"}
         platform_port = self._start_platform(fx)
-        target, process = self._connect_via_platform(platform_port)
+        target, process = self._attach_via_platform(platform_port)
 
         wasm_bp = target.BreakpointCreateByName("compute_factorial")
         process.Continue()
@@ -317,7 +317,7 @@ class TestMultipleJsFiles(TestBase):
     def test_both_js_files_in_call_stack(self):
         """Call stack when stopped in wasm should show both app.js and math.js."""
         platform_port = self._start_platform(MIXED_FX)
-        target, process = self._connect_via_platform(platform_port)
+        target, process = self._attach_via_platform(platform_port)
         target.BreakpointCreateByName("compute_factorial")
         process.Continue()
         self.assertEqual(process.GetState(), lldb.eStateStopped)
@@ -335,7 +335,7 @@ class TestMultipleJsFiles(TestBase):
     def test_breakpoint_in_emscripten_glue_still_works(self):
         """After loading app.js, breakpoints in math.js still function."""
         platform_port = self._start_platform(MIXED_FX)
-        target, process = self._connect_via_platform(platform_port)
+        target, process = self._attach_via_platform(platform_port)
 
         wasm_bp = target.BreakpointCreateByName("compute_factorial")
         process.Continue()
@@ -354,7 +354,7 @@ class TestJsStepOverStress(TestBase):
         """Return (target, process, thread) stopped at app.js:line on second runApp()."""
         fx = {**MIXED_FX, "fire": "runApp(); setTimeout(runApp, 600)"}
         platform_port = self._start_platform(fx)
-        target, process = self._connect_via_platform(platform_port)
+        target, process = self._attach_via_platform(platform_port)
 
         wasm_bp = target.BreakpointCreateByName("compute_factorial")
         process.Continue()
@@ -457,7 +457,7 @@ class TestOuterFrameLineNumbers(TestBase):
     def test_outer_js_frames_have_distinct_lines(self):
         """JS frames from the same file should report different line numbers."""
         platform_port = self._start_platform(MIXED_FX)
-        target, process = self._connect_via_platform(platform_port)
+        target, process = self._attach_via_platform(platform_port)
         target.BreakpointCreateByName("compute_factorial")
         process.Continue()
         self.assertEqual(process.GetState(), lldb.eStateStopped)
@@ -489,7 +489,7 @@ class TestOuterFrameLineNumbers(TestBase):
     def test_outer_js_frames_have_meaningful_function_names(self):
         """Outer JS frames should report actual function names, not just the filename."""
         platform_port = self._start_platform(MIXED_FX)
-        target, process = self._connect_via_platform(platform_port)
+        target, process = self._attach_via_platform(platform_port)
         target.BreakpointCreateByName("compute_factorial")
         process.Continue()
         self.assertEqual(process.GetState(), lldb.eStateStopped)
@@ -514,7 +514,7 @@ class TestLoopBreakpoint(TestBase):
         """A breakpoint in a loop body should fire on each iteration that calls it."""
         fx = {**MIXED_FX, "fire": "runApp(); setTimeout(runApp, 600)"}
         platform_port = self._start_platform(fx)
-        target, process = self._connect_via_platform(platform_port)
+        target, process = self._attach_via_platform(platform_port)
 
         # Stop at wasm first so app.js is loaded.
         wasm_bp = target.BreakpointCreateByName("compute_factorial")

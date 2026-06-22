@@ -19,7 +19,7 @@ class TestThreaded(TestBase):
     def _start(self, timeout=120):
         """Start the threaded fixture, stop at matmul_threaded on the main thread."""
         platform_port = self._start_platform(_THREADED, timeout=timeout)
-        target, process = self._connect_via_platform(platform_port)
+        target, process = self._attach_via_platform(platform_port)
         bp = target.BreakpointCreateByName("matmul_threaded")
         self.assertTrue(
             bp.IsValid() and bp.GetNumLocations() >= 1,

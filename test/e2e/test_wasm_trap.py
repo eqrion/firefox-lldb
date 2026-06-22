@@ -19,7 +19,7 @@ class TestWasmTrap(TestBase):
         """
         fx = next(f for f in FIXTURES if f["name"] == "trap")
         platform_port = self._start_platform(fx)
-        target, process = self._connect_via_platform(platform_port)
+        target, process = self._attach_via_platform(platform_port)
         target.BreakpointCreateByName("cause_trap")
         process.Continue()
         self.assertEqual(process.GetState(), lldb.eStateStopped,

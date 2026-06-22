@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Attach-path tests: `process attach --plugin wasm` via the platform server.
+"""Attach-path test: `process attach --plugin wasm` via the platform server.
 
-The rest of the suite connects with `process connect --plugin wasm`. These
-cover the documented attach flow (vAttach), which goes through a different LLDB
-process plugin path and was previously untested.
+The whole suite now attaches via this flow (an RSP shim fronts each spawned
+stub so LLDB drives the native qLaunchGDBServer -> connect -> vAttach
+handshake; see src/protocol/attach-shim.ts). This is the explicit end-to-end
+attach check.
 """
 
 import sys
@@ -14,13 +15,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from harness import *
 
 
-@unittest.skip(
-    "process attach is not yet usable: LLDB's wasm plugin loads the module at a "
-    "flat base on attach instead of relocating to the qXfer:libraries section "
-    "address, so breakpoints resolve to bogus addresses (0x07 vs 0x4000...) and "
-    "are never inserted, hanging `continue`. vAttach itself works; this is an "
-    "LLDB-side relocation bug. Use `process connect --plugin wasm` until fixed."
-)
 class TestAttach(TestBase):
     def test_attach_reaches_breakpoint(self):
         """`process attach --plugin wasm --pid N` stops at a wasm breakpoint."""

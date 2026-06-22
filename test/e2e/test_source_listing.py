@@ -39,7 +39,7 @@ class TestSourceListing(TestBase):
         """Source listing on a JS frame shows JavaScript source lines from the temp file."""
         fx = next(f for f in FIXTURES if f["name"] == "factorial")
         platform_port = self._start_platform(fx)
-        target, process = self._connect_via_platform(platform_port)
+        target, process = self._attach_via_platform(platform_port)
         target.BreakpointCreateByName("compute_factorial")
         process.Continue()
         self.assertEqual(process.GetState(), lldb.eStateStopped)
@@ -67,7 +67,7 @@ class TestSourceListing(TestBase):
         """The JS frame's line number falls within the source file's line count."""
         fx = next(f for f in FIXTURES if f["name"] == "factorial")
         platform_port = self._start_platform(fx)
-        target, process = self._connect_via_platform(platform_port)
+        target, process = self._attach_via_platform(platform_port)
         target.BreakpointCreateByName("compute_factorial")
         process.Continue()
         self.assertEqual(process.GetState(), lldb.eStateStopped)

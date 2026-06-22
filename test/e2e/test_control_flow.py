@@ -15,7 +15,7 @@ class TestControlFlow(TestBase):
         platform_port = self._start_platform(
             next(f for f in FIXTURES if f["name"] == "factorial")
         )
-        target, process = self._connect_via_platform(platform_port)
+        target, process = self._attach_via_platform(platform_port)
         bp = target.BreakpointCreateByLocation("math.cpp", 24)
         self.assertGreaterEqual(bp.GetNumLocations(), 1, "bp at math.cpp:24")
         process.Continue()
@@ -30,7 +30,7 @@ class TestControlFlow(TestBase):
         """Breakpoint set before first Continue (before the page's wasm call) is hit."""
         fx = next(f for f in FIXTURES if f["name"] == "factorial")
         platform_port = self._start_platform(fx)
-        target, process = self._connect_via_platform(platform_port)
+        target, process = self._attach_via_platform(platform_port)
         bp = target.BreakpointCreateByName("compute_factorial")
         self.assertTrue(bp.IsValid() and bp.GetNumLocations() >= 1)
         process.Continue()
@@ -42,7 +42,7 @@ class TestControlFlow(TestBase):
         """Two breakpoints; continue hits them in execution order."""
         fx = next(f for f in FIXTURES if f["name"] == "factorial")
         platform_port = self._start_platform(fx)
-        target, process = self._connect_via_platform(platform_port)
+        target, process = self._attach_via_platform(platform_port)
         target.BreakpointCreateByName("compute_factorial")
         target.BreakpointCreateByName("factorial")
         process.Continue()
@@ -57,7 +57,7 @@ class TestControlFlow(TestBase):
         """StepInstruction advances the wasm PC without leaving the function."""
         fx = next(f for f in FIXTURES if f["name"] == "factorial")
         platform_port = self._start_platform(fx)
-        target, process = self._connect_via_platform(platform_port)
+        target, process = self._attach_via_platform(platform_port)
         target.BreakpointCreateByName("compute_factorial")
         process.Continue()
         t = process.GetSelectedThread()
@@ -76,7 +76,7 @@ class TestControlFlow(TestBase):
         """StepInstruction into callee; StepOut returns to caller."""
         fx = next(f for f in FIXTURES if f["name"] == "factorial")
         platform_port = self._start_platform(fx)
-        target, process = self._connect_via_platform(platform_port)
+        target, process = self._attach_via_platform(platform_port)
         target.BreakpointCreateByName("compute_factorial")
         target.BreakpointCreateByName("factorial")
         process.Continue()
@@ -101,7 +101,7 @@ class TestControlFlow(TestBase):
         """StepOver advances the PC without increasing call stack depth."""
         fx = next(f for f in FIXTURES if f["name"] == "factorial")
         platform_port = self._start_platform(fx)
-        target, process = self._connect_via_platform(platform_port)
+        target, process = self._attach_via_platform(platform_port)
         target.BreakpointCreateByName("compute_factorial")
         target.BreakpointCreateByName("factorial")
         process.Continue()
@@ -120,7 +120,7 @@ class TestControlFlow(TestBase):
         """Virtual call through a base pointer resolves to the concrete override."""
         fx = next(f for f in FIXTURES if f["name"] == "oop")
         platform_port = self._start_platform(fx)
-        target, process = self._connect_via_platform(platform_port)
+        target, process = self._attach_via_platform(platform_port)
         target.BreakpointCreateByName("area")
         process.Continue()
         thread = process.GetThreadAtIndex(0)
@@ -133,7 +133,7 @@ class TestControlFlow(TestBase):
         """At a virtual method breakpoint, 'this' pointer is non-null."""
         fx = next(f for f in FIXTURES if f["name"] == "oop")
         platform_port = self._start_platform(fx)
-        target, process = self._connect_via_platform(platform_port)
+        target, process = self._attach_via_platform(platform_port)
         target.BreakpointCreateByName("area")
         process.Continue()
         frame0 = process.GetThreadAtIndex(0).GetFrameAtIndex(0)
@@ -146,7 +146,7 @@ class TestControlFlow(TestBase):
         """Five sequential StepInstructions each advance the PC."""
         fx = next(f for f in FIXTURES if f["name"] == "factorial")
         platform_port = self._start_platform(fx)
-        target, process = self._connect_via_platform(platform_port)
+        target, process = self._attach_via_platform(platform_port)
         target.BreakpointCreateByName("factorial")
         process.Continue()
         self.assertEqual(process.GetState(), lldb.eStateStopped)
@@ -167,7 +167,7 @@ class TestControlFlow(TestBase):
         """A breakpoint in a recursive function fires on each recursion level."""
         fx = next(f for f in FIXTURES if f["name"] == "factorial")
         platform_port = self._start_platform(fx)
-        target, process = self._connect_via_platform(platform_port)
+        target, process = self._attach_via_platform(platform_port)
         target.BreakpointCreateByName("factorial")
 
         n_values = []
@@ -186,7 +186,7 @@ class TestControlFlow(TestBase):
         """StepOut from a recursive frame returns to the immediate caller frame."""
         fx = next(f for f in FIXTURES if f["name"] == "factorial")
         platform_port = self._start_platform(fx)
-        target, process = self._connect_via_platform(platform_port)
+        target, process = self._attach_via_platform(platform_port)
         target.BreakpointCreateByName("factorial")
 
         process.Continue()
@@ -217,7 +217,7 @@ class TestControlFlow(TestBase):
         """After instruction steps, Continue correctly hits the next breakpoint."""
         fx = next(f for f in FIXTURES if f["name"] == "factorial")
         platform_port = self._start_platform(fx)
-        target, process = self._connect_via_platform(platform_port)
+        target, process = self._attach_via_platform(platform_port)
         target.BreakpointCreateByName("compute_factorial")
         target.BreakpointCreateByName("factorial")
         process.Continue()
@@ -243,7 +243,7 @@ class TestControlFlow(TestBase):
         """Stepping out of the outermost wasm frame eventually reaches a JS caller."""
         fx = next(f for f in FIXTURES if f["name"] == "factorial")
         platform_port = self._start_platform(fx)
-        target, process = self._connect_via_platform(platform_port)
+        target, process = self._attach_via_platform(platform_port)
         target.BreakpointCreateByName("compute_factorial")
         process.Continue()
         self.assertEqual(process.GetState(), lldb.eStateStopped)

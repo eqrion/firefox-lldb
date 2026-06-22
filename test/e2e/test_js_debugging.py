@@ -19,7 +19,7 @@ class TestJsDebugging(TestBase):
         fx = next(f for f in FIXTURES if f["name"] == "factorial")
         fx = {**fx, "fire": "runFactorial(); setTimeout(runFactorial, 800)"}
         platform_port = self._start_platform(fx)
-        target, process = self._connect_via_platform(platform_port)
+        target, process = self._attach_via_platform(platform_port)
         wasm_bp = target.BreakpointCreateByName("compute_factorial")
         process.Continue()
         self.assertEqual(process.GetState(), lldb.eStateStopped,
