@@ -6,7 +6,8 @@
 
 import { parseArgs } from "node:util";
 import { RspServer } from "../protocol/rsp-server.js";
-import { GdbServerSpawner, type GdbServerLauncher } from "../platform/gdb-server-spawner.js";
+import { GdbServerSpawner, freePort, type GdbServerLauncher } from "../platform/gdb-server-spawner.js";
+import { startAttachShim } from "../protocol/attach-shim.js";
 import { PlatformServer } from "../platform/platform-server.js";
 import { RdpWasmSession, listFirefoxTabs, watchFirefoxTabs, type TabInfo } from "../rdp/session.js";
 import { setRdpTrace } from "../rdp/transport.js";
@@ -152,11 +153,10 @@ async function main(): Promise<void> {
       rdpPort: args.rdpPort,
       binary: args.firefox,
       headless: args.headless,
-      // NOTE: deliberately not passing url here. Launching Firefox at the page
-      // (issue #4) makes the connect launcher's navigate() a reload of an
-      // already-loaded tab, which hangs the session. Re-introduce only alongside
-      // skipping that redundant navigate, once `process attach` actually works
-      // (blocked on the LLDB wasm-plugin relocation bug).
+      // NOTE: deliberately not passing url here. Firefox starts on about:blank;
+      // the tab is navigated to the page lazily on the first qLaunchGDBServer
+      // (see the launcher below). Launching Firefox directly at the page would
+      // make that navigate a redundant reload of an already-loaded tab.
     });
     logger.info("launched Firefox");
   }
@@ -185,10 +185,12 @@ async function main(): Promise<void> {
     // throws (e.g. waitForWasm times out) leaks the RDP watcher connection, and
     // a retried qLaunchGDBServer accumulates dead sessions against Firefox.
     try {
-      // Connect supplies an explicit url and always navigates (unchanged). Attach
-      // (tabActor set, no url) navigates to the configured --url only if the tab
-      // has not yet loaded a wasm page, so `process attach` works against a
-      // freshly launched Firefox; an already-loaded tab keeps its content.
+      // Navigate the tab to the page if needed. An explicit url (the platform's
+      // launch-URL fallback, used when the attach can't resolve the tab by
+      // actor) always navigates; otherwise navigate to the configured --url
+      // only if the tab has not yet loaded a wasm page. An already-loaded tab
+      // keeps its content. This makes `process attach` work against a freshly
+      // launched Firefox.
       const navTo = url ?? ((await session.wasmSources()).length ? undefined : args.url);
       if (navTo) {
         await session.navigate(navTo);
@@ -230,15 +232,30 @@ async function main(): Promise<void> {
         : undefined;
 
       const debuggee = new RdpDebuggee(session, onFirstContinue ? { onFirstContinue } : undefined);
+
+      // The component presents an already-attached, stopped process on connect,
+      // which works for `process connect` but breaks LLDB's `process attach`
+      // (its ClearAllLoadedSections wipes the connect-time module relocation).
+      // So the component listens on a private port and an RSP shim fronts the
+      // public `port`, emulating an unattached server until `vAttach` (see
+      // attach-shim.ts). LLDB then drives the native attach handshake and
+      // `process attach --plugin wasm` works.
+      const componentPort = await freePort();
       const { ready, stop } = startGdbServer({
         dispatch: (req: unknown) => debuggee.dispatch(req as never),
-        port,
+        port: componentPort,
         onInfo: (m: string) => logger.debug(`[component] ${m}`),
         verbose,
       });
       await ready;
+      const shim = await startAttachShim({
+        listenPort: port,
+        componentPort,
+        trace: verbose ? (m) => logger.debug(`[shim] ${m}`) : undefined,
+      });
       return {
-        stop: () => {
+        stop: async () => {
+          await shim.close();
           stop();
           session.close();
         },

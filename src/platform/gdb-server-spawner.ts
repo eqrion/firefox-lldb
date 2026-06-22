@@ -63,7 +63,7 @@ export class GdbServerSpawner {
   }
 }
 
-function freePort(): Promise<number> {
+export function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const s = net.createServer();
     s.listen(0, () => {

@@ -9,7 +9,6 @@ import { parseArgs } from "node:util";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import net from "node:net";
 import path from "node:path";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -77,63 +76,6 @@ function resolveServerScript(): string {
   return existsSync(devScript) ? devScript : builtScript;
 }
 
-// Send qLaunchGDBServer to the platform RSP server and return the spawned
-// GDB stub port. For the --url flow we connect directly to this port with
-// `process connect --plugin wasm`: the launcher navigates Firefox and waits for
-// wasm to load before the stub is ready, so the session is live on connect.
-// (`process attach` is also supported now — the gdbstub-component implements
-// vAttach — but the attach path does not pre-navigate, so connect is preferred
-// when we know the URL.)
-function launchGdbStub(platformPort: number): Promise<number> {
-  const rspFrame = (s: string) => {
-    const cs = [...s].reduce((a, c) => (a + c.charCodeAt(0)) & 0xff, 0);
-    return `$${s}#${cs.toString(16).padStart(2, "0")}`;
-  };
-
-  return new Promise<number>((resolve, reject) => {
-    const sock = new net.Socket();
-    let buf = "";
-    let noAck = false;
-
-    const send = (payload: string) => sock.write(rspFrame(payload));
-
-    sock.connect(platformPort, "127.0.0.1", () => send("QStartNoAckMode"));
-    sock.setEncoding("latin1");
-    sock.setTimeout(30_000, () => {
-      sock.destroy();
-      reject(new Error("timeout waiting for GDB stub port"));
-    });
-
-    sock.on("data", (chunk: string) => {
-      buf += chunk;
-      for (;;) {
-        // Strip leading acks.
-        while (buf.startsWith("+") || buf.startsWith("-")) buf = buf.slice(1);
-        const s = buf.indexOf("$");
-        if (s < 0) break;
-        const e = buf.indexOf("#", s + 1);
-        if (e < 0 || buf.length < e + 3) break;
-        const payload = buf.slice(s + 1, e);
-        buf = buf.slice(e + 3);
-
-        if (!noAck) sock.write("+"); // ack before processing
-
-        if (payload === "OK" && !noAck) {
-          noAck = true;
-          send("qLaunchGDBServer:port:0;host:localhost;");
-        } else {
-          const m = payload.match(/port:(\d+)/);
-          sock.destroy();
-          if (m) resolve(parseInt(m[1], 10));
-          else reject(new Error(`qLaunchGDBServer: ${payload}`));
-        }
-      }
-    });
-
-    sock.on("error", reject);
-  });
-}
-
 async function main(): Promise<void> {
   const args = parseCliArgs(process.argv.slice(2));
 
@@ -182,18 +124,12 @@ async function main(): Promise<void> {
     "command alias attach process attach --plugin wasm",
   ];
 
-  // When a URL is known, pre-launch the GDB stub now (the launcher navigates
-  // Firefox, waits for wasm, then starts the stub) and connect with the wasm
-  // plugin — the session is live immediately, no user input needed.
+  // When a URL is known, attach to the launched tab now: `process attach` drives
+  // qLaunchGDBServer (the launcher navigates Firefox and waits for wasm) then
+  // vAttach, so the session is live with no user input needed.
   if (args.url) {
-    process.stderr.write("[info] waiting for wasm to load...\n");
-    try {
-      const stubPort = await launchGdbStub(port!);
-      lldbArgs.push("-o", `process connect --plugin wasm connect://localhost:${stubPort}`);
-    } catch (err) {
-      process.stderr.write(`[warn] could not pre-launch GDB stub: ${err}\n`);
-      // Fall through — user can `attach --pid N` manually (alias adds --plugin wasm).
-    }
+    process.stderr.write("[info] attaching (waiting for wasm to load)...\n");
+    lldbArgs.push("-o", "process attach --plugin wasm --pid 1");
   } else {
     lldbArgs.push("-o", "platform process list");
   }
