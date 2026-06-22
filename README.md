@@ -3,7 +3,7 @@
 Debug WebAssembly running inside Firefox with a stock upstream LLDB.
 
 ```
-(lldb) process connect --plugin wasm connect://127.0.0.1:8123
+(lldb) process attach --plugin wasm --pid 1
 * thread #1, stop reason = signal SIGTRAP
     frame #0: wasm-0`compute_factorial(n=...) at math.cpp:23
 ```

@@ -48,9 +48,11 @@ EMSDK=~/src/emsdk npm run build:fixtures
 # Terminal 1: start Firefox + platform server
 URL=http://localhost:8080/index.html npm run launch
 
-# Terminal 2: connect lldb
+# Terminal 2: attach lldb
 ../llvm-project/build/bin/lldb
-(lldb) process connect --plugin wasm connect://127.0.0.1:1234
+(lldb) platform select remote-gdb-server
+(lldb) platform connect connect://127.0.0.1:1234
+(lldb) process attach --plugin wasm --pid 1
 (lldb) breakpoint set -n compute_factorial
 (lldb) continue
 ```
