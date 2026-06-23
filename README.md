@@ -1,6 +1,12 @@
 # firefox-lldb
 
-Debug WebAssembly running inside Firefox with a stock upstream LLDB.
+Debug WebAssembly running inside Firefox with LLDB.
+
+The `firefox-lldb` command embeds LLDB compiled to WebAssembly (the
+`@firefox-devtools/lldb-wasm` package) and runs it in-process, so no separate
+lldb binary is required — it still behaves like a real interactive lldb. You can
+also point your own wasm-plugin lldb at the standalone platform server (see
+[Manual two-step](#manual-two-step)).
 
 ```
 (lldb) process attach --plugin wasm --pid 1
@@ -11,9 +17,10 @@ Debug WebAssembly running inside Firefox with a stock upstream LLDB.
 ## Requirements
 
 - Node.js 20+
-- A wasm-plugin lldb build (Apple's `/usr/bin/lldb` lacks the wasm process plugin —
-  build from `../llvm-project` with `LLDB_ENABLE_PYTHON=ON`)
 - Firefox 120+
+- For the manual two-step flow only: a wasm-plugin lldb build (Apple's
+  `/usr/bin/lldb` lacks the wasm process plugin — build from `../llvm-project`).
+  The bundled `firefox-lldb` command does not need this.
 
 ## Install
 
@@ -25,11 +32,12 @@ npm install
 
 ### One-command debug session
 
-`firefox-lldb` launches Firefox, starts the platform server, and drops you into
-an interactive lldb prompt. Once the page loads, the server prints a hint:
+`firefox-lldb` launches Firefox, starts the platform server in-process, and
+drops you into an interactive lldb prompt backed by the embedded wasm LLDB. Once
+the page loads, the server prints a hint:
 
 ```sh
-LLDB=/path/to/wasm-lldb node --import tsx src/cli/firefox-lldb.ts \
+node --import tsx src/cli/firefox-lldb.ts \
   --launch --url http://localhost:8080/index.html
 ```
 
@@ -91,7 +99,6 @@ npm run connect
 | `--launch`         | (default)         | Launch a fresh Firefox                |
 | `--connect`        | —                 | Connect to an already-running Firefox |
 | `--verbose` / `-v` | off               | Log debug output                      |
-| `--lldb`           | `$LLDB` or `lldb` | lldb binary (wrapper only)            |
 
 ## What works
 
@@ -117,6 +124,11 @@ npm run build:fixtures               # rebuild emscripten test fixtures (needs e
 npm run component                    # rebuild the vendored gdbstub-component (needs Rust + jco)
 ```
 
+The embedded LLDB is the `@firefox-devtools/lldb-wasm` package (LLDB compiled to
+WebAssembly), depended on via a `file:` path to `../llvm-project/lldb/tools/lldb-wasm`.
+To rebuild it after changing the LLVM fork, run `just build-wasm && npm run build`
+in that package's directory (needs emsdk), then `npm install` here.
+
 See [INTERNALS.md](INTERNALS.md) for architecture, protocol details, and
 implementation notes.
 
@@ -127,7 +139,7 @@ src/protocol/        RSP packet framing, hex, generic TCP server
 src/platform/        platform server (process list, qLaunchGDBServer)
 src/rdp/             RDP client + RdpWasmSession + headless Firefox launcher
 src/gdb/             RdpDebuggee, worker host + SAB RPC, generated/ (jco output)
-src/cli/             firefox-lldb-server (platform server), firefox-lldb (wrapper)
+src/cli/             firefox-lldb-server (platform server), firefox-lldb (embeds wasm LLDB)
 test/unit/           unit tests (protocol + platform server)
 test/e2e/run.py      fixture-driven lldb API test suite
 test/e2e/fixtures/   emscripten wasm fixtures (simple/oop/parser/ledger)

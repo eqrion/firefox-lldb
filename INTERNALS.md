@@ -22,6 +22,27 @@ lldb  ──RSP──►  platform server  ──qLaunchGDBServer──►  per-
                                           main thread: RdpDebuggee → RdpWasmSession ──RDP──► Firefox
 ```
 
+### Embedded wasm LLDB (`firefox-lldb`)
+
+The `firefox-lldb` command does not spawn a native lldb. It runs the platform
+server in-process and drives LLDB compiled to WebAssembly
+(`@firefox-devtools/lldb-wasm`) as a real interactive `(lldb)` prompt. Because
+the wasm LLDB cannot open TCP sockets, each RSP connection it would normally make
+(the platform connection and every per-tab GDB server) is bridged through an
+in-memory channel: LLDB connects to `inprocess://<channelId>` and `firefox-lldb`
+pumps bytes between that channel and a localhost socket to the in-process server.
+
+```
+wasm LLDB (Worker)  ──inprocess://N──►  channel N  ◄──pump──►  net.Socket  ──►  platform / per-tab server (same process)
+```
+
+This requires the wasm LLDB to select the `wasm` platform (`platform select
+wasm`), which routes `platform connect` through `PlatformWasmRemoteGDBServer`;
+its `MakeUrl` turns the per-tab port returned by `qLaunchGDBServer` into an
+`inprocess://` URL. See the package's own docs for the interpreter and transport
+internals. The standalone `firefox-lldb-server` + external-lldb path above is
+unchanged.
+
 ### Layer 1 — platform server (`src/platform/`)
 
 Models the browser as an LLDB platform: tabs are processes, and
