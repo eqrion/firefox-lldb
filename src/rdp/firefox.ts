@@ -91,6 +91,9 @@ export async function launchFirefox(opts: {
     exited,
     close: async () => {
       child.kill("SIGKILL");
+      // Wait for the process to actually die before returning, so a subsequent
+      // launch in the same process doesn't race a still-alive Firefox.
+      await exited;
       await rm(profileDir, { recursive: true, force: true }).catch(() => {});
     },
   };

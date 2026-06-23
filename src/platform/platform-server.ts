@@ -28,12 +28,20 @@ export interface PlatformServerDeps {
   spawner: GdbServerSpawner;
   defaultUrl?: string;
   listTabs?: () => Promise<TabInfo[]>;
+  /**
+   * Optional transform applied to the GDB-server port returned by
+   * qLaunchGDBServer. The embedded wasm LLDB cannot open TCP sockets, so in
+   * that mode this bridges the per-tab server's TCP port to an in-process
+   * channel and returns the channel ID for LLDB to connect to instead.
+   */
+  wrapConnectPort?: (port: number) => Promise<number>;
 }
 
 export class PlatformServer implements RspHandler {
   #spawner: GdbServerSpawner;
   #defaultUrl?: string;
   #listTabs?: () => Promise<TabInfo[]>;
+  #wrapConnectPort?: (port: number) => Promise<number>;
 
   // Stable mapping between synthetic integer PIDs and Firefox tab actors.
   #tabPidMap = new Map<number, string>();
@@ -50,6 +58,7 @@ export class PlatformServer implements RspHandler {
     this.#spawner = deps.spawner;
     this.#defaultUrl = deps.defaultUrl;
     this.#listTabs = deps.listTabs;
+    this.#wrapConnectPort = deps.wrapConnectPort;
   }
 
   #tabPid(actor: string): number {
@@ -214,7 +223,8 @@ export class PlatformServer implements RspHandler {
     const tabActor = pidParam !== undefined ? this.#tabPidMap.get(Number(pidParam)) : undefined;
     const url = tabActor ? undefined : this.#resolveLaunchUrl();
     const { pid, port } = await this.#spawner.launch(0, url, tabActor);
-    return `pid:${pid};port:${port};`;
+    const connectPort = this.#wrapConnectPort ? await this.#wrapConnectPort(port) : port;
+    return `pid:${pid};port:${connectPort};`;
   }
 
   #queryGdbServer(): string {

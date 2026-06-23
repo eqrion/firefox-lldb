@@ -5,6 +5,7 @@
 // LLDB platform server backed by Firefox over RDP.
 
 import { parseArgs } from "node:util";
+import { pathToFileURL } from "node:url";
 import { RspServer } from "../protocol/rsp-server.js";
 import {
   GdbServerSpawner,
@@ -46,7 +47,7 @@ LLDB attach sequence:
   (lldb) process attach --pid <N>       # attach to a wasm tab
 `;
 
-interface Args {
+export interface Args {
   connect: boolean;
   headless: boolean;
   port: number;
@@ -57,7 +58,7 @@ interface Args {
   verbose: boolean;
 }
 
-function parseCliArgs(argv: string[]): Args {
+export function parseCliArgs(argv: string[]): Args {
   let values;
   try {
     ({ values } = parseArgs({
@@ -124,8 +125,12 @@ async function connectWithRetry(rdpPort: number, tabActor?: string): Promise<Rdp
   throw new Error(`could not connect to Firefox RDP on ${rdpPort}: ${lastErr}`);
 }
 
-async function watchTabs(rdpPort: number, onTabs: (tabs: TabInfo[]) => void): Promise<void> {
-  for (;;) {
+async function watchTabs(
+  rdpPort: number,
+  onTabs: (tabs: TabInfo[]) => void,
+  shouldStop: () => boolean = () => false
+): Promise<void> {
+  while (!shouldStop()) {
     try {
       await watchFirefoxTabs(rdpPort, "127.0.0.1", onTabs);
       break;
@@ -144,8 +149,25 @@ async function waitForWasm(session: RdpWasmSession): Promise<void> {
   if (!wasm) throw new Error("no wasm source appeared");
 }
 
-async function main(): Promise<void> {
-  const args = parseCliArgs(process.argv.slice(2));
+export interface StartOptions {
+  /** Bridge the per-tab GDB server port (see PlatformServerDeps.wrapConnectPort). */
+  wrapConnectPort?: (port: number) => Promise<number>;
+}
+
+export interface PlatformServerHandle {
+  port: number;
+  platformServer: PlatformServer;
+  spawner: GdbServerSpawner;
+  shutdown: () => Promise<void>;
+}
+
+// Bring up Firefox (if launching), the per-tab GDB server launcher, and the
+// platform RSP server. Returns once the server is listening. Used by both the
+// standalone CLI and the in-process wasm embedding.
+export async function startPlatformServer(
+  args: Args,
+  opts: StartOptions = {}
+): Promise<PlatformServerHandle> {
   const verbose = args.verbose || process.env.DEBUG === "1";
   const logger = consoleLogger(verbose);
   setRdpTrace(verbose);
@@ -258,12 +280,11 @@ async function main(): Promise<void> {
     spawner,
     defaultUrl: args.url,
     listTabs: async () => currentTabs,
+    wrapConnectPort: opts.wrapConnectPort,
   });
   const server = new RspServer(platformServer, { logger });
 
   const bound = await server.listen(args.port);
-  // Stdout is the control channel for the firefox-lldb wrapper; stderr carries logs.
-  process.stdout.write(`platform server ready on connect://localhost:${bound}\n`);
 
   if (!launching) {
     listFirefoxTabs(args.rdpPort).catch(() =>
@@ -273,29 +294,45 @@ async function main(): Promise<void> {
     );
   }
 
+  let stopped = false;
   const hinted = new Set<string>();
-  void watchTabs(args.rdpPort, (tabs) => {
-    currentTabs = tabs;
-    for (const tab of tabs) {
-      if (!hinted.has(tab.actor) && tab.url && tab.url !== "about:blank") {
-        hinted.add(tab.actor);
-        const pid = platformServer.tabPid(tab.actor);
-        process.stderr.write(
-          `\n[info] tab available: ${tab.url}\n` +
-            `[info]   process attach --plugin wasm --pid ${pid}\n`
-        );
+  void watchTabs(
+    args.rdpPort,
+    (tabs) => {
+      currentTabs = tabs;
+      for (const tab of tabs) {
+        if (!hinted.has(tab.actor) && tab.url && tab.url !== "about:blank") {
+          hinted.add(tab.actor);
+          const pid = platformServer.tabPid(tab.actor);
+          process.stderr.write(
+            `\n[info] tab available: ${tab.url}\n` +
+              `[info]   process attach --plugin wasm --pid ${pid}\n`
+          );
+        }
       }
-    }
-  });
+    },
+    () => stopped
+  );
 
   const shutdown = async () => {
+    stopped = true;
     await spawner.killAll();
     await server.close();
     await firefox?.close();
-    process.exit(0);
   };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+
+  return { port: bound, platformServer, spawner, shutdown };
+}
+
+async function main(): Promise<void> {
+  const args = parseCliArgs(process.argv.slice(2));
+  const handle = await startPlatformServer(args);
+  // Stdout is the control channel for the firefox-lldb wrapper; stderr carries logs.
+  process.stdout.write(`platform server ready on connect://localhost:${handle.port}\n`);
+
+  const onSignal = () => void handle.shutdown().then(() => process.exit(0));
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
   process.on("SIGHUP", () => {});
 
   // When launched session-detached (e.g. the e2e harness uses setsid), a killed
@@ -304,15 +341,17 @@ async function main(): Promise<void> {
   if (process.env.FIREFOX_LLDB_EXIT_WHEN_ORPHANED) {
     const timer = setInterval(() => {
       if (process.ppid === 1) {
-        logger.warn("parent process exited; shutting down to release Firefox");
-        void shutdown();
+        void handle.shutdown().then(() => process.exit(0));
       }
     }, 1000);
     timer.unref();
   }
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+// Only run as a CLI when invoked directly, not when imported for in-process use.
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}
