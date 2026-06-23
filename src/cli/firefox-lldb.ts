@@ -2,162 +2,92 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-// Convenience wrapper: launch firefox-lldb-server, wait for it to be ready,
-// then exec lldb pre-configured to connect to it.
+// Convenience wrapper: run the platform server in-process and drive an embedded
+// LLDB (compiled to WebAssembly) as a real interactive (lldb) prompt on this
+// terminal. No native lldb binary is required.
+//
+// The wasm LLDB cannot open TCP sockets, so its RSP connections (the platform
+// connection and each per-tab GDB server) are bridged to the in-process TCP
+// servers through in-memory channels: LLDB connects to "inprocess://<id>" and
+// we pump bytes between channel <id> and a localhost socket.
 
-import { parseArgs } from "node:util";
-import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import path from "node:path";
+import net from "node:net";
+import { LLDBClient } from "@firefox-devtools/lldb-wasm";
+import { parseCliArgs, startPlatformServer } from "./firefox-lldb-server.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// Open bridge sockets, tracked so we can tear them down on exit (otherwise
+// net.Server.close() blocks on the live connections).
+const bridgeSockets = new Set<net.Socket>();
 
-const USAGE = `\
-Usage: firefox-lldb [--lldb <path>] [-h] [server options...]
-
-  --lldb <path>   lldb binary to use (default: $LLDB or "lldb" on PATH).
-  -h, --help      Show this message.
-
-All other flags are forwarded to firefox-lldb-server. Run:
-  firefox-lldb-server --help
-for the full server option list.
-`;
-
-interface Args {
-  lldb: string;
-  url?: string;
-  serverArgv: string[];
-}
-
-function parseCliArgs(argv: string[]): Args {
-  const { values, tokens } = parseArgs({
-    args: argv,
-    strict: false,
-    tokens: true,
-    options: {
-      lldb: { type: "string" },
-      url: { type: "string" },
-      help: { type: "boolean", short: "h" },
-    },
+// Bridge a localhost TCP RSP server to an in-process channel the wasm LLDB
+// connects to via "inprocess://<id>". Returns the channel ID.
+async function bridgeTcp(client: LLDBClient, port: number): Promise<number> {
+  const channelId = await client.createChannel();
+  const socket = net.connect(port, "127.0.0.1");
+  bridgeSockets.add(socket);
+  socket.on("close", () => bridgeSockets.delete(socket));
+  socket.setNoDelay(true);
+  // server -> LLDB
+  socket.on("data", (d) => void client.channelServerWrite(channelId, new Uint8Array(d)));
+  socket.on("error", () => {});
+  // LLDB -> server
+  await client.bridgeChannel(channelId, (data) => void socket.write(Buffer.from(data)));
+  await new Promise<void>((resolve, reject) => {
+    socket.once("connect", resolve);
+    socket.once("error", reject);
   });
-
-  if (values.help) {
-    process.stdout.write(USAGE);
-    process.exit(0);
-  }
-
-  // Rebuild serverArgv from all tokens that are not --lldb (consumed locally).
-  const serverArgv: string[] = [];
-  for (const tok of tokens) {
-    if (tok.kind === "option" && tok.name === "lldb") continue;
-    if (tok.kind === "option-terminator") continue;
-    if (tok.kind === "option") {
-      serverArgv.push(`--${tok.name}`);
-      if (typeof tok.value === "string") serverArgv.push(tok.value);
-    } else if (tok.kind === "positional") {
-      serverArgv.push(tok.value);
-    }
-  }
-
-  return {
-    lldb: (values.lldb as string | undefined) ?? process.env.LLDB ?? "lldb",
-    url: values.url as string | undefined,
-    serverArgv,
-  };
-}
-
-function resolveServerScript(): string {
-  // When packaged (dist/), the server lives alongside this file.
-  // In dev (src/cli/), reference the sibling source file.
-  const here = __dirname;
-  const devScript = path.join(here, "firefox-lldb-server.ts");
-  const builtScript = path.join(here, "firefox-lldb-server.js");
-  return existsSync(devScript) ? devScript : builtScript;
+  return channelId;
 }
 
 async function main(): Promise<void> {
   const args = parseCliArgs(process.argv.slice(2));
 
-  const serverScript = resolveServerScript();
-  const nodeArgs = serverScript.endsWith(".ts")
-    ? ["--import", "tsx", serverScript]
-    : [serverScript];
+  const client = await LLDBClient.create();
 
-  const server = spawn(process.execPath, [...nodeArgs, ...args.serverArgv], {
-    stdio: ["ignore", "pipe", "inherit"],
+  // Each per-tab GDB server launched by qLaunchGDBServer gets bridged; the
+  // platform server returns the channel ID as the connection "port" and the
+  // wasm LLDB connects to inprocess://<id> (PlatformWasmRemoteGDBServer::MakeUrl).
+  const handle = await startPlatformServer(args, {
+    wrapConnectPort: (port) => bridgeTcp(client, port),
   });
 
-  let port: number | undefined;
+  // Bridge the platform connection itself.
+  const platformChannel = await bridgeTcp(client, handle.port);
 
-  // Wait for "platform server ready on connect://localhost:<port>", then keep piping.
-  await new Promise<void>((resolve, reject) => {
-    let buf = "";
-    let ready = false;
-    server.stdout!.setEncoding("utf8");
-    server.stdout!.on("data", (chunk: string) => {
-      if (!ready) {
-        buf += chunk;
-        const m = buf.match(/platform server ready on connect:\/\/localhost:(\d+)/);
-        if (m) {
-          ready = true;
-          port = Number(m[1]);
-          resolve();
-        }
-      }
-    });
-    server.on("exit", (code) => {
-      reject(new Error(`server exited with code ${code} before becoming ready`));
-    });
-  });
+  client.onOutput((bytes) => process.stdout.write(Buffer.from(bytes)));
 
-  const lldbArgs = [
-    "-o",
-    "platform select remote-gdb-server",
-    "-o",
-    `platform connect connect://localhost:${port}`,
-    // Wasm targets must be driven through LLDB's `wasm` process plugin; the
-    // generic gdb-remote plugin misreads the segmented wasm address space. Alias
-    // `attach` to inject `--plugin wasm` so users can `attach --pid N` without
-    // remembering the flag. (`process attach` cannot be transparently shadowed.)
-    "-o",
-    "command alias attach process attach --plugin wasm",
-  ];
+  let exiting = false;
+  const cleanup = async (code = 0) => {
+    if (exiting) return;
+    exiting = true;
+    for (const s of bridgeSockets) s.destroy();
+    await handle.shutdown().catch(() => {});
+    client.destroy();
+    process.exit(code);
+  };
+  client.onInterpreterExit(() => void cleanup(0));
+  process.on("SIGTERM", () => void cleanup(0));
 
-  // When a URL is known, attach to the launched tab now: `process attach` drives
-  // qLaunchGDBServer (the launcher navigates Firefox and waits for wasm) then
-  // vAttach, so the session is live with no user input needed.
+  await client.runInterpreter();
+
+  // Drive the same setup the native wrapper passed via `-o` options.
+  const send = (line: string) => client.writeStdin(new TextEncoder().encode(line + "\n"));
+  await send("platform select remote-gdb-server");
+  await send(`platform connect inprocess://${platformChannel}`);
+  // Alias so users can `attach --pid N` and get the wasm process plugin.
+  await send("command alias attach process attach --plugin wasm");
   if (args.url) {
     process.stderr.write("[info] attaching (waiting for wasm to load)...\n");
-    lldbArgs.push("-o", "process attach --plugin wasm --pid 1");
+    await send("process attach --plugin wasm --pid 1");
   } else {
-    lldbArgs.push("-o", "platform process list");
+    await send("platform process list");
   }
 
-  const lldb = spawn(args.lldb, lldbArgs, { stdio: "inherit" });
-
-  lldb.on("error", (err) => {
-    process.stderr.write(`[error] failed to start lldb (${args.lldb}): ${err.message}\n`);
-    server.kill();
-    process.exit(1);
-  });
-
-  const cleanup = () => {
-    server.kill();
-    lldb.kill();
-  };
-  process.on("SIGINT", cleanup);
-  process.on("SIGTERM", cleanup);
-
-  lldb.on("exit", () => {
-    server.kill();
-    process.exit(0);
-  });
-
-  server.on("exit", () => {
-    lldb.kill();
-    process.exit(0);
-  });
+  // Feed the terminal to LLDB. Forward Ctrl-D (stdin end) as EOF; SIGINT exits
+  // the session (interrupting a running target is a follow-up).
+  process.stdin.on("data", (d) => void client.writeStdin(new Uint8Array(d)));
+  process.stdin.on("end", () => void client.closeStdin());
+  process.on("SIGINT", () => void cleanup(0));
 }
 
 main().catch((err) => {
