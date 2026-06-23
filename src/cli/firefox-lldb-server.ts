@@ -6,7 +6,11 @@
 
 import { parseArgs } from "node:util";
 import { RspServer } from "../protocol/rsp-server.js";
-import { GdbServerSpawner, freePort, type GdbServerLauncher } from "../platform/gdb-server-spawner.js";
+import {
+  GdbServerSpawner,
+  freePort,
+  type GdbServerLauncher,
+} from "../platform/gdb-server-spawner.js";
 import { startAttachShim } from "../protocol/attach-shim.js";
 import { PlatformServer } from "../platform/platform-server.js";
 import { RdpWasmSession, listFirefoxTabs, watchFirefoxTabs, type TabInfo } from "../rdp/session.js";
@@ -198,29 +202,6 @@ async function main(): Promise<void> {
         await waitForWasm(session);
       } else if (!session.hasThreads()) {
         await sleep(500);
-      } else {
-        // For the attach case, ensure all threads are paused so that
-        // resumeAll() in Debuggee.continue works from a stopped state.
-        const tids = session.listTids();
-        const isRunning = await session
-          .frames(tids[0])
-          .then(() => false)
-          .catch(() => true);
-        if (isRunning) {
-          await new Promise<void>((resolve, reject) => {
-            const timer = setTimeout(() => {
-              session.off("stopped", onStopped);
-              reject(new Error("timed out pausing threads for attach"));
-            }, 5000);
-            const onStopped = () => {
-              clearTimeout(timer);
-              resolve();
-            };
-            session.once("stopped", onStopped);
-            session.armAllStop();
-            session.interrupt(tids[0]);
-          });
-        }
       }
 
       const fire = args.fire;
@@ -232,6 +213,12 @@ async function main(): Promise<void> {
         : undefined;
 
       const debuggee = new RdpDebuggee(session, onFirstContinue ? { onFirstContinue } : undefined);
+
+      // Force a genuine RDP all-stop and snapshot before the component starts.
+      // The component's startup update_on_stop reads the stop state once; priming
+      // here means it captures a real pause with real frames instead of a
+      // synthetic "stopped" with no pause behind it (issue #21).
+      if (session.hasThreads()) await debuggee.primeStop();
 
       // The component presents an already-attached, stopped process on connect,
       // which works for `process connect` but breaks LLDB's `process attach`

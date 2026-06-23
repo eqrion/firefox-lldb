@@ -554,6 +554,27 @@ export class RdpDebuggee {
   }
 
   // --- resumption ----------------------------------------------------------
+  /**
+   * Force a genuine all-stop and snapshot live thread state. Called on attach so
+   * the stop LLDB sees on connect is backed by a real RDP pause with real frames
+   * (issue #21), rather than the synthetic empty placeholder. Must run before the
+   * gdbstub component starts, since its startup `update_on_stop` reads the frame
+   * snapshot once and never re-snapshots on attach.
+   */
+  async primeStop(): Promise<void> {
+    // Interrupt a live thread (lowest tid = top-level), not the default
+    // stoppedTid: after a navigate the top-level target re-arrives under a fresh
+    // tid, so stoppedTid (1) no longer names a live thread. armAllStop then
+    // interrupts the rest and sets stoppedTid to the thread that actually paused.
+    const tid = this.#session.listTids()[0];
+    if (tid === undefined) return;
+    this.#armStopped();
+    this.#session.armAllStop();
+    this.#session.interrupt(tid);
+    await this.#stopped;
+    await this.#snapshotAll();
+  }
+
   #armStopped(): void {
     this.#stopped = new Promise((resolve) => (this.#resolveStopped = resolve));
   }
