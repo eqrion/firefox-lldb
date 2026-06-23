@@ -1,0 +1,27 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+// Multiple-argument locals on a second fixture/function (sum_range), ported from
+// test/e2e/test_locals.py. Own file => own attach/process (see README).
+
+import { test, before, after } from "node:test";
+import assert from "node:assert/strict";
+import { Session } from "./harness.mjs";
+
+const skip = process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
+  ? false
+  : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
+
+let s;
+before(async () => { if (!skip) s = await Session.stoppedAtBreakpoint("sum_range"); });
+after(async () => { await s?.shutdown(); });
+
+test("sum_range args lo == 1 and hi == 100", { skip }, async () => {
+  const lo = await s.variable(0, "lo");
+  const hi = await s.variable(0, "hi");
+  assert.equal(lo.valid, true);
+  assert.equal(hi.valid, true);
+  assert.equal(lo.signed, 1);
+  assert.equal(hi.signed, 100);
+});
