@@ -17,6 +17,12 @@ let s;
 before(async () => { if (!skip) s = await Session.stoppedAtBreakpoint("sum_range"); });
 after(async () => { await s?.shutdown(); });
 
+test("stopped in sum_range at math.cpp (call stack + DWARF)", { skip }, async () => {
+  const f0 = await s.topFrame();
+  assert.match(f0.function, /sum_range/);
+  assert.equal(f0.file?.endsWith("math.cpp"), true);
+});
+
 test("sum_range args lo == 1 and hi == 100", { skip }, async () => {
   const lo = await s.variable(0, "lo");
   const hi = await s.variable(0, "hi");

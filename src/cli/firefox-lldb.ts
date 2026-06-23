@@ -12,7 +12,7 @@
 // we pump bytes between channel <id> and a localhost socket.
 
 import net from "node:net";
-import { LLDBClient } from "@firefox-devtools/lldb-wasm";
+import { LLDBClient } from "lldb-wasm";
 import { parseCliArgs, startPlatformServer } from "./firefox-lldb-server.js";
 
 // Open bridge sockets, tracked so we can tear them down on exit (otherwise

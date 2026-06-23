@@ -41,7 +41,7 @@
   },
   "dependencies": {
     "@bytecodealliance/preview2-shim": "^0.18.1",
-    "@firefox-devtools/lldb-wasm": "file:../llvm-project/lldb/tools/lldb-wasm"
+    "lldb-wasm": "^0.1.0"
   },
   "devDependencies": {
     "@bytecodealliance/jco": "^1.24.0",

@@ -31,13 +31,40 @@ FIREFOX_LLDB_WASM_ATTACH=1 npm run test:e2e-node
 
 ## Tests
 
-- `session_smoke.test.mjs` — no Firefox. The off-worker session + transport
-  bridge end-to-end: platform connect, `version`, process state.
-- `attach.test.mjs` — attach to a wasm tab, stop at a breakpoint, and verify the
-  function/file/line, the call stack (`qWasmCallStack`, with JS frames), and a
-  local (`qWasmLocal`).
-- `stepping.test.mjs` — instruction stepping (`ThreadPlanWasmStep`).
-- `locals_args.test.mjs` — multiple arguments on a second function.
+### Infrastructure (no Firefox required)
+
+- `session_smoke.test.mjs` — platform connect, `version`, process state before attach.
+
+### Core (call stack, locals, control flow)
+
+- `attach.test.mjs` — attach, breakpoint, DWARF symbols, call stack with JS frames, locals (factorial).
+- `locals_args.test.mjs` — call stack + multiple arguments (sum_range).
+- `stepping.test.mjs` — instruction stepping (ThreadPlanWasmStep).
+- `call_stack_oop.test.mjs` — OOP fixture: call stack, dynamic virtual dispatch.
+- `call_stack_parser.test.mjs` — parser fixture: deep call stack, recursive frame names.
+- `call_stack_ledger.test.mjs` — ledger fixture: call stack, struct pointer arg, global array.
+- `breakpoint_by_line.test.mjs` — source breakpoint by file:line.
+- `two_breakpoints.test.mjs` — two breakpoints fire in execution order.
+- `step_in_out.test.mjs` — StepOut from callee returns to caller with shallower depth.
+- `step_over.test.mjs` — StepOver advances PC without increasing stack depth.
+- `multi_step.test.mjs` — five sequential StepInstructions each advance the PC.
+- `bp_fires_multiple.test.mjs` — breakpoint in recursive function fires on each level.
+- `step_out_recursion.test.mjs` — StepOut from recursive frame matches expected depth.
+- `continue_after_step.test.mjs` — step 3x then continue hits the next breakpoint.
+- `step_out_to_js.test.mjs` — StepOut of outermost wasm frame reaches a JS caller.
+- `loop_variable.test.mjs` — loop variable 'i' becomes visible after stepping into the loop.
+- `recursion_depth.test.mjs` — recursive call stack has >= 2 factorial frames.
+
+### Extended (type inspection, JS debugging, threading)
+
+- `inspect_types.test.mjs` — types fixture: integers, floats, pointers, bitfields, structs.
+- `inspect_heap.test.mjs` — heap fixture: heap-allocated struct/array through pointer.
+- `edge_cases.test.mjs` — interleaved JS/wasm frames, watchpoint non-crash.
+- `source_listing.test.mjs` — wasm and JS frames carry valid file/line DWARF info.
+- `js_debugging.test.mjs` — JS file:line breakpoint fires; step-over advances source line.
+- `mixed_js.test.mjs` — mixed JS/wasm: source file discovery (app.js, math.js, math.cpp).
+- `threaded.test.mjs` — multithreaded fixture: thread list, matmul_threaded frame, step.
+- `wasm_trap.test.mjs` — wasm trap surface behaviour (TODO: known limitation).
 
 ## Why one attach per file + `--test-concurrency=1`
 
@@ -49,3 +76,6 @@ competing Firefoxes. So each attach-based file performs a single attach in
 `--test-concurrency=1` (each file is a fresh, serial process — the same process
 isolation the Python `run.py` relies on). Making multiple sequential attaches
 reliable within one process is a known follow-up.
+
+Tests that mutate state (step/continue) are the only test in their file. Tests
+that only read state from one stopped session can share a `before()` attach.

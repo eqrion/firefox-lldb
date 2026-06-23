@@ -250,22 +250,23 @@ export async function startPlatformServer(
       // attach-shim.ts). LLDB then drives the native attach handshake and
       // `process attach --plugin wasm` works.
       const componentPort = await freePort();
-      const { ready, stop } = startGdbServer({
+      const gdbServer = startGdbServer({
         dispatch: (req: unknown) => debuggee.dispatch(req as never),
         port: componentPort,
         onInfo: (m: string) => logger.debug(`[component] ${m}`),
         verbose,
       });
-      await ready;
+      await gdbServer.ready;
       const shim = await startAttachShim({
         listenPort: port,
         componentPort,
         trace: verbose ? (m) => logger.debug(`[shim] ${m}`) : undefined,
       });
       return {
+        port: shim.port,
         stop: async () => {
           await shim.close();
-          stop();
+          gdbServer.stop();
           session.close();
         },
       };

@@ -36,6 +36,7 @@ export function startGdbServer({ dispatch, port, onInfo, verbose }) {
   });
 
   let resolveReady;
+  let boundPort = port;
   const ready = new Promise((r) => (resolveReady = r));
 
   worker.on("message", async (m) => {
@@ -61,9 +62,15 @@ export function startGdbServer({ dispatch, port, onInfo, verbose }) {
       Atomics.notify(ctrl, CTRL_STATE);
     } else if (m && m.info) {
       onInfo?.(m.info);
-      // The component prints "Debugger listening on ..." once the TCP listener
-      // is bound; that (not the earlier {ready}) is when LLDB can connect.
-      if (/listening/i.test(m.info)) resolveReady();
+      // The component prints "Debugger listening on 127.0.0.1:PORT" once the
+      // TCP listener is bound; that (not the earlier {ready}) is when LLDB can
+      // connect. Parse the port so callers get the actual bound port when
+      // port=0 (OS-assigned).
+      if (/listening/i.test(m.info)) {
+        const match = m.info.match(/:(\d+)/);
+        if (match) boundPort = parseInt(match[1], 10);
+        resolveReady();
+      }
     }
   });
   worker.on("error", (e) => {
@@ -79,5 +86,5 @@ export function startGdbServer({ dispatch, port, onInfo, verbose }) {
     }
   });
 
-  return { ready, stop: () => worker.terminate() };
+  return { ready, stop: () => worker.terminate(), get port() { return boundPort; } };
 }

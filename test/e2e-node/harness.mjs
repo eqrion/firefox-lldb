@@ -12,19 +12,25 @@ import http from "node:http";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { readFileSync } from "node:fs";
-import { LLDBClient } from "@firefox-devtools/lldb-wasm";
+import { LLDBClient } from "lldb-wasm";
 import { parseCliArgs, startPlatformServer } from "../../src/cli/firefox-lldb-server.ts";
 import { freePort } from "../../src/platform/gdb-server-spawner.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..", "..");
 
-// Subset of test/e2e/harness.py FIXTURES.
+// Mirrors test/e2e/harness.py FIXTURES.
 export const FIXTURES = {
-  factorial: { pageDir: "test/e2e/fixtures/simple", fire: "runFactorial()", breakFunc: "compute_factorial", file: "math.cpp" },
-  sum_range: { pageDir: "test/e2e/fixtures/simple", fire: "runSum()", breakFunc: "sum_range", file: "math.cpp" },
-  oop: { pageDir: "test/e2e/fixtures/oop", fire: "run()", breakFunc: "area", file: "oop.cpp" },
-  ledger: { pageDir: "test/e2e/fixtures/ledger", fire: "run()", breakFunc: "apply_transaction", file: "ledger.cpp" },
+  factorial: { pageDir: "test/e2e/fixtures/simple",   fire: "runFactorial()", breakFunc: "compute_factorial", file: "math.cpp"   },
+  sum_range: { pageDir: "test/e2e/fixtures/simple",   fire: "runSum()",       breakFunc: "sum_range",         file: "math.cpp"   },
+  oop:       { pageDir: "test/e2e/fixtures/oop",      fire: "run()",          breakFunc: "area",              file: "oop.cpp"    },
+  parser:    { pageDir: "test/e2e/fixtures/parser",   fire: "run()",          breakFunc: "parse_factor",      file: "parser.cpp" },
+  ledger:    { pageDir: "test/e2e/fixtures/ledger",   fire: "run()",          breakFunc: "apply_transaction", file: "ledger.cpp" },
+  types:     { pageDir: "test/e2e/fixtures/types",    fire: "run()",          breakFunc: "stop_here",         file: "types.cpp"  },
+  heap:      { pageDir: "test/e2e/fixtures/heap",     fire: "run()",          breakFunc: "check_heap",        file: "heap.cpp"   },
+  trap:      { pageDir: "test/e2e/fixtures/trap",     fire: "run()",          breakFunc: "cause_trap",        file: "trap.cpp"   },
+  threaded:  { pageDir: "test/e2e/fixtures/threaded", fire: "runMatmul()",    breakFunc: "matmul_threaded",   file: "matmul.cpp" },
+  mixed_js:  { pageDir: "test/e2e/fixtures/mixed-js", fire: "runApp()",       breakFunc: "compute_factorial", file: "math.cpp"   },
 };
 
 const MIME = { ".html": "text/html", ".js": "text/javascript", ".wasm": "application/wasm" };
@@ -84,7 +90,9 @@ export class Session {
 
   // Launch headless Firefox at the fixture, attach via the platform, and return
   // a Session. Mirrors harness.py `_start_platform` + `_attach_via_platform`.
-  static async attach(fxName, { headless = true } = {}) {
+  // `fire` overrides the fixture's default fire expression (used by JS tests
+  // that need a second deferred call, e.g. "runFactorial(); setTimeout(...)").
+  static async attach(fxName, { headless = true, fire } = {}) {
     const fx = FIXTURES[fxName];
     if (!fx) throw new Error(`unknown fixture: ${fxName}`);
     const staticServer = await startStaticServer(fx.pageDir);
@@ -97,7 +105,7 @@ export class Session {
     const args = parseCliArgs([
       "--launch", ...(headless ? ["--headless"] : []),
       "--port", "0", "--rdp-port", String(rdpPort),
-      "--url", url, "--fire", fx.fire,
+      "--url", url, "--fire", fire ?? fx.fire,
     ]);
     const handle = await startPlatformServer(args, {
       wrapConnectPort: (port) => session.#bridgeTcp(port),
@@ -175,6 +183,17 @@ export class Session {
 
   async topFrame() {
     return (await this.frames())[0];
+  }
+
+  // Parse the breakpoint number from a `breakpoint set` command result.
+  // Returns null if the output doesn't match the expected format.
+  static parseBreakpointId(cmdResult) {
+    const match = cmdResult.output.match(/Breakpoint (\d+):/);
+    return match ? parseInt(match[1]) : null;
+  }
+
+  deleteBreakpoint(id) {
+    return this.command(`breakpoint delete ${id}`);
   }
 
   async shutdown() {

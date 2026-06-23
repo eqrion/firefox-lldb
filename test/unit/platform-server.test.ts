@@ -22,8 +22,8 @@ const fakeLauncher: GdbServerLauncher = async ({ port }) => {
     },
     { singleConnection: true }
   );
-  await srv.listen(port);
-  return { stop: () => srv.close() };
+  const boundPort = await srv.listen(port);
+  return { port: boundPort, stop: () => srv.close() };
 };
 
 const fakeTabs: TabInfo[] = [
@@ -99,8 +99,8 @@ test("qLaunchGDBServer with pid routes to the correct tab actor", async () => {
       },
       { singleConnection: true }
     );
-    await srv.listen(port);
-    return { stop: () => srv.close() };
+    const boundPort = await srv.listen(port);
+    return { port: boundPort, stop: () => srv.close() };
   };
   const sp = new GdbServerSpawner(capturingLauncher);
   const srv = new RspServer(

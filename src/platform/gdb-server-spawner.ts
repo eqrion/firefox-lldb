@@ -13,6 +13,7 @@ import net from "node:net";
 import type { AddressInfo } from "node:net";
 
 export interface LaunchedServer {
+  port: number;
   stop(): void | Promise<void>;
 }
 
@@ -36,13 +37,12 @@ export class GdbServerSpawner {
     this.#launcher = launcher;
   }
 
-  /** Launch a GDB server. When requestedPort is 0 a free port is pre-allocated. */
+  /** Launch a GDB server. Port 0 lets the launcher pick its own port. */
   async launch(requestedPort = 0, url?: string, tabActor?: string): Promise<SpawnedServer> {
-    const port = requestedPort !== 0 ? requestedPort : await freePort();
-    const handle = await this.#launcher({ port, url, tabActor });
+    const handle = await this.#launcher({ port: requestedPort, url, tabActor });
     const pid = this.#nextPid++;
-    this.#servers.set(pid, { port, handle });
-    return { pid, port };
+    this.#servers.set(pid, { port: handle.port, handle });
+    return { pid, port: handle.port };
   }
 
   async kill(pid: number): Promise<boolean> {
