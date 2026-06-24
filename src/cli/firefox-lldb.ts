@@ -12,6 +12,7 @@
 // we pump bytes between channel <id> and a localhost socket.
 
 import net from "node:net";
+import { readFile } from "node:fs/promises";
 import { LLDBClient } from "lldb-wasm";
 import { parseCliArgs, startPlatformServer } from "./firefox-lldb-server.js";
 
@@ -55,6 +56,7 @@ async function main(): Promise<void> {
   const platformChannel = await bridgeTcp(client, handle.port);
 
   client.onOutput((bytes) => process.stdout.write(Buffer.from(bytes)));
+  client.setFileProvider((path) => readFile(path).catch(() => null));
 
   let exiting = false;
   const cleanup = async (code = 0) => {

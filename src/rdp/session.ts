@@ -81,6 +81,68 @@ export async function watchFirefoxTabs(
   );
 }
 
+/**
+ * Like watchFirefoxTabs, but also enables observeWasm:true on each tab via a
+ * persistent watcher. The thread config survives page navigation: any page
+ * loaded in a primed tab after this call compiles wasm in debug mode, making
+ * breakpoints available without a reload. Resolves when the connection closes.
+ */
+export async function watchAndPrimeFirefoxTabs(
+  port = 6080,
+  host = "127.0.0.1",
+  onTabs: (tabs: TabInfo[]) => void
+): Promise<void> {
+  const client = await RdpClient.connect(port, host);
+  client.registerEventType("tabListChanged");
+
+  const primedActors = new Set<string>();
+
+  const primeTab = async (tabActor: string) => {
+    if (primedActors.has(tabActor)) return;
+    primedActors.add(tabActor);
+    try {
+      const { actor: watcher } = (await client.request(tabActor, {
+        type: "getWatcher",
+        isServerTargetSwitchingEnabled: true,
+      })) as { actor: string };
+      const cfg = await client.request(watcher, { type: "getThreadConfigurationActor" });
+      const configActor = ((cfg.configuration as { actor?: string })?.actor ??
+        cfg.configuration) as string;
+      await client.request(configActor, {
+        type: "updateConfiguration",
+        configuration: { observeWasm: true, observeAsmJS: true, pauseOnExceptions: false },
+      });
+      await client.request(watcher, { type: "watchTargets", targetType: "frame" });
+      await client.request(watcher, { type: "watchTargets", targetType: "worker" });
+    } catch {
+      // Tab may have disappeared; ignore and let the next query re-prime it.
+      primedActors.delete(tabActor);
+    }
+  };
+
+  const query = async () => {
+    const { tabs } = (await client.request("root", { type: "listTabs" })) as {
+      tabs: { actor: string; url?: string; title?: string }[];
+    };
+    onTabs(tabs.map((t) => ({ actor: t.actor, url: t.url ?? "", title: t.title ?? "" })));
+    for (const t of tabs) void primeTab(t.actor);
+  };
+
+  client.on("event", (p) => {
+    if (p.type === "tabListChanged" || p.type === "tabNavigated") void query().catch(() => {});
+  });
+
+  await query();
+  const startupRetry = setTimeout(() => void query().catch(() => {}), 2000);
+
+  await new Promise<void>((resolve) =>
+    client.on("close", () => {
+      clearTimeout(startupRetry);
+      resolve();
+    })
+  );
+}
+
 export interface SourceForm {
   actor: string;
   url: string;
@@ -153,6 +215,11 @@ export class RdpWasmSession extends EventEmitter {
 
   listTids(): number[] {
     return [...this.#threads.keys()];
+  }
+
+  /** URL of the top-level (page) target, if one is connected. */
+  topLevelUrl(): string | undefined {
+    return [...this.#threads.values()].find((t) => t.isTopLevel)?.url;
   }
 
   /** Connect, enable wasm observation, and start watching targets. */

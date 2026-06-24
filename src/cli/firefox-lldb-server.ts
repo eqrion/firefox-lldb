@@ -14,7 +14,12 @@ import {
 } from "../platform/gdb-server-spawner.js";
 import { startAttachShim } from "../protocol/attach-shim.js";
 import { PlatformServer } from "../platform/platform-server.js";
-import { RdpWasmSession, listFirefoxTabs, watchFirefoxTabs, type TabInfo } from "../rdp/session.js";
+import {
+  RdpWasmSession,
+  listFirefoxTabs,
+  watchAndPrimeFirefoxTabs,
+  type TabInfo,
+} from "../rdp/session.js";
 import { setRdpTrace } from "../rdp/transport.js";
 import { RdpDebuggee } from "../gdb/rdp-debuggee.js";
 import { launchFirefox, type FirefoxHandle } from "../rdp/firefox.js";
@@ -132,7 +137,7 @@ async function watchTabs(
 ): Promise<void> {
   while (!shouldStop()) {
     try {
-      await watchFirefoxTabs(rdpPort, "127.0.0.1", onTabs);
+      await watchAndPrimeFirefoxTabs(rdpPort, "127.0.0.1", onTabs);
       break;
     } catch {
       await sleep(250);
@@ -211,13 +216,25 @@ export async function startPlatformServer(
     // throws (e.g. waitForWasm times out) leaks the RDP watcher connection, and
     // a retried qLaunchGDBServer accumulates dead sessions against Firefox.
     try {
-      // Navigate the tab to the page if needed. An explicit url (the platform's
-      // launch-URL fallback, used when the attach can't resolve the tab by
-      // actor) always navigates; otherwise navigate to the configured --url
-      // only if the tab has not yet loaded a wasm page. An already-loaded tab
-      // keeps its content. This makes `process attach` work against a freshly
-      // launched Firefox.
-      const navTo = url ?? ((await session.wasmSources()).length ? undefined : args.url);
+      // Navigate to the target page when needed. The watcher connection runs
+      // watchAndPrimeFirefoxTabs which sets observeWasm:true on the tab before
+      // any page loads; pages navigated after that compile wasm in debug mode
+      // automatically. A navigation is only needed when:
+      //   - an explicit url came from qLaunchGDBServer (e.g. `process launch`), or
+      //   - no wasm is loaded yet and --url is configured (initial page load), or
+      //   - wasm IS loaded but has empty breakpoint positions (not in debug mode,
+      //     which can happen if it loaded before the priming connection was ready).
+      const wasm0 = await session.wasmSources();
+      const inDebugMode =
+        wasm0.length > 0 && (await session.wasmBreakpointOffsets(wasm0[0].actor)).length > 0;
+      const tabUrl = session.topLevelUrl();
+      const navTo =
+        url ??
+        (!wasm0.length
+          ? args.url
+          : !inDebugMode
+            ? (args.url ?? (tabUrl && tabUrl !== "about:blank" ? tabUrl : undefined))
+            : undefined);
       if (navTo) {
         await session.navigate(navTo);
         logger.debug(`[rdp] navigated to ${navTo}`);
