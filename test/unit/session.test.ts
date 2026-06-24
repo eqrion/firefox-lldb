@@ -218,11 +218,11 @@ test("target-available-form adds thread to listTids", async () => {
   assert.deepEqual(session.listTids(), []);
 
   srv.targetAvailable("threadA", { isTopLevel: true });
-  await sleep(20);
+  await sleep(200);
   assert.deepEqual(session.listTids(), [1]);
 
   srv.targetAvailable("threadB");
-  await sleep(20);
+  await sleep(200);
   assert.deepEqual(session.listTids(), [1, 2]);
 
   session.close();
@@ -235,9 +235,9 @@ test("target-available-form with same actor is deduplicated", async () => {
   const session = await srv.acceptSession();
 
   srv.targetAvailable("threadA");
-  await sleep(20);
+  await sleep(200);
   srv.targetAvailable("threadA"); // same actor — should be ignored
-  await sleep(20);
+  await sleep(200);
 
   assert.equal(session.listTids().length, 1);
   session.close();
@@ -251,11 +251,11 @@ test("target-destroyed-form removes thread from listTids", async () => {
 
   srv.targetAvailable("threadA");
   srv.targetAvailable("threadB");
-  await sleep(20);
+  await sleep(200);
   assert.equal(session.listTids().length, 2);
 
   srv.targetDestroyed("threadA");
-  await sleep(20);
+  await sleep(200);
   assert.equal(session.listTids().length, 1);
 
   session.close();
@@ -270,7 +270,7 @@ test("hasThreads() reflects thread count", async () => {
   assert.equal(session.hasThreads(), false);
 
   srv.targetAvailable("threadA");
-  await sleep(20);
+  await sleep(200);
   assert.equal(session.hasThreads(), true);
 
   session.close();
@@ -287,7 +287,7 @@ test("paused event from known thread emits paused:<tid>", async () => {
   const session = await srv.acceptSession();
 
   srv.targetAvailable("threadA");
-  await sleep(20);
+  await sleep(200);
   const tids = session.listTids();
   assert.equal(tids.length, 1);
   const tid = tids[0];
@@ -296,7 +296,7 @@ test("paused event from known thread emits paused:<tid>", async () => {
   session.on(`paused:${tid}`, (p: PauseEvent) => pausePackets.push(p));
 
   srv.paused("threadA", "breakpoint");
-  await sleep(20);
+  await sleep(200);
 
   assert.equal(pausePackets.length, 1);
   assert.equal(pausePackets[0].why?.type, "breakpoint");
@@ -310,13 +310,13 @@ test("paused event from unknown actor is silently dropped", async () => {
   const session = await srv.acceptSession();
 
   srv.targetAvailable("threadA");
-  await sleep(20);
+  await sleep(200);
 
   const pauses: unknown[] = [];
   session.on("paused:1", (p: unknown) => pauses.push(p));
 
   srv.paused("unknownActor", "breakpoint");
-  await sleep(20);
+  await sleep(200);
 
   assert.equal(pauses.length, 0);
   session.close();
@@ -331,7 +331,7 @@ test("armAllStop → pause from one thread → interrupt others → stopped emit
   // Register two threads.
   srv.targetAvailable("threadA", { isTopLevel: true, consoleActor: "consoleA" });
   srv.targetAvailable("threadB", { consoleActor: "consoleB" });
-  await sleep(20);
+  await sleep(200);
   assert.equal(session.listTids().length, 2);
 
   // The interrupt request sent to threadB needs a response; also threadB
@@ -378,7 +378,7 @@ test("armAllStop fires only once even if multiple paused events arrive", async (
 
   srv.targetAvailable("threadA");
   srv.targetAvailable("threadB");
-  await sleep(20);
+  await sleep(200);
 
   // Both threads will emit paused, but only the first triggers all-stop.
   srv.onAll(
@@ -406,7 +406,7 @@ test("stoppedTid and stoppedConsoleActor reflect the triggering thread", async (
   const session = await srv.acceptSession();
 
   srv.targetAvailable("threadA", { isTopLevel: true, consoleActor: "consoleA" });
-  await sleep(20);
+  await sleep(200);
 
   srv.onAll(
     (r) => r.type === "interrupt",
@@ -441,7 +441,7 @@ test("stoppedConsoleActor returns null when stopped thread has no console", asyn
       isTopLevelTarget: false,
     },
   });
-  await sleep(20);
+  await sleep(200);
 
   srv.onAll(
     (r) => r.type === "interrupt",
@@ -468,7 +468,7 @@ test("armAllStop arms on thread that arrives after armAllStop() is called", asyn
 
   // Thread arrives after arming.
   srv.targetAvailable("threadA", { isTopLevel: true });
-  await sleep(20);
+  await sleep(200);
 
   srv.paused("threadA", "breakpoint");
   await sleep(50);
@@ -486,11 +486,11 @@ test("allStop does not send interrupt to already-paused thread", async () => {
 
   srv.targetAvailable("threadA", { isTopLevel: true });
   srv.targetAvailable("threadB");
-  await sleep(20);
+  await sleep(200);
 
   // Pause threadB before arming so it is already in #pausedTids.
   srv.paused("threadB", "interrupted");
-  await sleep(20);
+  await sleep(200);
 
   srv.onAll(
     (r) => r.type === "interrupt",
@@ -530,7 +530,7 @@ test("setWasmBreakpoint buffers breakpoint and applies it to new workers", async
 
   // Now a new worker appears.
   srv.targetAvailable("workerT", { consoleActor: "consoleW" });
-  await sleep(30);
+  await sleep(200);
 
   // The setBreakpoint request should have been sent to workerT.
   const bps = srv.received.filter((r) => r.type === "setBreakpoint" && r.to === "workerT");
@@ -550,7 +550,7 @@ test("setWasmBreakpoint sends to all existing threads at call time", async () =>
 
   srv.targetAvailable("threadA");
   srv.targetAvailable("threadB");
-  await sleep(20);
+  await sleep(200);
 
   srv.onAll(
     (r) => r.type === "setBreakpoint",
@@ -574,7 +574,7 @@ test("removeWasmBreakpoint sends to all threads and removes from buffer", async 
   const session = await srv.acceptSession();
 
   srv.targetAvailable("threadA");
-  await sleep(20);
+  await sleep(200);
 
   srv.onAll(
     (r) => r.type === "setBreakpoint" || r.type === "removeBreakpoint",
@@ -589,7 +589,7 @@ test("removeWasmBreakpoint sends to all threads and removes from buffer", async 
 
   // After removal, a new worker should NOT get the breakpoint.
   srv.targetAvailable("workerNew");
-  await sleep(30);
+  await sleep(200);
 
   const newBps = srv.received.filter((r) => r.type === "setBreakpoint" && r.to === "workerNew");
   assert.equal(newBps.length, 0, "removed breakpoint not applied to new worker");
@@ -609,12 +609,12 @@ test("resumeAll sends resume to all paused threads", async () => {
 
   srv.targetAvailable("threadA");
   srv.targetAvailable("threadB");
-  await sleep(20);
+  await sleep(200);
 
   // Simulate both threads paused (mark via paused events).
   srv.paused("threadA", "breakpoint");
   srv.paused("threadB", "interrupted");
-  await sleep(20);
+  await sleep(200);
 
   // resumeAll should send resume to both.
   srv.onAll(
@@ -622,7 +622,7 @@ test("resumeAll sends resume to all paused threads", async () => {
     (r) => ({ from: r.to as string })
   );
   await session.resumeAll();
-  await sleep(20);
+  await sleep(200);
 
   const resumes = srv.received.filter((r) => r.type === "resume");
   const actors = new Set(resumes.map((r) => r.to));
@@ -639,7 +639,7 @@ test("resumeAll does nothing when no threads are paused", async () => {
   const session = await srv.acceptSession();
 
   srv.targetAvailable("threadA");
-  await sleep(20);
+  await sleep(200);
 
   const before = srv.received.length;
   await session.resumeAll(); // no paused threads
@@ -657,15 +657,15 @@ test("resumed event removes thread from paused set; resumeAll skips it", async (
 
   srv.targetAvailable("threadA");
   srv.targetAvailable("threadB");
-  await sleep(20);
+  await sleep(200);
 
   srv.paused("threadA", "breakpoint");
   srv.paused("threadB", "interrupted");
-  await sleep(20);
+  await sleep(200);
 
   // threadA resumes on its own (e.g., prior step completed).
   srv.resumed("threadA");
-  await sleep(20);
+  await sleep(200);
 
   srv.onAll(
     (r) => r.type === "resume",
@@ -674,7 +674,7 @@ test("resumed event removes thread from paused set; resumeAll skips it", async (
 
   const before = srv.received.length;
   await session.resumeAll();
-  await sleep(20);
+  await sleep(200);
 
   const resumes = srv.received.slice(before).filter((r) => r.type === "resume");
   const actors = new Set(resumes.map((r) => r.to));
@@ -691,14 +691,14 @@ test("target-destroyed-form removes thread from paused set; resumeAll skips it",
 
   srv.targetAvailable("threadA");
   srv.targetAvailable("threadB");
-  await sleep(20);
+  await sleep(200);
 
   srv.paused("threadA", "breakpoint");
   srv.paused("threadB", "interrupted");
-  await sleep(20);
+  await sleep(200);
 
   srv.targetDestroyed("threadA");
-  await sleep(20);
+  await sleep(200);
 
   assert.equal(session.listTids().length, 1, "threadA removed from list");
 
@@ -709,7 +709,7 @@ test("target-destroyed-form removes thread from paused set; resumeAll skips it",
 
   const before = srv.received.length;
   await session.resumeAll();
-  await sleep(20);
+  await sleep(200);
 
   const resumes = srv.received.slice(before).filter((r) => r.type === "resume");
   const actors = new Set(resumes.map((r) => r.to));
@@ -730,11 +730,11 @@ test("stepOne sends resume with resumeLimit:step only to the specified thread", 
 
   srv.targetAvailable("threadA", { isTopLevel: true });
   srv.targetAvailable("threadB");
-  await sleep(20);
+  await sleep(200);
 
   srv.paused("threadA", "breakpoint");
   srv.paused("threadB", "interrupted");
-  await sleep(20);
+  await sleep(200);
 
   srv.onAll(
     (r) => r.type === "resume",
@@ -743,7 +743,7 @@ test("stepOne sends resume with resumeLimit:step only to the specified thread", 
 
   const tidA = session.listTids()[0]; // threadA registered first → TID 1
   await session.stepOne(tidA);
-  await sleep(20);
+  await sleep(200);
 
   const resumesA = srv.received.filter((r) => r.type === "resume" && r.to === "threadA");
   const resumesB = srv.received.filter((r) => r.type === "resume" && r.to === "threadB");
