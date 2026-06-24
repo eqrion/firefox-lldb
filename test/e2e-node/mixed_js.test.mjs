@@ -15,20 +15,25 @@ import { Session } from "./harness.mjs";
 const APP_JS_FILE = "app.js";
 const APP_JS_BREAKLINE = 14;
 
-const skip = process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
-  ? false
-  : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
+const skip =
+  process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
+    ? false
+    : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
 
 let s;
-before(async () => { if (!skip) s = await Session.stoppedAtBreakpoint("mixed_js"); });
-after(async () => { await s?.shutdown(); });
+before(async () => {
+  if (!skip) s = await Session.stoppedAtBreakpoint("mixed_js");
+});
+after(async () => {
+  await s?.shutdown();
+});
 
 test("math.js (emscripten glue) is visible in the call stack", { skip }, async () => {
   const frames = await s.frames();
   const files = frames.map((f) => f.file);
   assert.ok(
     files.some((f) => f?.endsWith("math.js")),
-    `math.js not found; files: ${JSON.stringify(files)}`,
+    `math.js not found; files: ${JSON.stringify(files)}`
   );
 });
 
@@ -37,7 +42,7 @@ test("app.js (application JS) is visible in the call stack", { skip }, async () 
   const files = frames.map((f) => f.file);
   assert.ok(
     files.some((f) => f?.endsWith(APP_JS_FILE)),
-    `${APP_JS_FILE} not found; files: ${JSON.stringify(files)}`,
+    `${APP_JS_FILE} not found; files: ${JSON.stringify(files)}`
   );
 });
 

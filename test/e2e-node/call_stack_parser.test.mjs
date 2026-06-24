@@ -10,13 +10,18 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { Session } from "./harness.mjs";
 
-const skip = process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
-  ? false
-  : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
+const skip =
+  process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
+    ? false
+    : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
 
 let s;
-before(async () => { if (!skip) s = await Session.stoppedAtBreakpoint("parser"); });
-after(async () => { await s?.shutdown(); });
+before(async () => {
+  if (!skip) s = await Session.stoppedAtBreakpoint("parser");
+});
+after(async () => {
+  await s?.shutdown();
+});
 
 test("stopped in parse_factor at parser.cpp (call stack + DWARF)", { skip }, async () => {
   const f0 = await s.topFrame();
@@ -25,17 +30,25 @@ test("stopped in parse_factor at parser.cpp (call stack + DWARF)", { skip }, asy
   assert.ok(f0.line > 0, "line number is positive");
 });
 
-test("call stack is >= 3 frames deep (parse_factor / parse_term / parse_expr)", { skip }, async () => {
-  const frames = await s.frames();
-  assert.ok(frames.length >= 3, `expected >= 3 frames, got ${frames.length}`);
-});
+test(
+  "call stack is >= 3 frames deep (parse_factor / parse_term / parse_expr)",
+  { skip },
+  async () => {
+    const frames = await s.frames();
+    assert.ok(frames.length >= 3, `expected >= 3 frames, got ${frames.length}`);
+  }
+);
 
-test("parent frame names: frame0=parse_factor, frame1=parse_term, frame2=parse_expr", { skip }, async () => {
-  const frames = await s.frames();
-  assert.match(frames[0].function, /parse_factor/);
-  assert.match(frames[1].function, /parse_term/);
-  assert.match(frames[2].function, /parse_expr/);
-});
+test(
+  "parent frame names: frame0=parse_factor, frame1=parse_term, frame2=parse_expr",
+  { skip },
+  async () => {
+    const frames = await s.frames();
+    assert.match(frames[0].function, /parse_factor/);
+    assert.match(frames[1].function, /parse_term/);
+    assert.match(frames[2].function, /parse_expr/);
+  }
+);
 
 test("local 'value' is visible in parse_factor frame", { skip }, async () => {
   const value = await s.variable(0, "value");

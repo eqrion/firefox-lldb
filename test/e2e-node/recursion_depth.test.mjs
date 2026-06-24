@@ -9,13 +9,18 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { Session } from "./harness.mjs";
 
-const skip = process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
-  ? false
-  : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
+const skip =
+  process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
+    ? false
+    : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
 
 let s;
-before(async () => { if (!skip) s = await Session.attach("factorial"); });
-after(async () => { await s?.shutdown(); });
+before(async () => {
+  if (!skip) s = await Session.attach("factorial");
+});
+after(async () => {
+  await s?.shutdown();
+});
 
 test("factorial recursion: stack has >= 2 factorial frames", { skip }, async () => {
   await s.breakpointByName("compute_factorial");
@@ -28,6 +33,6 @@ test("factorial recursion: stack has >= 2 factorial frames", { skip }, async () 
   const factorialFrames = frames.filter((f) => /factorial/.test(f.function));
   assert.ok(
     factorialFrames.length >= 2,
-    `expected >= 2 factorial frames; got ${factorialFrames.length}: ${JSON.stringify(frames.map((f) => f.function))}`,
+    `expected >= 2 factorial frames; got ${factorialFrames.length}: ${JSON.stringify(frames.map((f) => f.function))}`
   );
 });

@@ -21,16 +21,61 @@ const REPO = path.resolve(HERE, "..", "..");
 
 // Mirrors test/e2e/harness.py FIXTURES.
 export const FIXTURES = {
-  factorial: { pageDir: "test/e2e/fixtures/simple",   fire: "runFactorial()", breakFunc: "compute_factorial", file: "math.cpp"   },
-  sum_range: { pageDir: "test/e2e/fixtures/simple",   fire: "runSum()",       breakFunc: "sum_range",         file: "math.cpp"   },
-  oop:       { pageDir: "test/e2e/fixtures/oop",      fire: "run()",          breakFunc: "area",              file: "oop.cpp"    },
-  parser:    { pageDir: "test/e2e/fixtures/parser",   fire: "run()",          breakFunc: "parse_factor",      file: "parser.cpp" },
-  ledger:    { pageDir: "test/e2e/fixtures/ledger",   fire: "run()",          breakFunc: "apply_transaction", file: "ledger.cpp" },
-  types:     { pageDir: "test/e2e/fixtures/types",    fire: "run()",          breakFunc: "stop_here",         file: "types.cpp"  },
-  heap:      { pageDir: "test/e2e/fixtures/heap",     fire: "run()",          breakFunc: "check_heap",        file: "heap.cpp"   },
-  trap:      { pageDir: "test/e2e/fixtures/trap",     fire: "run()",          breakFunc: "cause_trap",        file: "trap.cpp"   },
-  threaded:  { pageDir: "test/e2e/fixtures/threaded", fire: "runMatmul()",    breakFunc: "matmul_threaded",   file: "matmul.cpp" },
-  mixed_js:  { pageDir: "test/e2e/fixtures/mixed-js", fire: "runApp()",       breakFunc: "compute_factorial", file: "math.cpp"   },
+  factorial: {
+    pageDir: "test/e2e/fixtures/simple",
+    fire: "runFactorial()",
+    breakFunc: "compute_factorial",
+    file: "math.cpp",
+  },
+  sum_range: {
+    pageDir: "test/e2e/fixtures/simple",
+    fire: "runSum()",
+    breakFunc: "sum_range",
+    file: "math.cpp",
+  },
+  oop: { pageDir: "test/e2e/fixtures/oop", fire: "run()", breakFunc: "area", file: "oop.cpp" },
+  parser: {
+    pageDir: "test/e2e/fixtures/parser",
+    fire: "run()",
+    breakFunc: "parse_factor",
+    file: "parser.cpp",
+  },
+  ledger: {
+    pageDir: "test/e2e/fixtures/ledger",
+    fire: "run()",
+    breakFunc: "apply_transaction",
+    file: "ledger.cpp",
+  },
+  types: {
+    pageDir: "test/e2e/fixtures/types",
+    fire: "run()",
+    breakFunc: "stop_here",
+    file: "types.cpp",
+  },
+  heap: {
+    pageDir: "test/e2e/fixtures/heap",
+    fire: "run()",
+    breakFunc: "check_heap",
+    file: "heap.cpp",
+  },
+  trap: {
+    pageDir: "test/e2e/fixtures/trap",
+    fire: "run()",
+    breakFunc: "cause_trap",
+    file: "trap.cpp",
+  },
+  threaded: {
+    pageDir: "test/e2e/fixtures/threaded",
+    fire: "runMatmul()",
+    breakFunc: "matmul_threaded",
+    file: "matmul.cpp",
+  },
+  mixed_js: {
+    pageDir: "test/e2e/fixtures/mixed-js",
+    fire: "runApp()",
+    breakFunc: "compute_factorial",
+    file: "math.cpp",
+  },
 };
 
 const MIME = { ".html": "text/html", ".js": "text/javascript", ".wasm": "application/wasm" };
@@ -38,7 +83,8 @@ const MIME = { ".html": "text/html", ".js": "text/javascript", ".wasm": "applica
 function startStaticServer(pageDir) {
   const dir = path.join(REPO, pageDir);
   const server = http.createServer((req, res) => {
-    const rel = decodeURIComponent((req.url ?? "/").split("?")[0]).replace(/^\/+/, "") || "index.html";
+    const rel =
+      decodeURIComponent((req.url ?? "/").split("?")[0]).replace(/^\/+/, "") || "index.html";
     try {
       const body = readFileSync(path.join(dir, rel));
       res.writeHead(200, {
@@ -103,9 +149,16 @@ export class Session {
 
     const rdpPort = await freePort();
     const args = parseCliArgs([
-      "--launch", ...(headless ? ["--headless"] : []),
-      "--port", "0", "--rdp-port", String(rdpPort),
-      "--url", url, "--fire", fire ?? fx.fire,
+      "--launch",
+      ...(headless ? ["--headless"] : []),
+      "--port",
+      "0",
+      "--rdp-port",
+      String(rdpPort),
+      "--url",
+      url,
+      "--fire",
+      fire ?? fx.fire,
     ]);
     const handle = await startPlatformServer(args, {
       wrapConnectPort: (port) => session.#bridgeTcp(port),
@@ -169,17 +222,37 @@ export class Session {
     return session;
   }
 
-  command(cmd) { return this.#client.sessionCommand(cmd); }
-  state() { return this.#client.sessionState(); }
-  frames() { return this.#client.sessionFrames(); }
-  variable(frameIndex, name) { return this.#client.sessionVariable(frameIndex, name); }
+  command(cmd) {
+    return this.#client.sessionCommand(cmd);
+  }
+  state() {
+    return this.#client.sessionState();
+  }
+  frames() {
+    return this.#client.sessionFrames();
+  }
+  variable(frameIndex, name) {
+    return this.#client.sessionVariable(frameIndex, name);
+  }
 
-  breakpointByName(name) { return this.command(`breakpoint set -n ${name}`); }
-  breakpointByLocation(file, line) { return this.command(`breakpoint set -f ${file} -l ${line}`); }
-  continue() { return this.command("process continue"); }
-  stepInstruction() { return this.command("thread step-inst"); }
-  stepOver() { return this.command("thread step-over"); }
-  stepOut() { return this.command("thread step-out"); }
+  breakpointByName(name) {
+    return this.command(`breakpoint set -n ${name}`);
+  }
+  breakpointByLocation(file, line) {
+    return this.command(`breakpoint set -f ${file} -l ${line}`);
+  }
+  continue() {
+    return this.command("process continue");
+  }
+  stepInstruction() {
+    return this.command("thread step-inst");
+  }
+  stepOver() {
+    return this.command("thread step-over");
+  }
+  stepOut() {
+    return this.command("thread step-out");
+  }
 
   async topFrame() {
     return (await this.frames())[0];

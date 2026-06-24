@@ -11,24 +11,37 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { Session } from "./harness.mjs";
 
-const skip = process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
-  ? false
-  : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
+const skip =
+  process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
+    ? false
+    : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
 
 let s;
-before(async () => { if (!skip) s = await Session.stoppedAtBreakpoint("factorial"); });
-after(async () => { await s?.shutdown(); });
-
-test("wasm frame has a valid file and positive line number (DWARF source info)", { skip }, async () => {
-  const f0 = await s.topFrame();
-  assert.match(f0.function, /compute_factorial/);
-  assert.equal(f0.file?.endsWith("math.cpp"), true);
-  assert.ok(f0.line > 0, "line number is positive");
+before(async () => {
+  if (!skip) s = await Session.stoppedAtBreakpoint("factorial");
+});
+after(async () => {
+  await s?.shutdown();
 });
 
-test("a JS caller frame has a valid file ending in .js with a positive line number", { skip }, async () => {
-  const frames = await s.frames();
-  const jsFrame = frames.find((f) => f.file?.endsWith(".js"));
-  assert.ok(jsFrame, "no JS caller frame found in call stack");
-  assert.ok(jsFrame.line > 0, `JS frame line number is positive (got ${jsFrame.line})`);
-});
+test(
+  "wasm frame has a valid file and positive line number (DWARF source info)",
+  { skip },
+  async () => {
+    const f0 = await s.topFrame();
+    assert.match(f0.function, /compute_factorial/);
+    assert.equal(f0.file?.endsWith("math.cpp"), true);
+    assert.ok(f0.line > 0, "line number is positive");
+  }
+);
+
+test(
+  "a JS caller frame has a valid file ending in .js with a positive line number",
+  { skip },
+  async () => {
+    const frames = await s.frames();
+    const jsFrame = frames.find((f) => f.file?.endsWith(".js"));
+    assert.ok(jsFrame, "no JS caller frame found in call stack");
+    assert.ok(jsFrame.line > 0, `JS frame line number is positive (got ${jsFrame.line})`);
+  }
+);

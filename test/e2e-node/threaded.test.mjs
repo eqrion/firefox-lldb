@@ -10,20 +10,24 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { Session } from "./harness.mjs";
 
-const skip = process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
-  ? false
-  : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
+const skip =
+  process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
+    ? false
+    : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
 
 let s;
-before(async () => { if (!skip) s = await Session.stoppedAtBreakpoint("threaded"); });
-after(async () => { await s?.shutdown(); });
+before(async () => {
+  if (!skip) s = await Session.stoppedAtBreakpoint("threaded");
+});
+after(async () => {
+  await s?.shutdown();
+});
 
 test("thread list shows the main thread plus at least one pool worker", { skip }, async () => {
   const res = await s.command("thread list");
   // Each thread appears on its own line starting with "thread #N"
   const threadLines = res.output.split("\n").filter((l) => /thread #\d/.test(l));
-  assert.ok(threadLines.length >= 2,
-    `expected >= 2 threads; thread list:\n${res.output}`);
+  assert.ok(threadLines.length >= 2, `expected >= 2 threads; thread list:\n${res.output}`);
 });
 
 test("breakpoint fires in matmul_threaded (frame0 is matmul_threaded)", { skip }, async () => {

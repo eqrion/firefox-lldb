@@ -12,23 +12,32 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { Session } from "./harness.mjs";
 
-const skip = process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
-  ? false
-  : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
+const skip =
+  process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
+    ? false
+    : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
 
 let s;
-before(async () => { if (!skip) s = await Session.attach("trap"); });
-after(async () => { await s?.shutdown(); });
-
-test("wasm integer divide-by-zero surfaces as exception stop reason", {
-  skip,
-  todo: "Firefox does not pause on wasm traps with pauseOnExceptions=false (process exits instead)",
-}, async () => {
-  await s.breakpointByName("cause_trap");
-  await s.continue();
-  assert.equal((await s.state()).reason, "breakpoint");
-
-  await s.stepOver();
-  const st = await s.state();
-  assert.equal(st.reason, "exception", `expected exception, got ${st.reason}`);
+before(async () => {
+  if (!skip) s = await Session.attach("trap");
 });
+after(async () => {
+  await s?.shutdown();
+});
+
+test(
+  "wasm integer divide-by-zero surfaces as exception stop reason",
+  {
+    skip,
+    todo: "Firefox does not pause on wasm traps with pauseOnExceptions=false (process exits instead)",
+  },
+  async () => {
+    await s.breakpointByName("cause_trap");
+    await s.continue();
+    assert.equal((await s.state()).reason, "breakpoint");
+
+    await s.stepOver();
+    const st = await s.state();
+    assert.equal(st.reason, "exception", `expected exception, got ${st.reason}`);
+  }
+);

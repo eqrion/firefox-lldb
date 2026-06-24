@@ -16,9 +16,10 @@ import { Session } from "./harness.mjs";
 const JS_BP_FILE = "math.js";
 const JS_BP_LINE = 725;
 
-const skip = process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
-  ? false
-  : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
+const skip =
+  process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
+    ? false
+    : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
 
 let s;
 before(async () => {
@@ -33,7 +34,9 @@ before(async () => {
   if (bpId != null) await s.deleteBreakpoint(bpId);
   await s.continue(); // proceed to JS bp on the second runFactorial call
 });
-after(async () => { await s?.shutdown(); });
+after(async () => {
+  await s?.shutdown();
+});
 
 test("JS breakpoint fires: stopped in math.js at/near line 725", { skip }, async () => {
   const st = await s.state();

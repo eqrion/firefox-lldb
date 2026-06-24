@@ -10,13 +10,18 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { Session } from "./harness.mjs";
 
-const skip = process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
-  ? false
-  : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
+const skip =
+  process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
+    ? false
+    : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
 
 let s;
-before(async () => { if (!skip) s = await Session.stoppedAtBreakpoint("factorial"); });
-after(async () => { await s?.shutdown(); });
+before(async () => {
+  if (!skip) s = await Session.stoppedAtBreakpoint("factorial");
+});
+after(async () => {
+  await s?.shutdown();
+});
 
 test("JS caller frames are visible above the wasm breakpoint frame", { skip }, async () => {
   const frames = await s.frames();
@@ -26,8 +31,10 @@ test("JS caller frames are visible above the wasm breakpoint frame", { skip }, a
 
   const jsFrameIdx = frames.findIndex((f) => f.file?.endsWith(".js"));
   const frameFiles = frames.map((f) => f.file);
-  assert.ok(jsFrameIdx > 0,
-    `no JS frame found above the wasm frame; files: ${JSON.stringify(frameFiles)}`);
+  assert.ok(
+    jsFrameIdx > 0,
+    `no JS frame found above the wasm frame; files: ${JSON.stringify(frameFiles)}`
+  );
 });
 
 test("watchpoint attempt does not crash the session", { skip }, async () => {

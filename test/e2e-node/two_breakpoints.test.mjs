@@ -9,24 +9,33 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { Session } from "./harness.mjs";
 
-const skip = process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
-  ? false
-  : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
+const skip =
+  process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
+    ? false
+    : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
 
 let s;
-before(async () => { if (!skip) s = await Session.attach("factorial"); });
-after(async () => { await s?.shutdown(); });
-
-test("two breakpoints fire in execution order: compute_factorial then factorial", { skip }, async () => {
-  await s.breakpointByName("compute_factorial");
-  await s.breakpointByName("factorial");
-
-  await s.continue();
-  const f0first = await s.topFrame();
-  assert.match(f0first.function, /compute_factorial/);
-
-  await s.continue();
-  const f0second = await s.topFrame();
-  assert.match(f0second.function, /factorial/);
-  assert.doesNotMatch(f0second.function, /compute_/);
+before(async () => {
+  if (!skip) s = await Session.attach("factorial");
 });
+after(async () => {
+  await s?.shutdown();
+});
+
+test(
+  "two breakpoints fire in execution order: compute_factorial then factorial",
+  { skip },
+  async () => {
+    await s.breakpointByName("compute_factorial");
+    await s.breakpointByName("factorial");
+
+    await s.continue();
+    const f0first = await s.topFrame();
+    assert.match(f0first.function, /compute_factorial/);
+
+    await s.continue();
+    const f0second = await s.topFrame();
+    assert.match(f0second.function, /factorial/);
+    assert.doesNotMatch(f0second.function, /compute_/);
+  }
+);

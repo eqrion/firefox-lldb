@@ -10,13 +10,18 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { Session } from "./harness.mjs";
 
-const skip = process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
-  ? false
-  : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
+const skip =
+  process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
+    ? false
+    : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
 
 let s;
-before(async () => { if (!skip) s = await Session.stoppedAtBreakpoint("types"); });
-after(async () => { await s?.shutdown(); });
+before(async () => {
+  if (!skip) s = await Session.stoppedAtBreakpoint("types");
+});
+after(async () => {
+  await s?.shutdown();
+});
 
 // All variables live in frame1 (check_types), not frame0 (stop_here).
 
@@ -29,16 +34,13 @@ test("int32_t i = -42 is readable as signed", { skip }, async () => {
 test("uint32_t u = 0xDEADBEEF is readable as unsigned", { skip }, async () => {
   const v = await s.variable(1, "u");
   assert.equal(v.valid, true);
-  assert.equal(v.unsigned, 0xDEADBEEF);
+  assert.equal(v.unsigned, 0xdeadbeef);
 });
 
 test("float f = 3.14f is readable with correct approximation", { skip }, async () => {
   const v = await s.variable(1, "f");
   assert.equal(v.valid, true);
-  assert.ok(
-    Math.abs(parseFloat(v.value) - 3.14) < 0.01,
-    `expected ~3.14, got ${v.value}`,
-  );
+  assert.ok(Math.abs(parseFloat(v.value) - 3.14) < 0.01, `expected ~3.14, got ${v.value}`);
 });
 
 test("double d = 2.718... is readable with correct approximation", { skip }, async () => {
@@ -46,7 +48,7 @@ test("double d = 2.718... is readable with correct approximation", { skip }, asy
   assert.equal(v.valid, true);
   assert.ok(
     Math.abs(parseFloat(v.value) - 2.718281828) < 0.000001,
-    `expected ~2.718281828, got ${v.value}`,
+    `expected ~2.718281828, got ${v.value}`
   );
 });
 

@@ -89,16 +89,16 @@ npm run connect
 
 ### Flags
 
-| Flag               | Default           | Description                           |
-| ------------------ | ----------------- | ------------------------------------- |
-| `--port`           | `1234`            | Platform server RSP port              |
-| `--rdp-port`       | `6080`            | Firefox RDP port                      |
-| `--url`            | —                 | Page to open in Firefox at startup    |
-| `--firefox`        | system Firefox    | Path to Firefox binary                |
-| `--headless`       | off               | Run Firefox headlessly                |
-| `--launch`         | (default)         | Launch a fresh Firefox                |
-| `--connect`        | —                 | Connect to an already-running Firefox |
-| `--verbose` / `-v` | off               | Log debug output                      |
+| Flag               | Default        | Description                           |
+| ------------------ | -------------- | ------------------------------------- |
+| `--port`           | `1234`         | Platform server RSP port              |
+| `--rdp-port`       | `6080`         | Firefox RDP port                      |
+| `--url`            | —              | Page to open in Firefox at startup    |
+| `--firefox`        | system Firefox | Path to Firefox binary                |
+| `--headless`       | off            | Run Firefox headlessly                |
+| `--launch`         | (default)      | Launch a fresh Firefox                |
+| `--connect`        | —              | Connect to an already-running Firefox |
+| `--verbose` / `-v` | off            | Log debug output                      |
 
 ## What works
 

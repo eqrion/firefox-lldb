@@ -10,19 +10,28 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { Session } from "./harness.mjs";
 
-const skip = process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
-  ? false
-  : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
+const skip =
+  process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
+    ? false
+    : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
 
 let s;
-before(async () => { if (!skip) s = await Session.attach("factorial"); });
-after(async () => { await s?.shutdown(); });
-
-test("source breakpoint at math.cpp:24 resolves and fires at the exact line", { skip }, async () => {
-  await s.breakpointByLocation("math.cpp", 24);
-  await s.continue();
-  const f0 = await s.topFrame();
-  assert.match(f0.function, /compute_factorial/);
-  assert.equal(f0.file?.endsWith("math.cpp"), true);
-  assert.equal(f0.line, 24);
+before(async () => {
+  if (!skip) s = await Session.attach("factorial");
 });
+after(async () => {
+  await s?.shutdown();
+});
+
+test(
+  "source breakpoint at math.cpp:24 resolves and fires at the exact line",
+  { skip },
+  async () => {
+    await s.breakpointByLocation("math.cpp", 24);
+    await s.continue();
+    const f0 = await s.topFrame();
+    assert.match(f0.function, /compute_factorial/);
+    assert.equal(f0.file?.endsWith("math.cpp"), true);
+    assert.equal(f0.line, 24);
+  }
+);

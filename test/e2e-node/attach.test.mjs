@@ -15,13 +15,18 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { Session } from "./harness.mjs";
 
-const skip = process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
-  ? false
-  : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
+const skip =
+  process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
+    ? false
+    : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
 
 let s;
-before(async () => { if (!skip) s = await Session.stoppedAtBreakpoint("factorial"); });
-after(async () => { await s?.shutdown(); });
+before(async () => {
+  if (!skip) s = await Session.stoppedAtBreakpoint("factorial");
+});
+after(async () => {
+  await s?.shutdown();
+});
 
 test("stopped in compute_factorial at math.cpp:24", { skip }, async () => {
   const f0 = await s.topFrame();
@@ -30,12 +35,19 @@ test("stopped in compute_factorial at math.cpp:24", { skip }, async () => {
   assert.equal(f0.line, 24);
 });
 
-test("call stack interleaves the wasm frame with JS frames (qWasmCallStack)", { skip }, async () => {
-  const frames = await s.frames();
-  assert.ok(frames.length >= 2, `expected >= 2 frames, got ${frames.length}`);
-  assert.match(frames[0].function, /compute_factorial/);
-  assert.ok(frames.some((f) => /\.js$/.test(f.file ?? "")), "a JS caller frame is present");
-});
+test(
+  "call stack interleaves the wasm frame with JS frames (qWasmCallStack)",
+  { skip },
+  async () => {
+    const frames = await s.frames();
+    assert.ok(frames.length >= 2, `expected >= 2 frames, got ${frames.length}`);
+    assert.match(frames[0].function, /compute_factorial/);
+    assert.ok(
+      frames.some((f) => /\.js$/.test(f.file ?? "")),
+      "a JS caller frame is present"
+    );
+  }
+);
 
 test("local argument n == 10 (qWasmLocal + DWARF)", { skip }, async () => {
   const n = await s.variable(0, "n");

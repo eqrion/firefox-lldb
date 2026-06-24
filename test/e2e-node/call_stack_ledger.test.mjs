@@ -10,13 +10,18 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { Session } from "./harness.mjs";
 
-const skip = process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
-  ? false
-  : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
+const skip =
+  process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
+    ? false
+    : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
 
 let s;
-before(async () => { if (!skip) s = await Session.stoppedAtBreakpoint("ledger"); });
-after(async () => { await s?.shutdown(); });
+before(async () => {
+  if (!skip) s = await Session.stoppedAtBreakpoint("ledger");
+});
+after(async () => {
+  await s?.shutdown();
+});
 
 test("stopped in apply_transaction at ledger.cpp (call stack + DWARF)", { skip }, async () => {
   const f0 = await s.topFrame();
@@ -38,6 +43,6 @@ test("g_accounts[0].balance is accessible as a global", { skip }, async () => {
   assert.equal(balance.valid, true);
   assert.ok(
     balance.signed === 100 || balance.signed === 70,
-    `expected 100 or 70, got ${balance.signed}`,
+    `expected 100 or 70, got ${balance.signed}`
   );
 });

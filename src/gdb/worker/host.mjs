@@ -86,5 +86,11 @@ export function startGdbServer({ dispatch, port, onInfo, verbose }) {
     }
   });
 
-  return { ready, stop: () => worker.terminate(), get port() { return boundPort; } };
+  return {
+    ready,
+    stop: () => worker.terminate(),
+    get port() {
+      return boundPort;
+    },
+  };
 }
