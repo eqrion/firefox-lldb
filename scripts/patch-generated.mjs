@@ -26,14 +26,32 @@ const MARKER = "let currentSubtask; // jco-patch";
 const ANCHOR =
   "export function instantiate(getCoreModule, imports, instantiateCore = WebAssembly.instantiate) {";
 
+// Patch 2: AsyncSubtask inserted into cstate.handles but never removed.
+// When resolve() fires it calls removeSubtask() on the parent task's array
+// but never calls cstate.handles.remove(), so every completed async call leaks
+// one AsyncSubtask + Waitable + Promise into the RepTable forever. Streams and
+// futures already call cstate.handles.remove() at the equivalent point.
+const MARKER2 = "this.#getComponentState().handles.remove(this.waitableRep()); // jco-patch";
+const ANCHOR2 = "this.#parentTask.removeSubtask(this);";
+
 let src = readFileSync(file, "utf8");
-if (src.includes(MARKER)) {
-  console.log("patch-generated: already patched");
-} else if (src.includes(ANCHOR)) {
+
+if (!src.includes(MARKER)) {
+  if (!src.includes(ANCHOR)) {
+    console.error("patch-generated: anchor 1 not found — jco output changed?");
+    process.exit(1);
+  }
   src = src.replace(ANCHOR, `${ANCHOR}\n  ${MARKER}`);
-  writeFileSync(file, src);
   console.log("patch-generated: applied currentSubtask fix");
-} else {
-  console.error("patch-generated: anchor not found — jco output changed?");
-  process.exit(1);
 }
+
+if (!src.includes(MARKER2)) {
+  if (!src.includes(ANCHOR2)) {
+    console.error("patch-generated: anchor 2 not found — jco output changed?");
+    process.exit(1);
+  }
+  src = src.replace(ANCHOR2, `${ANCHOR2}\n      ${MARKER2}`);
+  console.log("patch-generated: applied AsyncSubtask handles leak fix");
+}
+
+writeFileSync(file, src);

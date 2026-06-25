@@ -555,6 +555,7 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       
       this.#resolved = true;
       this.#parentTask.removeSubtask(this);
+      this.#getComponentState().handles.remove(this.waitableRep()); // jco-patch
     }
     
     getStateNumber() { return this.#state; }

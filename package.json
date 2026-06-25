@@ -44,7 +44,7 @@
     "lldb-wasm": "^0.1.1"
   },
   "devDependencies": {
-    "@bytecodealliance/jco": "^1.24.0",
+    "@bytecodealliance/jco": "1.24.3",
     "@types/node": "^22.10.0",
     "prettier": "^3.0.0",
     "tsx": "^4.19.0",
