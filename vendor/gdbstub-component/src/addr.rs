@@ -180,10 +180,10 @@ impl AddrSpace {
                 if index >= self.memories.len() {
                     return AddrSpaceLookup::Empty;
                 }
-                let size = self.memories[index].size_bytes(d);
-                if u64::from(addr.offset()) >= size {
-                    return AddrSpaceLookup::Empty;
-                }
+                // Do not call size_bytes here: it is an RPC call on the hot
+                // path and creates one jco AsyncSubtask per memory read, which
+                // leaks ~240 bytes per packet and causes OOM during large reads.
+                // #readMemory in rdp-debuggee.ts bounds-checks via JS instead.
                 AddrSpaceLookup::Memory {
                     memory: &self.memories[index],
                     offset: addr.offset(),

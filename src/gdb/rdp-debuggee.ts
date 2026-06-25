@@ -507,14 +507,9 @@ export class RdpDebuggee {
         topActor,
         consoleActor
       )) as { result?: unknown };
-      const size = typeof r.result === "number" ? r.result : 0;
-      // When the evaluation fails or returns 0, return the wasm32 max address
-      // space (2^32). This ensures addr_space.lookup never rejects a valid
-      // 32-bit linear memory address due to a stale or missing size. The
-      // actual read in #readMemory independently bounds-checks via JS.
-      return size > 0 ? size : 0x100000000;
+      return typeof r.result === "number" ? r.result : 0;
     } catch {
-      return 0x100000000;
+      return 0;
     }
   }
 
