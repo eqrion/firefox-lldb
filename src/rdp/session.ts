@@ -153,6 +153,7 @@ export interface FrameForm {
   actor: string;
   type: string; // "wasmcall" | "call" | "global" | ...
   where?: { actor: string; line: number; column: number };
+  callee?: { name?: string; displayName?: string };
   arguments?: unknown[];
 }
 

@@ -86,7 +86,12 @@ function debugAbbrev(): number[] {
   ];
 }
 
-function debugInfo(name: string, compDir: string, lineCount: number): number[] {
+function debugInfo(
+  name: string,
+  compDir: string,
+  lineCount: number,
+  subprogramName: string
+): number[] {
   const body: number[] = [
     0x01, // abbrev 1 = compile_unit
     ...cstr("firefox-lldb"), // DW_AT_producer
@@ -98,7 +103,7 @@ function debugInfo(name: string, compDir: string, lineCount: number): number[] {
     ...u32le(0), // DW_AT_stmt_list = 0
     // child: subprogram
     0x02, // abbrev 2 = subprogram
-    ...cstr(name), // DW_AT_name
+    ...cstr(subprogramName), // DW_AT_name (JS function name, or file name as fallback)
     ...u32le(1), // DW_AT_low_pc
     ...u32le(lineCount + 1), // DW_AT_high_pc
     0x00, // end of children
@@ -185,8 +190,10 @@ export function buildSyntheticModule(opts: {
   name: string;
   compDir: string;
   lineCount: number;
+  /** JS function name to use as the DWARF subprogram name; falls back to `name`. */
+  subprogramName?: string;
 }): SyntheticModule {
-  const { name, compDir, lineCount } = opts;
+  const { name, compDir, lineCount, subprogramName } = opts;
   const safeLineCount = Math.max(lineCount, 1);
 
   // Code section body: 0x00 (no locals) + (safeLineCount+1) NOPs + 0x0b (end)
@@ -212,7 +219,7 @@ export function buildSyntheticModule(opts: {
   const codeSection = [0x0a, ...codeSectionSizeUleb, ...codeSectionPayload];
 
   const abbrev = debugAbbrev();
-  const info = debugInfo(name, compDir, safeLineCount);
+  const info = debugInfo(name, compDir, safeLineCount, subprogramName ?? name);
   const line = debugLine(name, safeLineCount);
 
   const bytes = new Uint8Array([

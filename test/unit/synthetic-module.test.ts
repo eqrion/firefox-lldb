@@ -103,6 +103,22 @@ test(".debug_line header version is 4", () => {
   assert.equal(version, 4);
 });
 
+test("subprogramName overrides the subprogram DW_AT_name while the file name stays in CU", () => {
+  const name = "app.js";
+  const subprogramName = "processNumbers";
+  const { bytecode } = buildSyntheticModule({ name, compDir: "/tmp", lineCount: 5, subprogramName });
+  const info = findCustomSection(bytecode, ".debug_info");
+  assert.ok(info);
+  const text = new TextDecoder().decode(info);
+  // Compile unit DW_AT_name keeps the file name.
+  assert.ok(text.includes(name), `.debug_info should still contain file name "${name}"`);
+  // Subprogram DW_AT_name uses the provided function name.
+  assert.ok(
+    text.includes(subprogramName),
+    `.debug_info should contain subprogram name "${subprogramName}"`
+  );
+});
+
 test("lineCount=0 is handled gracefully (treated as 1)", () => {
   const { bytecode, codeOffset } = buildSyntheticModule({
     name: "e.js",

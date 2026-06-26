@@ -359,7 +359,8 @@ export class RdpDebuggee {
                 await this.#refreshJsSources();
               }
               const url = this.#sourceActorToUrl.get(actor) ?? actor;
-              await this.#ensureSynthetic(url, actor);
+              const calleeName = f.callee?.displayName || f.callee?.name;
+              await this.#ensureSynthetic(url, actor, calleeName);
             }
           }
           frames = rawFrames;
@@ -378,7 +379,7 @@ export class RdpDebuggee {
     }
   }
 
-  async #ensureSynthetic(url: string, actor: string): Promise<void> {
+  async #ensureSynthetic(url: string, actor: string, calleeName?: string): Promise<void> {
     if (this.#syntheticByUrl.has(url)) return;
     this.#sourceActorToUrl.set(actor, url);
     let text = "";
@@ -397,7 +398,12 @@ export class RdpDebuggee {
         /* best-effort */
       }
     }
-    const syn = buildSyntheticModule({ name, compDir: dirname(filePath), lineCount });
+    const syn = buildSyntheticModule({
+      name,
+      compDir: dirname(filePath),
+      lineCount,
+      subprogramName: calleeName,
+    });
     this.#syntheticByUrl.set(url, syn);
     this.#moduleRef(url);
   }
