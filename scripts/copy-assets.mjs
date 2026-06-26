@@ -12,3 +12,4 @@ for (const file of workerFiles.filter((f) => extname(f) === ".mjs")) {
 }
 
 await cp("src/gdb/generated", "dist/gdb/generated", { recursive: true });
+await cp("src/sourcemap/generated", "dist/sourcemap/generated", { recursive: true });

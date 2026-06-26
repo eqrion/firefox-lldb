@@ -1,0 +1,40 @@
+package firefox-lldb:source-map@0.1.0;
+
+world converter {
+  export source-map-converter;
+}
+
+interface source-map-converter {
+  /// What a wasm module offers in the way of debug info.
+  record inspect-result {
+    /// The module already carries `.debug_*` sections.
+    has-dwarf: bool,
+    /// The contents of a `sourceMappingURL` custom section, if present.
+    source-map-url: option<string>,
+  }
+
+  /// A source file carried inline in the source map's `sourcesContent`.
+  record source-file {
+    path: string,
+    content: list<u8>,
+  }
+
+  record convert-result {
+    /// The input wasm with synthesized `.debug_*` sections appended.
+    wasm: list<u8>,
+    /// Inline source files from the source map (may be empty).
+    sources: list<source-file>,
+  }
+
+  /// Inspect a wasm module to decide whether (and how) to convert it.
+  inspect: func(wasm: list<u8>) -> result<inspect-result, string>;
+
+  /// Append DWARF synthesized from a source map to `wasm`. When `source-map`
+  /// is provided it is used directly; otherwise the module's `sourceMappingURL`
+  /// is resolved (only `data:` URLs can be resolved without host I/O).
+  convert: func(
+    wasm: list<u8>,
+    source-map: option<list<u8>>,
+    comp-dir: option<string>,
+  ) -> result<convert-result, string>;
+}
