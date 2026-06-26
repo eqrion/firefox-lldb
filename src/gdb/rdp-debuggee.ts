@@ -33,7 +33,7 @@
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
 import { tmpdir } from "node:os";
-import type { RdpWasmSession, FrameForm, StoppedEvent } from "../rdp/session.js";
+import type { RdpWasmSession, FrameForm, StoppedEvent, PauseEvent } from "../rdp/session.js";
 import { buildSyntheticModule } from "./synthetic-module.js";
 
 function urlBasename(url: string): string {
@@ -120,9 +120,10 @@ export class RdpDebuggee {
     this.#onFirstContinue = opts?.onFirstContinue ?? null;
 
     session.on("stopped", (e: StoppedEvent) => {
+      if (!this.#resolveStopped) return;
       this.#lastPauseReason =
         (e.pausePacket as { why?: { type?: string } })?.why?.type ?? "breakpoint";
-      this.#resolveStopped?.(e);
+      this.#resolveStopped(e);
       this.#resolveStopped = null;
       this.#rejectStopped = null;
     });
@@ -589,6 +590,31 @@ export class RdpDebuggee {
     this.#session.interrupt(tid);
     await this.#stopped;
     await this.#snapshotAll();
+  }
+
+  /**
+   * Send an RDP interrupt to all running threads, then force-resolve the
+   * pending #stopped promise so EventFuture.finish unblocks immediately.
+   * Called when the user presses Ctrl-C while the target is running.
+   *
+   * The RDP interrupt and the "frames" request (from #snapshotAll) both go
+   * into the same socket queue, so Firefox processes them in order: pause
+   * first, then answer "frames" — giving us a real snapshot without waiting.
+   */
+  triggerInterrupt(): void {
+    for (const tid of this.#session.listTids()) {
+      try {
+        this.#session.interrupt(tid);
+      } catch {
+        /* ignore unknown-tid errors */
+      }
+    }
+    if (this.#resolveStopped) {
+      this.#lastPauseReason = "signal";
+      this.#resolveStopped({ tid: this.#session.stoppedTid, pausePacket: {} as PauseEvent });
+      this.#resolveStopped = null;
+      this.#rejectStopped = null;
+    }
   }
 
   #armStopped(): void {

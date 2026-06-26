@@ -28,6 +28,7 @@ export class ReplSession {
   #repl;
   #out = "";
   #waiters = [];
+  #triggerInterrupt;
   session;
 
   async #bridgeTcp(port) {
@@ -82,6 +83,7 @@ export class ReplSession {
       getSession: () => rs.session,
       input: rs.#input,
       output,
+      onTargetInterrupt: () => rs.#triggerInterrupt?.(),
     });
 
     const rdpPort = await freePort();
@@ -99,8 +101,9 @@ export class ReplSession {
     ]);
     const handle = await startPlatformServer(args, {
       wrapConnectPort: (port) => rs.#bridgeTcp(port),
-      onSession: (s) => {
+      onSession: (s, interrupt) => {
         rs.session = s;
+        rs.#triggerInterrupt = interrupt;
         void s.streamConsole((m) => rs.#repl.printConsole(m));
       },
     });
@@ -153,6 +156,19 @@ export class ReplSession {
 
   interrupt() {
     this.#input.write("\x03");
+  }
+
+  waitFor(text, ms = 8000) {
+    return new Promise((resolve, reject) => {
+      const deadline = Date.now() + ms;
+      const check = () => {
+        if (this.#out.includes(text)) return resolve();
+        if (Date.now() > deadline)
+          return reject(new Error(`timeout waiting for ${JSON.stringify(text)}; got: ${JSON.stringify(this.#out.slice(-300))}`));
+        this.#waiters.push(check);
+      };
+      check();
+    });
   }
 
   output() {

@@ -183,8 +183,10 @@ export interface StartOptions {
    * a `process attach --plugin wasm --pid N` hint to stderr (for native lldb). */
   onTab?: (tab: TabInfo, pid: number) => void;
   /** Called with each per-tab RDP session as it is created (the in-process
-   * embedding uses this to drive `js` commands and console streaming). */
-  onSession?: (session: RdpWasmSession) => void;
+   * embedding uses this to drive `js` commands and console streaming).
+   * The second argument interrupts the running target: sends RDP pauses to all
+   * threads and immediately unblocks the gdbstub's EventFuture.finish. */
+  onSession?: (session: RdpWasmSession, interrupt: () => void) => void;
 }
 
 export interface PlatformServerHandle {
@@ -241,7 +243,6 @@ export async function startPlatformServer(
     const session = launching
       ? await connectWithRetry(args.rdpPort, resolvedActor)
       : await RdpWasmSession.start(args.rdpPort, "127.0.0.1", resolvedActor);
-    opts.onSession?.(session);
 
     // Close the session on any failure past this point; otherwise a launch that
     // throws (e.g. waitForWasm times out) leaks the RDP watcher connection, and
@@ -283,6 +284,7 @@ export async function startPlatformServer(
         : undefined;
 
       const debuggee = new RdpDebuggee(session, onFirstContinue ? { onFirstContinue } : undefined);
+      opts.onSession?.(session, () => debuggee.triggerInterrupt());
 
       // Force a genuine RDP all-stop and snapshot before the component starts.
       // The component's startup update_on_stop reads the stop state once; priming
