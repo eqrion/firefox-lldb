@@ -50,7 +50,11 @@ export class RdpClient extends EventEmitter {
     super();
     this.#transport = transport;
     let resolveReady!: (p: RdpPacket) => void;
-    this.#ready = new Promise((r) => (resolveReady = r));
+    let rejectReady!: (e: Error) => void;
+    this.#ready = new Promise((r, j) => {
+      resolveReady = r;
+      rejectReady = j;
+    });
     let gotRoot = false;
 
     transport.on("packet", (packet: RdpPacket) => {
@@ -79,6 +83,8 @@ export class RdpClient extends EventEmitter {
     transport.on("error", (e) => this.emit("error", e));
     transport.on("close", () => {
       this.emit("close");
+      // Unblock the initial connect() if the root greeting never arrived.
+      rejectReady(new Error("RDP connection closed before root greeting"));
       // Reject any in-flight requests so callers don't hang forever.
       const err = new Error("RDP connection closed");
       for (const queue of this.#pending.values()) {

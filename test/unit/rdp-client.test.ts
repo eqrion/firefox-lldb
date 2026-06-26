@@ -32,6 +32,31 @@ function startFakeRdpServer(
   });
 }
 
+test("RdpClient.connect() rejects if the transport closes before the root greeting", async () => {
+  // Server that closes immediately without sending a greeting.
+  let connSocket: net.Socket | null = null;
+  const srvP = new Promise<{ port: number; close: () => void }>((resolve) => {
+    const srv = net.createServer((sock) => {
+      connSocket = sock;
+      sock.destroy(); // close without sending any data
+    });
+    srv.listen(0, "127.0.0.1", () => {
+      const port = (srv.address() as net.AddressInfo).port;
+      resolve({ port, close: () => { connSocket?.destroy(); srv.close(); } });
+    });
+  });
+  const srv = await srvP;
+
+  // connect() should reject — not hang — when the greeting never arrives.
+  await assert.rejects(
+    RdpClient.connect(srv.port),
+    /closed/i,
+    "connect() should reject when the transport closes without a root greeting"
+  );
+
+  srv.close();
+});
+
 test("pending request() rejects when connection closes before reply", async () => {
   const srv = await startFakeRdpServer();
   const client = await RdpClient.connect(srv.port);
