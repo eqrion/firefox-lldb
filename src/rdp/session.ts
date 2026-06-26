@@ -390,11 +390,16 @@ export class RdpWasmSession extends EventEmitter {
     this.#jsActorByUrl.clear();
     this.#wasmActorByUrl.clear();
 
+    // Keep a reference to the cleanup function so we can call it if navigateTo
+    // throws before we reach `await target` (otherwise the listeners leak).
+    const cleanupRef = { fn: null as (() => void) | null };
     const target = new Promise<void>((resolve, reject) => {
       const cleanup = () => {
+        cleanupRef.fn = null;
         this.off("target", onTarget);
         this.off("close", onClose);
       };
+      cleanupRef.fn = cleanup;
       const onTarget = (t: ThreadInfo) => {
         if (t.isTopLevel && t.url === url) {
           cleanup();
@@ -408,8 +413,13 @@ export class RdpWasmSession extends EventEmitter {
       this.on("target", onTarget);
       this.on("close", onClose);
     });
-    await this.#client.request(this.#tabActor, { type: "navigateTo", url, waitForLoad: true });
-    await target;
+    try {
+      await this.#client.request(this.#tabActor, { type: "navigateTo", url, waitForLoad: true });
+      await target;
+    } catch (err) {
+      cleanupRef.fn?.();
+      throw err;
+    }
   }
 
   /** Find the ThreadInfo for a tid; throw if unknown. */
