@@ -55,6 +55,7 @@ export async function watchFirefoxTabs(
   onTabs: (tabs: TabInfo[]) => void
 ): Promise<void> {
   const client = await RdpClient.connect(port, host);
+  client.on("error", () => {}); // prevent unhandled-error crashes on malformed data
   client.registerEventType("tabListChanged");
 
   const query = async () => {
@@ -93,6 +94,7 @@ export async function watchAndPrimeFirefoxTabs(
   onTabs: (tabs: TabInfo[]) => void
 ): Promise<void> {
   const client = await RdpClient.connect(port, host);
+  client.on("error", () => {}); // prevent unhandled-error crashes on malformed data
   client.registerEventType("tabListChanged");
 
   const primedActors = new Set<string>();
@@ -221,9 +223,12 @@ export class RdpWasmSession extends EventEmitter {
   private constructor(client: RdpClient) {
     super();
     this.#client = client;
-    // Forward the transport close so consumers (e.g. RdpDebuggee) can unblock
-    // any promises that wait for RDP events (stopped, navigate target, etc.).
+    // Forward transport close so consumers can unblock pending promises.
     client.on("close", () => this.emit("close"));
+    // Absorb transport errors (malformed data, JSON parse failures) so an
+    // unhandled 'error' event doesn't crash the process. The socket will also
+    // emit 'close' immediately after, which triggers proper cleanup.
+    client.on("error", () => {});
   }
 
   // --- public accessors ---
