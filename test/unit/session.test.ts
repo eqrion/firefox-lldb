@@ -923,6 +923,55 @@ test("frames() rejects immediately when session closes while waiting", async () 
   session.close();
 });
 
+test("navigate() clears stale source-actor caches so post-navigation breakpoints snap correctly", async () => {
+  const srv = new FakeRdpServer();
+  await srv.listen();
+  const session = await srv.acceptSession();
+
+  srv.targetAvailable("thread1", { isTopLevel: true, url: "http://example.com/v1.html" });
+  await sleep(200);
+
+  // Simulate jsSources() populating #jsActorByUrl with an actor for the old page.
+  srv.onNext(
+    (r) => r.type === "sources",
+    () => ({
+      from: "thread1",
+      sources: [{ actor: "oldJsActor", url: "http://example.com/app.js", introductionType: "scriptElement" }],
+    })
+  );
+  await session.jsSources();
+
+  // Navigate to a new page — should clear the stale actor cache.
+  srv.onNext(
+    (r) => r.type === "navigateTo",
+    () => {
+      srv.targetDestroyed("thread1");
+      srv.targetAvailable("thread2", { isTopLevel: true, url: "http://example.com/v2.html" });
+      return { from: "tab1" };
+    }
+  );
+  await session.navigate("http://example.com/v2.html");
+
+  // After navigation, jsSources() returns a different actor for the same URL.
+  srv.onNext(
+    (r) => r.type === "sources",
+    () => ({
+      from: "thread2",
+      sources: [{ actor: "newJsActor", url: "http://example.com/app.js", introductionType: "scriptElement" }],
+    })
+  );
+  const sources = await session.jsSources();
+
+  // The old actor should be gone; the new actor should be registered.
+  assert.ok(
+    sources.some((s) => s.actor === "newJsActor"),
+    "new actor should be registered after navigation"
+  );
+
+  session.close();
+  srv.close();
+});
+
 test("evalJS rejects immediately when session closes while waiting for evaluationResult", async () => {
   const srv = new FakeRdpServer();
   await srv.listen();

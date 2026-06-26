@@ -383,6 +383,12 @@ export class RdpWasmSession extends EventEmitter {
         this.#interruptedTids.delete(tid);
       }
     }
+    // Clear source-actor caches — actors are scoped to an RDP connection and
+    // become invalid after navigation. Stale actors cause breakpoint-position
+    // queries (#snapJsLocation, wasmBreakpointOffsets) to fail silently and
+    // fall back to un-snapped positions, which Firefox may ignore.
+    this.#jsActorByUrl.clear();
+    this.#wasmActorByUrl.clear();
 
     const target = new Promise<void>((resolve, reject) => {
       const cleanup = () => {
