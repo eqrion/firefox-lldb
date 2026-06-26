@@ -103,10 +103,12 @@ export async function watchAndPrimeFirefoxTabs(
     if (primedActors.has(tabActor)) return;
     primedActors.add(tabActor);
     try {
-      const { actor: watcher } = (await client.request(tabActor, {
+      const watcherR = await client.request(tabActor, {
         type: "getWatcher",
         isServerTargetSwitchingEnabled: true,
-      })) as { actor: string };
+      });
+      const watcher = watcherR.actor as string | undefined;
+      if (!watcher) throw new Error("no watcher actor");
       const cfg = await client.request(watcher, { type: "getThreadConfigurationActor" });
       const configActor = ((cfg.configuration as { actor?: string })?.actor ??
         cfg.configuration) as string;
@@ -275,11 +277,13 @@ export class RdpWasmSession extends EventEmitter {
     if (!tab) throw new Error("no Firefox tab found (Firefox may still be starting)");
     this.#tabActor = tab.actor;
 
-    const { actor: watcher } = await this.#client.request(this.#tabActor, {
+    const watcherResp = await this.#client.request(this.#tabActor, {
       type: "getWatcher",
       isServerTargetSwitchingEnabled: true,
     });
-    this.#watcher = watcher as string;
+    const watcher = watcherResp.actor as string | undefined;
+    if (!watcher) throw new Error("Firefox did not return a watcher actor");
+    this.#watcher = watcher;
 
     const cfg = await this.#client.request(this.#watcher, {
       type: "getThreadConfigurationActor",
