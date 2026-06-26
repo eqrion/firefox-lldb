@@ -636,6 +636,7 @@ export class RdpWasmSession extends EventEmitter {
     });
     return Object.keys((positions ?? {}) as Record<string, number[]>)
       .map(Number)
+      .filter((n) => !Number.isNaN(n))
       .sort((a, b) => a - b);
   }
 

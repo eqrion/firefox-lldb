@@ -205,6 +205,46 @@ test("concurrent qLaunchGDBServer for same tab returns identical pid/port", asyn
   await sp.killAll();
 });
 
+test("qKillSpawnedProcess then qLaunchGDBServer launches a fresh server", async () => {
+  // Simulates the detach → reattach flow: kill the old server, then launch a new one.
+  let launchCount = 0;
+  const countingLauncher: GdbServerLauncher = async ({ port }) => {
+    launchCount++;
+    const srv = new RspServer({ async handle() { return ""; } }, { singleConnection: true });
+    const boundPort = await srv.listen(port);
+    return { port: boundPort, stop: () => srv.close() };
+  };
+  const sp = new GdbServerSpawner(countingLauncher);
+  const ps = new PlatformServer({
+    spawner: sp,
+    listTabs: async () => [{ actor: "tab-reattach", url: "http://example.com/", title: "" }],
+  });
+  const srv = new RspServer(ps);
+  const srvPort = await srv.listen(0);
+  const cl = await RspClient.connect(srvPort);
+
+  const listResp = await cl.requestText("qfProcessInfo");
+  const pid = listResp.match(/pid:(\d+);/)![1];
+
+  // First attach.
+  const launch1 = await cl.requestText(`qLaunchGDBServer;host:localhost;pid:${pid};`);
+  const serverPid1 = launch1.match(/pid:(\d+);/)![1];
+  assert.equal(launchCount, 1, "first launch creates one server");
+
+  // Detach (kill the spawned server).
+  assert.equal(await cl.requestText(`qKillSpawnedProcess:${serverPid1}`), "OK");
+
+  // Re-attach to the same tab — must launch a NEW server.
+  const launch2 = await cl.requestText(`qLaunchGDBServer;host:localhost;pid:${pid};`);
+  const serverPid2 = launch2.match(/pid:(\d+);/)![1];
+  assert.equal(launchCount, 2, "second launch creates another server");
+  assert.notEqual(serverPid1, serverPid2, "new server has a different spawner PID");
+
+  cl.close();
+  await srv.close();
+  await sp.killAll();
+});
+
 test("qProcessInfoPID returns info for a known PID even after tab list changes", async () => {
   // Simulate LLDB querying process info for a PID that was assigned before
   // the tab list changed (e.g., tab navigated away).
