@@ -9,7 +9,6 @@ import { pathToFileURL } from "node:url";
 import { RspServer, type RspLogger } from "../protocol/rsp-server.js";
 import {
   GdbServerSpawner,
-  freePort,
   type GdbServerLauncher,
 } from "../platform/gdb-server-spawner.js";
 import { startAttachShim } from "../protocol/attach-shim.js";
@@ -287,17 +286,18 @@ export async function startPlatformServer(
       // public `port`, emulating an unattached server until `vAttach` (see
       // attach-shim.ts). LLDB then drives the native attach handshake and
       // `process attach --plugin wasm` works.
-      const componentPort = await freePort();
+      // Use port 0 so the OS assigns the component port — avoids the
+      // TOCTOU race that freePort() has (grab-port → close → bind).
       const gdbServer = startGdbServer({
         dispatch: (req: unknown) => debuggee.dispatch(req as never),
-        port: componentPort,
+        port: 0,
         onInfo: (m: string) => logger.debug(`[component] ${m}`),
         verbose,
       });
       await gdbServer.ready;
       const shim = await startAttachShim({
         listenPort: port,
-        componentPort,
+        componentPort: gdbServer.port,
         trace: verbose ? (m) => logger.debug(`[shim] ${m}`) : undefined,
       });
       return {
