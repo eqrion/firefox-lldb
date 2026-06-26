@@ -205,6 +205,36 @@ test("concurrent qLaunchGDBServer for same tab returns identical pid/port", asyn
   await sp.killAll();
 });
 
+test("qProcessInfoPID returns info for a known PID even after tab list changes", async () => {
+  // Simulate LLDB querying process info for a PID that was assigned before
+  // the tab list changed (e.g., tab navigated away).
+  const sp = new GdbServerSpawner(fakeLauncher);
+  const dynamicTabs: TabInfo[] = [{ actor: "dynamic.tab1", url: "http://example.com/", title: "" }];
+  const ps = new PlatformServer({
+    spawner: sp,
+    listTabs: async () => dynamicTabs,
+  });
+  const srv = new RspServer(ps);
+  const port = await srv.listen(0);
+  const cl = await RspClient.connect(port);
+
+  // Assign a stable PID to the tab.
+  const listResp = await cl.requestText("qfProcessInfo");
+  const pid = listResp.match(/pid:(\d+);/)![1];
+
+  // Remove the tab from the list (simulate it closing).
+  dynamicTabs.length = 0;
+
+  // qProcessInfoPID should still return info via the stable map fallback.
+  const infoResp = await cl.requestText(`qProcessInfoPID:${pid}`);
+  assert.match(infoResp, /pid:\d+;/, "should return process info for stable PID");
+  assert.doesNotMatch(infoResp, /^E/, "should not return error for known PID");
+
+  cl.close();
+  await srv.close();
+  await sp.killAll();
+});
+
 test("unsupported packets get an empty response", async () => {
   assert.equal(await client.requestText("vCont?"), "");
 });

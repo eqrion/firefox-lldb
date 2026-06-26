@@ -296,11 +296,15 @@ export class RdpDebuggee {
         const entry = this.#valueById.get(id);
         return entry ? Number(entry.raw) >>> 0 : 0;
       }
-      case "WasmValue.unwrapI64":
-        return BigInt(this.#valueById.get(id)!.raw);
+      case "WasmValue.unwrapI64": {
+        const entry = this.#valueById.get(id);
+        return BigInt(entry?.raw ?? 0);
+      }
       case "WasmValue.unwrapF32":
-      case "WasmValue.unwrapF64":
-        return Number(this.#valueById.get(id)!.raw);
+      case "WasmValue.unwrapF64": {
+        const entry = this.#valueById.get(id);
+        return Number(entry?.raw ?? 0);
+      }
       case "WasmValue.clone": {
         const v = this.#valueById.get(id);
         const newId = this.#nextId++;
