@@ -151,11 +151,11 @@ FIXTURES = [
     {
         "name": "trap",
         "module": "test/e2e/fixtures/trap/trap.wasm",
-        "expect_func": "cause_trap",
+        "expect_func": "divide",
         "expect_file": "trap.cpp",
         "page_dir": "test/e2e/fixtures/trap",
-        "fire": "run()",
-        "break_func": "cause_trap",
+        "fire": "runDivZero()",
+        "break_func": "divide",
     },
 ]
 

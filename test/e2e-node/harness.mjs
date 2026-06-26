@@ -60,8 +60,8 @@ export const FIXTURES = {
   },
   trap: {
     pageDir: "test/e2e/fixtures/trap",
-    fire: "run()",
-    breakFunc: "cause_trap",
+    fire: "runDivZero()",
+    breakFunc: "divide",
     file: "trap.cpp",
   },
   threaded: {

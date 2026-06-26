@@ -7,13 +7,21 @@
 <body>
   <script src="trap.js"></script>
   <script>
-    var runTrap;
-    TrapModule().then(function(mod) {
-      runTrap = mod.cwrap('run_trap', 'number', []);
-    });
-    function run() {
-      try { runTrap(); } catch(e) { document.title = 'trap: ' + e.message; }
+    var mod = null;
+    TrapModule().then(function(m) { mod = m; });
+
+    // Run a trap export on a fresh macrotask, with no try/catch, so the
+    // WebAssembly.RuntimeError propagates uncaught and the debugger pauses at the
+    // trapping wasm frame. (The --fire harness invokes run* inside its own
+    // try/catch; calling wasm directly from there would swallow the trap.)
+    function callExport(name) {
+      if (!mod) { setTimeout(function() { callExport(name); }, 20); return; }
+      mod.cwrap(name, 'number', [])();
     }
+    function runDivZero()     { setTimeout(function() { callExport('run_divzero'); }, 0); }
+    function runUnreachable() { setTimeout(function() { callExport('run_unreachable'); }, 0); }
+    function runOob()         { setTimeout(function() { callExport('run_oob'); }, 0); }
+    function runIndirect()    { setTimeout(function() { callExport('run_indirect'); }, 0); }
   </script>
 </body>
 </html>

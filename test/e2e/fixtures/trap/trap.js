@@ -1211,7 +1211,10 @@ var wasmImports = {
 };
 var wasmExports = await createWasm();
 var ___wasm_call_ctors = createExportWrapper('__wasm_call_ctors', 0);
-var _run_trap = Module['_run_trap'] = createExportWrapper('run_trap', 0);
+var _run_divzero = Module['_run_divzero'] = createExportWrapper('run_divzero', 0);
+var _run_unreachable = Module['_run_unreachable'] = createExportWrapper('run_unreachable', 0);
+var _run_oob = Module['_run_oob'] = createExportWrapper('run_oob', 0);
+var _run_indirect = Module['_run_indirect'] = createExportWrapper('run_indirect', 0);
 var _fflush = createExportWrapper('fflush', 1);
 var _emscripten_stack_init = wasmExports['emscripten_stack_init']
 var _emscripten_stack_get_free = wasmExports['emscripten_stack_get_free']
