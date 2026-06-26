@@ -6,9 +6,10 @@
 // debugger server enabled. Used by the live test bridge so an lldb test can
 // debug real wasm in a real browser without touching the user's Firefox.
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { accessSync } from "node:fs";
+import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 
 function bringToForeground(pid: number): void {
@@ -30,8 +31,51 @@ function bringToForeground(pid: number): void {
   }
 }
 
-// Stable Firefox (not Nightly — never disturb a running Nightly profile).
-const DEFAULT_FIREFOX = "/Applications/Firefox.app/Contents/MacOS/firefox";
+function isExecutable(p: string): boolean {
+  try {
+    accessSync(p, 0x1 /* fs.constants.X_OK */);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Find a Firefox binary to launch, preferring stable over Nightly. */
+export function findFirefoxBinary(): string | undefined {
+  const candidates: string[] = [];
+  switch (process.platform) {
+    case "darwin":
+      candidates.push(
+        "/Applications/Firefox.app/Contents/MacOS/firefox",
+        join(homedir(), "Applications/Firefox.app/Contents/MacOS/firefox"),
+        "/Applications/Firefox Developer Edition.app/Contents/MacOS/firefox",
+      );
+      break;
+    case "win32": {
+      const pf = [process.env["ProgramFiles"], process.env["ProgramFiles(x86)"]];
+      for (const base of pf) {
+        if (base) candidates.push(join(base, "Mozilla Firefox", "firefox.exe"));
+      }
+      break;
+    }
+    default: // Linux and other Unix
+      candidates.push("/usr/bin/firefox", "/usr/local/bin/firefox", "/snap/bin/firefox");
+      break;
+  }
+  for (const c of candidates) {
+    if (isExecutable(c)) return c;
+  }
+  // Fall back to PATH lookup.
+  try {
+    const cmd = process.platform === "win32" ? "where" : "which";
+    const result = execFileSync(cmd, ["firefox"], { encoding: "utf8", stdio: ["pipe", "pipe", "ignore"] });
+    const first = result.trim().split(/\r?\n/)[0];
+    if (first) return first;
+  } catch {
+    /* not in PATH */
+  }
+  return undefined;
+}
 
 const PROFILE_PREFS = [
   ["devtools.debugger.remote-enabled", true],
@@ -59,7 +103,12 @@ export async function launchFirefox(opts: {
   headless?: boolean;
   url?: string;
 }): Promise<FirefoxHandle> {
-  const binary = opts.binary ?? DEFAULT_FIREFOX;
+  const binary = opts.binary ?? findFirefoxBinary();
+  if (!binary) {
+    throw new Error(
+      "Firefox not found. Install Firefox in a standard location or pass --firefox <path>."
+    );
+  }
   const profileDir = await mkdtemp(join(tmpdir(), "ff-rdp-"));
 
   const prefs =

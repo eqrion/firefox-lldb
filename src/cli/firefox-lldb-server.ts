@@ -39,7 +39,7 @@ Options:
   --rdp-port <N>      Firefox RDP port (default: 6080).
   --url <U>           URL navigated to when LLDB spawns a process (connect or
                       attach). Firefox itself starts on about:blank.
-  --firefox <path>    Firefox binary override.
+  --firefox <path>    Firefox binary (default: auto-detected from standard locations).
   --headless          Run Firefox headlessly.
   --fire <js>         Evaluate JS after the first breakpoint arms (test use).
   -v, --verbose       Log debug output.
