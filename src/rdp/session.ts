@@ -681,6 +681,7 @@ export class RdpWasmSession extends EventEmitter {
         this.off("target", onNewTarget);
         onNewTarget = null;
       }
+      this.off("close", onClose);
     };
 
     const onPaused = (tid: number, packet: PauseEvent) => {
@@ -688,6 +689,14 @@ export class RdpWasmSession extends EventEmitter {
       fired = true;
       cleanup();
       void this.#allStop(tid, packet);
+    };
+
+    // If the session closes before any thread pauses, clean up the listeners
+    // so they don't linger in the session's EventEmitter.
+    const onClose = () => {
+      if (fired) return;
+      fired = true;
+      cleanup();
     };
 
     const addTid = (tid: number) => {
@@ -699,6 +708,7 @@ export class RdpWasmSession extends EventEmitter {
 
     onNewTarget = (info: ThreadInfo) => addTid(info.tid);
     this.on("target", onNewTarget);
+    this.once("close", onClose);
 
     for (const tid of this.#threads.keys()) addTid(tid);
   }
@@ -717,13 +727,20 @@ export class RdpWasmSession extends EventEmitter {
         if (!info) return;
         // Send interrupt and wait for the paused event. Interrupt is normally
         // < 10 ms, but cap at 3 s for threads that may not be interruptible
-        // (e.g. a futex-blocked worker whose JS loop is frozen).
+        // (e.g. a futex-blocked worker whose JS loop is frozen). Also resolve
+        // immediately if the session closes so shutdown isn't delayed 3 s.
         const paused = new Promise<void>((resolve) => {
-          const timer = setTimeout(resolve, 3000);
-          this.once(`paused:${tid}`, () => {
+          const done = () => {
             clearTimeout(timer);
+            this.off(`paused:${tid}`, onPaused);
+            this.off("close", onClose);
             resolve();
-          });
+          };
+          const timer = setTimeout(done, 3000);
+          const onPaused = done;
+          const onClose = done;
+          this.once(`paused:${tid}`, onPaused);
+          this.once("close", onClose);
         });
         this.#client.send(info.threadActor, { type: "interrupt", when: {} });
         await paused;
@@ -824,18 +841,30 @@ export class RdpWasmSession extends EventEmitter {
     });
     const resultID = (ack as { resultID?: string }).resultID;
     return new Promise<RdpPacket>((resolve, reject) => {
-      const timer = setTimeout(() => {
+      let done = false;
+      const cleanup = () => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
         this.#client.off("event", onEvent);
+        this.off("close", onClose);
+      };
+      const timer = setTimeout(() => {
+        cleanup();
         reject(new Error("evaluateInFrame timeout"));
       }, 500);
       const onEvent = (p: RdpPacket) => {
         if (p.type === "evaluationResult" && (p as { resultID?: string }).resultID === resultID) {
-          clearTimeout(timer);
-          this.#client.off("event", onEvent);
+          cleanup();
           resolve(p);
         }
       };
+      const onClose = () => {
+        cleanup();
+        reject(new Error("session closed"));
+      };
       this.#client.on("event", onEvent);
+      this.once("close", onClose);
     });
   }
 
