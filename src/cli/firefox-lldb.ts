@@ -15,6 +15,9 @@ import net from "node:net";
 import { readFile } from "node:fs/promises";
 import { LLDBClient } from "lldb-wasm";
 import { parseCliArgs, startPlatformServer } from "./firefox-lldb-server.js";
+import { quietLogger } from "./logger.js";
+import { runRepl } from "./repl.js";
+import type { RdpWasmSession } from "../rdp/session.js";
 
 // Open bridge sockets, tracked so we can tear them down on exit (otherwise
 // net.Server.close() blocks on the live connections).
@@ -42,54 +45,74 @@ async function bridgeTcp(client: LLDBClient, port: number): Promise<number> {
 
 async function main(): Promise<void> {
   const args = parseCliArgs(process.argv.slice(2));
+  const verbose = args.verbose || process.env.DEBUG === "1";
 
   const client = await LLDBClient.create();
-
-  // Each per-tab GDB server launched by qLaunchGDBServer gets bridged; the
-  // platform server returns the channel ID as the connection "port" and the
-  // wasm LLDB connects to inprocess://<id> (PlatformWasmRemoteGDBServer::MakeUrl).
-  const handle = await startPlatformServer(args, {
-    wrapConnectPort: (port) => bridgeTcp(client, port),
-  });
-
-  // Bridge the platform connection itself.
-  const platformChannel = await bridgeTcp(client, handle.port);
-
-  client.onOutput((bytes) => process.stdout.write(Buffer.from(bytes)));
   client.setFileProvider((path) => readFile(path).catch(() => null));
 
+  let handle: Awaited<ReturnType<typeof startPlatformServer>> | undefined;
   let exiting = false;
   const cleanup = async (code = 0) => {
     if (exiting) return;
     exiting = true;
     for (const s of bridgeSockets) s.destroy();
-    await handle.shutdown().catch(() => {});
-    client.destroy();
+    await handle?.shutdown().catch(() => {});
+    await client.destroy();
     process.exit(code);
   };
-  client.onInterpreterExit(() => void cleanup(0));
   process.on("SIGTERM", () => void cleanup(0));
 
-  await client.runInterpreter();
+  // The REPL owns the terminal; `js` commands and console streaming need the
+  // live RDP session, which the platform server hands us via onSession.
+  let session: RdpWasmSession | undefined;
+  const repl = runRepl({
+    client,
+    getSession: () => session,
+    onExit: () => void cleanup(0),
+  });
 
-  // Drive the same setup the native wrapper passed via `-o` options.
-  const send = (line: string) => client.writeStdin(new TextEncoder().encode(line + "\n"));
-  await send("platform select remote-gdb-server");
-  await send(`platform connect inprocess://${platformChannel}`);
-  // Alias so users can `attach --pid N` and get the wasm process plugin.
-  await send("command alias attach process attach --plugin wasm");
+  // Each per-tab GDB server launched by qLaunchGDBServer gets bridged; the
+  // platform server returns the channel ID as the connection "port" and the
+  // wasm LLDB connects to inprocess://<id> (PlatformWasmRemoteGDBServer::MakeUrl).
+  handle = await startPlatformServer(args, {
+    wrapConnectPort: (port) => bridgeTcp(client, port),
+    logger: quietLogger(verbose),
+    onTab: (tab, pid) => repl.print(`tab available: ${tab.url}\n  attach --pid ${pid}`),
+    onSession: (s) => {
+      session = s;
+      void s.streamConsole((m) => repl.printConsole(m));
+      s.on("detached", () => {
+        repl.print("the attached tab was closed; detaching.");
+        session = undefined;
+        void client.sessionCommand("process detach").catch(() => {});
+      });
+    },
+  });
+
+  // Quit when a launched Firefox goes away (#24).
+  void handle.firefoxExited?.then(() => {
+    repl.print("Firefox exited.");
+    void cleanup(0);
+  });
+
+  // Bridge the platform connection itself, then drive the platform setup the
+  // native wrapper used to pass via `-o`. These produce noisy connect chatter,
+  // so we run them quietly and only surface the attach / tab list.
+  const platformChannel = await bridgeTcp(client, handle.port);
+  await client.sessionCommand("platform select remote-gdb-server");
+  await client.sessionCommand(`platform connect inprocess://${platformChannel}`);
+  await client.sessionCommand("command alias attach process attach --plugin wasm");
+
+  let intro = "firefox-lldb — `attach --pid N` to attach, `js p <expr>` to evaluate JS.";
   if (args.url) {
-    process.stderr.write("[info] attaching (waiting for wasm to load)...\n");
-    await send("process attach --plugin wasm --pid 1");
+    repl.print(intro + "\nattaching (waiting for wasm to load)...");
+    const res = await client.sessionCommand("process attach --plugin wasm --pid 1");
+    intro = (res.output + res.error).trimEnd();
   } else {
-    await send("platform process list");
+    const res = await client.sessionCommand("platform process list");
+    intro += "\n" + res.output.trimEnd();
   }
-
-  // Feed the terminal to LLDB. Forward Ctrl-D (stdin end) as EOF; SIGINT exits
-  // the session (interrupting a running target is a follow-up).
-  process.stdin.on("data", (d) => void client.writeStdin(new Uint8Array(d)));
-  process.stdin.on("end", () => void client.closeStdin());
-  process.on("SIGINT", () => void cleanup(0));
+  repl.start(intro);
 }
 
 main().catch((err) => {
