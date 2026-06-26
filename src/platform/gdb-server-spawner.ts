@@ -58,7 +58,9 @@ export class GdbServerSpawner {
   }
 
   async killAll(): Promise<void> {
-    await Promise.all([...this.#servers.values()].map((e) => e.handle.stop()));
+    await Promise.all(
+      [...this.#servers.values()].map((e) => Promise.resolve(e.handle.stop()).catch(() => {}))
+    );
     this.#servers.clear();
   }
 }
