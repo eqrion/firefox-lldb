@@ -2,11 +2,13 @@
 
 Debug WebAssembly running inside Firefox with LLDB.
 
-The `firefox-lldb` command embeds LLDB compiled to WebAssembly (the
-`@firefox-devtools/lldb-wasm` package) and runs it in-process, so no separate
-lldb binary is required — it still behaves like a real interactive lldb. You can
-also point your own wasm-plugin lldb at the standalone platform server (see
-[Manual two-step](#manual-two-step)).
+The `firefox-lldb` command embeds LLDB compiled to WebAssembly (the `lldb-wasm`
+package) and runs it in-process, so no separate lldb binary is required. It
+wraps that wasm LLDB in a terminal REPL that adds command history, Ctrl-C to
+interrupt a running target, `js` commands that query the page over Firefox's
+RDP, and live console output. It only supports the embedded wasm LLDB; to drive
+the debugger from your own native wasm-plugin lldb, run the standalone platform
+server instead (see [Manual two-step](#manual-two-step)).
 
 ```
 (lldb) process attach --plugin wasm --pid 1
@@ -34,7 +36,7 @@ npm install
 
 `firefox-lldb` launches Firefox, starts the platform server in-process, and
 drops you into an interactive lldb prompt backed by the embedded wasm LLDB. Once
-the page loads, the server prints a hint:
+the page loads, it prints a hint above the prompt:
 
 ```sh
 node --import tsx src/cli/firefox-lldb.ts \
@@ -42,8 +44,8 @@ node --import tsx src/cli/firefox-lldb.ts \
 ```
 
 ```
-[info] tab available: http://localhost:8080/
-[info]   process attach --plugin wasm --pid 1
+tab available: http://localhost:8080/
+  attach --pid 1
 ```
 
 From the lldb prompt (`attach` is aliased to `process attach --plugin wasm`, so
@@ -55,6 +57,26 @@ the plugin is supplied for you):
 (lldb) breakpoint set -n compute_factorial
 (lldb) continue
 ```
+
+Use the up/down arrows for command history, and Ctrl-C to interrupt a running
+target (press it again at an empty prompt to quit). The prompt is redrawn after
+any asynchronous notice (tab hints, console output) so input is never lost.
+
+#### Inspecting JavaScript (`js`)
+
+The wasm LLDB cannot evaluate JS, so `firefox-lldb` answers JS questions over
+RDP through `js` subcommands that run against the attached tab:
+
+```
+(lldb) js p document.title          # evaluate a JS expression (in the stopped frame, if any)
+(lldb) js bt                        # JS backtrace of the stopped thread
+(lldb) js frame 0                   # show a JS frame and its locals
+```
+
+#### Console output
+
+Console messages and uncaught errors from the page are streamed to the terminal
+as they happen. Type `console off` to mute them and `console on` to resume.
 
 Wasm targets must be driven through LLDB's `wasm` process plugin. If you attach
 with the bare `process attach` (no `--plugin wasm`), LLDB falls back to the
@@ -112,6 +134,8 @@ npm run connect
 | Struct/pointer inspection via SB API                 | ✅                                      |
 | Operand stack (`qWasmStackValue`)                    | ✗ — SpiderMonkey does not expose it yet |
 | Expression evaluation (`expr`)                       | ✗ — no wasm JIT backend in lldb         |
+| JS expression eval / backtrace (`js`)                | ✅ — over Firefox RDP                   |
+| Live page console output                             | ✅ — streamed to the terminal           |
 | Multithreading (pthreads/web workers)                | ✅ — all-stop via per-thread RDP actors |
 
 ## Development
@@ -124,8 +148,8 @@ npm run build:fixtures               # rebuild emscripten test fixtures (needs e
 npm run component                    # rebuild the vendored gdbstub-component (needs Rust + jco)
 ```
 
-The embedded LLDB is the `@firefox-devtools/lldb-wasm` package (LLDB compiled to
-WebAssembly), depended on via a `file:` path to `../llvm-project/lldb/tools/lldb-wasm`.
+The embedded LLDB is the `lldb-wasm` package (LLDB compiled to WebAssembly),
+built from `../llvm-project/lldb/tools/lldb-wasm`.
 To rebuild it after changing the LLVM fork, run `just build-wasm && npm run build`
 in that package's directory (needs emsdk), then `npm install` here.
 
