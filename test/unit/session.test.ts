@@ -865,3 +865,28 @@ test("navigate() same-URL reload does not emit 'detached' for the old target", a
   session.close();
   srv.close();
 });
+
+test("evalJS rejects immediately when session closes while waiting for evaluationResult", async () => {
+  const srv = new FakeRdpServer();
+  await srv.listen();
+  const session = await srv.acceptSession();
+
+  srv.targetAvailable("thread1", { isTopLevel: true, consoleActor: "console1" });
+  await sleep(200);
+
+  // Register a handler that returns a resultID but never sends the evaluationResult event.
+  srv.onNext(
+    (r) => r.type === "evaluateJSAsync",
+    () => ({ from: "console1", resultID: "test-result-1" })
+  );
+
+  const evalP = session.evalJS("1 + 1");
+
+  // Close the session before the evaluationResult event arrives.
+  await sleep(50);
+  srv.close();
+
+  await assert.rejects(evalP, /session closed/, "evalJS should reject immediately on close");
+
+  session.close();
+});
