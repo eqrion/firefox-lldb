@@ -568,6 +568,35 @@ test("setWasmBreakpoint sends to all existing threads at call time", async () =>
   srv.close();
 });
 
+test("removeWasmBreakpoint uses same offset wire as setWasmBreakpoint", async () => {
+  const srv = new FakeRdpServer();
+  await srv.listen();
+  const session = await srv.acceptSession();
+
+  srv.targetAvailable("threadA", { isTopLevel: true });
+  await sleep(200);
+
+  srv.onAll(
+    (r) => r.type === "setBreakpoint" || r.type === "removeBreakpoint",
+    (r) => ({ from: r.to as string })
+  );
+
+  // No wasmActorByUrl entry → #snapOffset returns offset unchanged.
+  // Verify set and remove both send the same offset (42) so a real snapped
+  // remove would also use the snapped value rather than the original.
+  await session.setWasmBreakpoint("http://host/mod.wasm", 42);
+  await session.removeWasmBreakpoint("http://host/mod.wasm", 42);
+
+  const setLine = (srv.received.find((r) => r.type === "setBreakpoint")?.location as { line?: number })?.line;
+  const removeLine = (srv.received.find((r) => r.type === "removeBreakpoint")?.location as { line?: number })?.line;
+
+  assert.equal(setLine, 42);
+  assert.equal(removeLine, 42, "removeBreakpoint must send same offset as setBreakpoint");
+
+  session.close();
+  srv.close();
+});
+
 test("removeWasmBreakpoint sends to all threads and removes from buffer", async () => {
   const srv = new FakeRdpServer();
   await srv.listen();

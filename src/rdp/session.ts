@@ -531,7 +531,8 @@ export class RdpWasmSession extends EventEmitter {
     if (!lines.length) return { line };
     const snLine = lines.find((l) => l >= line) ?? lines[lines.length - 1];
     const cols = (positions[String(snLine)] ?? []).slice().sort((a, b) => a - b);
-    return { line: snLine, column: cols[0] };
+    // cols[0] is undefined if positions returns a line with an empty column list.
+    return cols.length > 0 ? { line: snLine, column: cols[0] } : { line: snLine };
   }
 
   async jsSources(): Promise<SourceForm[]> {
@@ -607,12 +608,15 @@ export class RdpWasmSession extends EventEmitter {
 
   async removeWasmBreakpoint(sourceUrl: string, offset: number): Promise<void> {
     this.#breakpoints.get(sourceUrl)?.delete(offset);
+    // Snap to the same offset that setWasmBreakpoint used; removing the
+    // original offset would be a no-op if it was adjusted on set.
+    const snappedOffset = await this.#snapOffset(sourceUrl, offset);
     await Promise.all(
       [...this.#threads.values()].map((t) =>
         this.#client
           .request(t.threadActor, {
             type: "removeBreakpoint",
-            location: { sourceUrl, line: offset, column: 1 },
+            location: { sourceUrl, line: snappedOffset, column: 1 },
           })
           .catch(() => {})
       )
