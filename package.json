@@ -15,6 +15,7 @@
     "firefox-lldb-server": "./dist/cli/firefox-lldb-server.js"
   },
   "scripts": {
+    "postinstall": "chmod +x node_modules/node-pty/prebuilds/*/spawn-helper 2>/dev/null || true",
     "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
     "prepublishOnly": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
@@ -46,6 +47,7 @@
   "devDependencies": {
     "@bytecodealliance/jco": "1.24.3",
     "@types/node": "^22.10.0",
+    "node-pty": "^1.1.0",
     "prettier": "^3.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"
