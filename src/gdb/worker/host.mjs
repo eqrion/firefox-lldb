@@ -71,6 +71,7 @@ export function startGdbServer({ dispatch, port, onInfo, verbose }) {
         const match = m.info.match(/:(\d+)/);
         if (match) boundPort = parseInt(match[1], 10);
         resolveReady();
+        rejectReady = null; // prevent spurious rejection on normal worker exit
       }
     }
   });
@@ -88,6 +89,11 @@ export function startGdbServer({ dispatch, port, onInfo, verbose }) {
     // If the worker crashed before the 'listening' message arrived, unblock
     // the caller who is awaiting gdbServer.ready.
     rejectReady?.(e);
+    rejectReady = null;
+  });
+  // Also reject ready on clean exit (e.g. stop() called before 'listening').
+  worker.on("exit", () => {
+    rejectReady?.(new Error("gdb worker exited before becoming ready"));
     rejectReady = null;
   });
 

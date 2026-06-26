@@ -126,7 +126,8 @@ async function connectWithRetry(rdpPort: number, tabActor?: string): Promise<Rdp
       await sleep(250);
     }
   }
-  throw new Error(`could not connect to Firefox RDP on ${rdpPort}: ${lastErr}`);
+  const msg = lastErr instanceof Error ? lastErr.message : String(lastErr);
+  throw new Error(`could not connect to Firefox RDP on ${rdpPort}: ${msg}`);
 }
 
 async function watchTabs(

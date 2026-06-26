@@ -67,7 +67,7 @@ export class RdpTransport extends EventEmitter {
         return;
       }
       const len = parseInt(this.#buffer.subarray(0, colon).toString("latin1"), 10);
-      if (Number.isNaN(len)) {
+      if (Number.isNaN(len) || len < 0) {
         this.emit("error", new Error("invalid packet length"));
         return;
       }
