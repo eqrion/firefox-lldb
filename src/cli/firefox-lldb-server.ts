@@ -151,17 +151,27 @@ async function waitForWasm(
   session: RdpWasmSession,
   onWaiting?: () => void
 ): Promise<void> {
-  let wasm = (await session.wasmSources())[0];
-  let notified = false;
-  for (let i = 0; i < 300 && !wasm; i++) {
-    if (!notified && i === 20) {
-      notified = true;
-      onWaiting?.();
+  // Abort early if the session closes so we don't poll for 30 s on a dead
+  // connection (wasmSources() catches errors and returns [], but sleep(100)
+  // still runs each iteration without this guard).
+  let sessionClosed = false;
+  const onClose = () => { sessionClosed = true; };
+  session.on("close", onClose);
+  try {
+    let wasm = (await session.wasmSources())[0];
+    let notified = false;
+    for (let i = 0; i < 300 && !wasm && !sessionClosed; i++) {
+      if (!notified && i === 20) {
+        notified = true;
+        onWaiting?.();
+      }
+      await sleep(100);
+      wasm = (await session.wasmSources())[0];
     }
-    await sleep(100);
-    wasm = (await session.wasmSources())[0];
+    if (!wasm) throw new Error(sessionClosed ? "session closed" : "no wasm source appeared");
+  } finally {
+    session.off("close", onClose);
   }
-  if (!wasm) throw new Error("no wasm source appeared");
 }
 
 export interface StartOptions {
