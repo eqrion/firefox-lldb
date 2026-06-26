@@ -1,0 +1,19 @@
+# Thin wasm-component wrapper around the `source-map-dwarf` crate, built to a
+# wasm32-wasip2 component and transpiled with jco (mirrors gdbstub-component).
+[package]
+name = "firefox-lldb-source-map-component"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+description = "source map -> DWARF converter, built to a wasm32-wasip2 component"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = { version = "0.58.0", default-features = false, features = ["macros"] }
+source-map-dwarf = { path = "../source-map-dwarf" }
+
+[profile.release]
+opt-level = "s"

@@ -1,5 +1,6 @@
 dist/
 src/gdb/generated/
+src/sourcemap/generated/
 node_modules/
 vendor/
 *.wasm

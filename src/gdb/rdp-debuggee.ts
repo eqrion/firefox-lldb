@@ -30,11 +30,12 @@
 //   - Debuggee.continue     -> session.resumeAll()
 //   - EventFuture.finish    -> awaits all-stop "stopped" event, then snapshots
 
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
 import { tmpdir } from "node:os";
 import type { RdpWasmSession, FrameForm, StoppedEvent } from "../rdp/session.js";
 import { buildSyntheticModule } from "./synthetic-module.js";
+import { inspect as inspectWasm, convert as convertSourceMap } from "../sourcemap/converter.js";
 
 function urlBasename(url: string): string {
   try {
@@ -77,6 +78,10 @@ export class RdpDebuggee {
 
   // Synthetic modules for JS sources: url -> {bytecode, codeOffset}.
   #syntheticByUrl = new Map<string, { bytecode: Uint8Array; codeOffset: number }>();
+
+  // Cache of bytecode served to LLDB per wasm URL. For modules that ship a
+  // source map instead of DWARF, this holds the source-map-derived bytecode.
+  #bytecodeByUrl = new Map<string, Uint8Array>();
 
   // Temp dir for materialized JS source text (for LLDB source list).
   #tmpDir: string = mkdtempSync(join(tmpdir(), "firefox-lldb-"));
@@ -204,7 +209,7 @@ export class RdpDebuggee {
       case "Module.bytecode": {
         const { url } = this.#moduleById.get(id)!;
         const syn = this.#syntheticByUrl.get(url);
-        return syn ? syn.bytecode : this.#session.fetchModuleBytes(url);
+        return syn ? syn.bytecode : this.#wasmBytecode(url);
       }
       case "Module.addBreakpoint": {
         const { url } = this.#moduleById.get(id)!;
@@ -341,6 +346,57 @@ export class RdpDebuggee {
       this.#moduleById.set(m.id, m);
     }
     return { $res: "Module", id: m.id };
+  }
+
+  // Fetch a real wasm module's bytecode, converting source maps to DWARF on the
+  // fly so source-map-only modules are debuggable. Cached per URL.
+  async #wasmBytecode(url: string): Promise<Uint8Array> {
+    const cached = this.#bytecodeByUrl.get(url);
+    if (cached) return cached;
+    const bytes = await this.#session.fetchModuleBytes(url);
+    const out = await this.#maybeConvertSourceMap(url, bytes);
+    this.#bytecodeByUrl.set(url, out);
+    return out;
+  }
+
+  // If `bytes` carries a source map (and no DWARF), synthesize DWARF from it via
+  // the source-map component. Falls back to the original bytes on any failure.
+  async #maybeConvertSourceMap(url: string, bytes: Uint8Array): Promise<Uint8Array> {
+    let info;
+    try {
+      info = await inspectWasm(bytes);
+    } catch {
+      return bytes;
+    }
+    if (info.hasDwarf || !info.sourceMapUrl) return bytes;
+
+    const mapUrl = info.sourceMapUrl;
+    let mapBytes: Uint8Array | undefined;
+    if (!mapUrl.startsWith("data:")) {
+      try {
+        const resolved = new URL(mapUrl, url).href;
+        mapBytes = new Uint8Array(await (await fetch(resolved)).arrayBuffer());
+      } catch {
+        return bytes;
+      }
+    }
+
+    const compDir = join(this.#tmpDir, `${urlBasename(url)}.src`);
+    try {
+      const res = await convertSourceMap(bytes, mapBytes, compDir);
+      for (const sf of res.sources) {
+        const dest = join(compDir, sf.path.replace(/^\/+/, ""));
+        try {
+          mkdirSync(dirname(dest), { recursive: true });
+          writeFileSync(dest, sf.content);
+        } catch {
+          /* best-effort source materialization */
+        }
+      }
+      return res.wasm;
+    } catch {
+      return bytes;
+    }
   }
 
   // --- instances -----------------------------------------------------------
