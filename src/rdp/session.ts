@@ -110,8 +110,10 @@ export async function watchAndPrimeFirefoxTabs(
       const watcher = watcherR.actor as string | undefined;
       if (!watcher) throw new Error("no watcher actor");
       const cfg = await client.request(watcher, { type: "getThreadConfigurationActor" });
-      const configActor = ((cfg.configuration as { actor?: string })?.actor ??
-        cfg.configuration) as string;
+      const configActor = (
+        (cfg.configuration as { actor?: string })?.actor ?? cfg.configuration
+      ) as string | undefined;
+      if (!configActor) throw new Error("no thread config actor");
       await client.request(configActor, {
         type: "updateConfiguration",
         configuration: { observeWasm: true, observeAsmJS: true, pauseOnExceptions: false },
