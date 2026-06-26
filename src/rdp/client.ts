@@ -77,7 +77,15 @@ export class RdpClient extends EventEmitter {
       this.emit("unsolicited", packet);
     });
     transport.on("error", (e) => this.emit("error", e));
-    transport.on("close", () => this.emit("close"));
+    transport.on("close", () => {
+      this.emit("close");
+      // Reject any in-flight requests so callers don't hang forever.
+      const err = new Error("RDP connection closed");
+      for (const queue of this.#pending.values()) {
+        for (const p of queue) p.reject(err);
+      }
+      this.#pending.clear();
+    });
   }
 
   static async connect(port = 6080, host = "127.0.0.1"): Promise<RdpClient> {
