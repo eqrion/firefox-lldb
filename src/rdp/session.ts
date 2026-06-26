@@ -42,7 +42,7 @@ export async function listFirefoxTabs(port = 6080, host = "127.0.0.1"): Promise<
     const { tabs } = (await client.request("root", { type: "listTabs" })) as {
       tabs: { actor: string; url?: string; title?: string }[];
     };
-    return tabs.map((t) => ({ actor: t.actor, url: t.url ?? "", title: t.title ?? "" }));
+    return (tabs ?? []).map((t) => ({ actor: t.actor, url: t.url ?? "", title: t.title ?? "" }));
   } finally {
     client.close();
   }
@@ -60,9 +60,9 @@ export async function watchFirefoxTabs(
 
   const query = async () => {
     const { tabs } = (await client.request("root", { type: "listTabs" })) as {
-      tabs: { actor: string; url?: string; title?: string }[];
+      tabs?: { actor: string; url?: string; title?: string }[];
     };
-    onTabs(tabs.map((t) => ({ actor: t.actor, url: t.url ?? "", title: t.title ?? "" })));
+    onTabs((tabs ?? []).map((t) => ({ actor: t.actor, url: t.url ?? "", title: t.title ?? "" })));
   };
 
   client.on("event", (p) => {
@@ -124,10 +124,11 @@ export async function watchAndPrimeFirefoxTabs(
 
   const query = async () => {
     const { tabs } = (await client.request("root", { type: "listTabs" })) as {
-      tabs: { actor: string; url?: string; title?: string }[];
+      tabs?: { actor: string; url?: string; title?: string }[];
     };
-    onTabs(tabs.map((t) => ({ actor: t.actor, url: t.url ?? "", title: t.title ?? "" })));
-    for (const t of tabs) void primeTab(t.actor);
+    const tabList = tabs ?? [];
+    onTabs(tabList.map((t) => ({ actor: t.actor, url: t.url ?? "", title: t.title ?? "" })));
+    for (const t of tabList) void primeTab(t.actor);
   };
 
   client.on("event", (p) => {
