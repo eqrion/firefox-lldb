@@ -175,6 +175,25 @@ export interface StoppedEvent {
   pausePacket: PauseEvent;
 }
 
+/** Render an RDP grip (console argument or binding value) as a display string. */
+export function grip(a: unknown): string {
+  if (a === null) return "null";
+  if (typeof a !== "object") return String(a);
+  const g = a as { type?: string; class?: string; initial?: string };
+  switch (g.type) {
+    case "undefined":
+    case "null":
+    case "Infinity":
+    case "-Infinity":
+    case "NaN":
+      return g.type;
+    case "longString":
+      return g.initial ?? "[longString]";
+    default:
+      return g.class ?? g.type ?? "[object]";
+  }
+}
+
 export class RdpWasmSession extends EventEmitter {
   #client: RdpClient;
   #tabActor!: string;
@@ -211,6 +230,11 @@ export class RdpWasmSession extends EventEmitter {
 
   hasThreads(): boolean {
     return this.#threads.size > 0;
+  }
+
+  /** True when at least one thread is paused (breakpoint, step, or interrupt). */
+  paused(): boolean {
+    return this.#pausedTids.size > 0;
   }
 
   listTids(): number[] {
@@ -303,9 +327,13 @@ export class RdpWasmSession extends EventEmitter {
         if (!threadActor) break;
         const entry = [...this.#threads.entries()].find(([, t]) => t.threadActor === threadActor);
         if (entry) {
-          this.#threads.delete(entry[0]);
-          this.#pausedTids.delete(entry[0]);
-          this.#interruptedTids.delete(entry[0]);
+          const [tid, info] = entry;
+          this.#threads.delete(tid);
+          this.#pausedTids.delete(tid);
+          this.#interruptedTids.delete(tid);
+          // The page's tab was closed or navigated away; let consumers react
+          // (e.g. firefox-lldb detaches the lldb process).
+          if (info.isTopLevel) this.emit("detached", info);
         }
         break;
       }
@@ -707,6 +735,33 @@ export class RdpWasmSession extends EventEmitter {
     return [...this.#threads.values()].find((t) => t.consoleActor)?.consoleActor ?? null;
   }
 
+  /** Stream the page's console output (console.* and uncaught errors) to
+   * `onMessage`. Listeners are started on every current and future target's
+   * console actor, so worker output is included too. */
+  async streamConsole(onMessage: (text: string) => void): Promise<void> {
+    this.#client.registerEventType("consoleAPICall");
+    this.#client.registerEventType("pageError");
+    this.#client.on("event", (p) => {
+      if (p.type === "consoleAPICall") {
+        const m = (p as { message?: { level?: string; arguments?: unknown[] } }).message;
+        if (m) onMessage(`console.${m.level ?? "log"}: ${(m.arguments ?? []).map(grip).join(" ")}`);
+      } else if (p.type === "pageError") {
+        const e = (p as { pageError?: { errorMessage?: string; warning?: boolean } }).pageError;
+        if (e && !e.warning) onMessage(`error: ${e.errorMessage ?? ""}`);
+      }
+    });
+    const started = new Set<string>();
+    const startFor = (actor: string): void => {
+      if (!actor || started.has(actor)) return;
+      started.add(actor);
+      void this.#client
+        .request(actor, { type: "startListeners", listeners: ["ConsoleAPI", "PageError"] })
+        .catch(() => {});
+    };
+    for (const t of this.#threads.values()) startFor(t.consoleActor);
+    this.on("target", (t: ThreadInfo) => startFor(t.consoleActor));
+  }
+
   /** Console actor of the thread that triggered the last all-stop, for
    * evaluations that must run in that thread's context.
    * Returns null if the thread has no console (avoids falling back to the
@@ -731,6 +786,16 @@ export class RdpWasmSession extends EventEmitter {
     frameActor: string,
     consoleActorOverride?: string
   ): Promise<RdpPacket> {
+    return this.evalJS(text, frameActor, consoleActorOverride);
+  }
+
+  /** Evaluate JS and resolve with the result packet. Runs in `frameActor`'s
+   * scope when given (so locals are visible), otherwise in page scope. */
+  async evalJS(
+    text: string,
+    frameActor?: string,
+    consoleActorOverride?: string
+  ): Promise<RdpPacket> {
     const consoleActor =
       consoleActorOverride ?? [...this.#threads.values()].find((t) => t.consoleActor)?.consoleActor;
     if (!consoleActor) throw new Error("no console actor");
@@ -738,7 +803,7 @@ export class RdpWasmSession extends EventEmitter {
     const ack = await this.#client.request(consoleActor, {
       type: "evaluateJSAsync",
       text,
-      frameActor,
+      ...(frameActor ? { frameActor } : {}),
     });
     const resultID = (ack as { resultID?: string }).resultID;
     return new Promise<RdpPacket>((resolve, reject) => {

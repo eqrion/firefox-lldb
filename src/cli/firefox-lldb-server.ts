@@ -6,7 +6,7 @@
 
 import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
-import { RspServer } from "../protocol/rsp-server.js";
+import { RspServer, type RspLogger } from "../protocol/rsp-server.js";
 import {
   GdbServerSpawner,
   freePort,
@@ -157,6 +157,14 @@ async function waitForWasm(session: RdpWasmSession): Promise<void> {
 export interface StartOptions {
   /** Bridge the per-tab GDB server port (see PlatformServerDeps.wrapConnectPort). */
   wrapConnectPort?: (port: number) => Promise<number>;
+  /** Override the logger (the in-process embedding uses a quieter one). */
+  logger?: RspLogger;
+  /** Called once per newly-seen tab with a non-blank URL. Defaults to printing
+   * a `process attach --plugin wasm --pid N` hint to stderr (for native lldb). */
+  onTab?: (tab: TabInfo, pid: number) => void;
+  /** Called with each per-tab RDP session as it is created (the in-process
+   * embedding uses this to drive `js` commands and console streaming). */
+  onSession?: (session: RdpWasmSession) => void;
 }
 
 export interface PlatformServerHandle {
@@ -164,6 +172,8 @@ export interface PlatformServerHandle {
   platformServer: PlatformServer;
   spawner: GdbServerSpawner;
   shutdown: () => Promise<void>;
+  /** Resolves when a launched Firefox exits (undefined in --connect mode). */
+  firefoxExited?: Promise<void>;
 }
 
 // Bring up Firefox (if launching), the per-tab GDB server launcher, and the
@@ -174,7 +184,7 @@ export async function startPlatformServer(
   opts: StartOptions = {}
 ): Promise<PlatformServerHandle> {
   const verbose = args.verbose || process.env.DEBUG === "1";
-  const logger = consoleLogger(verbose);
+  const logger = opts.logger ?? consoleLogger(verbose);
   setRdpTrace(verbose);
   const launching = !args.connect;
 
@@ -211,6 +221,7 @@ export async function startPlatformServer(
     const session = launching
       ? await connectWithRetry(args.rdpPort, resolvedActor)
       : await RdpWasmSession.start(args.rdpPort, "127.0.0.1", resolvedActor);
+    opts.onSession?.(session);
 
     // Close the session on any failure past this point; otherwise a launch that
     // throws (e.g. waitForWasm times out) leaks the RDP watcher connection, and
@@ -312,6 +323,15 @@ export async function startPlatformServer(
     );
   }
 
+  // Default hint suits a native lldb client (no `attach` alias defined).
+  const onTab =
+    opts.onTab ??
+    ((tab: TabInfo, pid: number) =>
+      process.stderr.write(
+        `\n[info] tab available: ${tab.url}\n` +
+          `[info]   process attach --plugin wasm --pid ${pid}\n`
+      ));
+
   let stopped = false;
   const hinted = new Set<string>();
   void watchTabs(
@@ -321,11 +341,7 @@ export async function startPlatformServer(
       for (const tab of tabs) {
         if (!hinted.has(tab.actor) && tab.url && tab.url !== "about:blank") {
           hinted.add(tab.actor);
-          const pid = platformServer.tabPid(tab.actor);
-          process.stderr.write(
-            `\n[info] tab available: ${tab.url}\n` +
-              `[info]   process attach --plugin wasm --pid ${pid}\n`
-          );
+          onTab(tab, platformServer.tabPid(tab.actor));
         }
       }
     },
@@ -339,7 +355,7 @@ export async function startPlatformServer(
     await firefox?.close();
   };
 
-  return { port: bound, platformServer, spawner, shutdown };
+  return { port: bound, platformServer, spawner, shutdown, firefoxExited: firefox?.exited };
 }
 
 async function main(): Promise<void> {

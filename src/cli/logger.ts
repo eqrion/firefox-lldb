@@ -14,3 +14,10 @@ export function consoleLogger(verbose: boolean): RspLogger {
     error: (m) => console.error(stamp("error", m)),
   };
 }
+
+/** Logger for the interactive embedding: drops the noisy [info] startup chatter
+ * and keeps only warnings and errors. Debug is still gated behind `verbose`. */
+export function quietLogger(verbose: boolean): RspLogger {
+  const base = consoleLogger(verbose);
+  return { ...base, info: () => {} };
+}
