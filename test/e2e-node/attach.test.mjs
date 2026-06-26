@@ -15,20 +15,15 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { Session } from "./harness.mjs";
 
-const skip =
-  process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
-    ? false
-    : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
-
 let s;
 before(async () => {
-  if (!skip) s = await Session.stoppedAtBreakpoint("factorial");
+  s = await Session.stoppedAtBreakpoint("factorial");
 });
 after(async () => {
   await s?.shutdown();
 });
 
-test("stopped in compute_factorial at math.cpp:24", { skip }, async () => {
+test("stopped in compute_factorial at math.cpp:24", async () => {
   const f0 = await s.topFrame();
   assert.match(f0.function, /compute_factorial/);
   assert.equal(f0.file?.endsWith("math.cpp"), true);
@@ -37,7 +32,6 @@ test("stopped in compute_factorial at math.cpp:24", { skip }, async () => {
 
 test(
   "call stack interleaves the wasm frame with JS frames (qWasmCallStack)",
-  { skip },
   async () => {
     const frames = await s.frames();
     assert.ok(frames.length >= 2, `expected >= 2 frames, got ${frames.length}`);
@@ -49,7 +43,7 @@ test(
   }
 );
 
-test("local argument n == 10 (qWasmLocal + DWARF)", { skip }, async () => {
+test("local argument n == 10 (qWasmLocal + DWARF)", async () => {
   const n = await s.variable(0, "n");
   assert.equal(n.valid, true);
   assert.equal(n.unsigned, 10);

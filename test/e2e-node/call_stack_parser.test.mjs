@@ -10,20 +10,15 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { Session } from "./harness.mjs";
 
-const skip =
-  process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
-    ? false
-    : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
-
 let s;
 before(async () => {
-  if (!skip) s = await Session.stoppedAtBreakpoint("parser");
+  s = await Session.stoppedAtBreakpoint("parser");
 });
 after(async () => {
   await s?.shutdown();
 });
 
-test("stopped in parse_factor at parser.cpp (call stack + DWARF)", { skip }, async () => {
+test("stopped in parse_factor at parser.cpp (call stack + DWARF)", async () => {
   const f0 = await s.topFrame();
   assert.match(f0.function, /parse_factor/);
   assert.equal(f0.file?.endsWith("parser.cpp"), true);
@@ -32,7 +27,6 @@ test("stopped in parse_factor at parser.cpp (call stack + DWARF)", { skip }, asy
 
 test(
   "call stack is >= 3 frames deep (parse_factor / parse_term / parse_expr)",
-  { skip },
   async () => {
     const frames = await s.frames();
     assert.ok(frames.length >= 3, `expected >= 3 frames, got ${frames.length}`);
@@ -41,7 +35,6 @@ test(
 
 test(
   "parent frame names: frame0=parse_factor, frame1=parse_term, frame2=parse_expr",
-  { skip },
   async () => {
     const frames = await s.frames();
     assert.match(frames[0].function, /parse_factor/);
@@ -50,7 +43,7 @@ test(
   }
 );
 
-test("local 'value' is visible in parse_factor frame", { skip }, async () => {
+test("local 'value' is visible in parse_factor frame", async () => {
   const value = await s.variable(0, "value");
   assert.equal(value.valid, true);
 });

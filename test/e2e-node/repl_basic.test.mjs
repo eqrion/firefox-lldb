@@ -4,44 +4,38 @@
 
 // REPL-path e2e: attach via the `attach` alias path, then drive lldb and `js`
 // commands through the real readline REPL, asserting on captured terminal
-// output. Requires headless Firefox + built fixtures (set
-// FIREFOX_LLDB_WASM_ATTACH=1), like the other e2e-node tests.
+// output. Requires headless Firefox + built fixtures.
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { ReplSession } from "./repl-harness.mjs";
 
-const skip =
-  process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
-    ? false
-    : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
-
 let s;
 before(async () => {
-  if (!skip) s = await ReplSession.attach("factorial");
+  s = await ReplSession.attach("factorial");
 });
 after(async () => {
   await s?.shutdown();
 });
 
-test("breakpoint + continue routes through the REPL and prints the stop", { skip }, async () => {
+test("breakpoint + continue routes through the REPL and prints the stop", async () => {
   const set = await s.type("breakpoint set -n compute_factorial");
   assert.match(set, /Breakpoint 1/);
   const cont = await s.type("process continue");
   assert.match(cont, /compute_factorial/);
 });
 
-test("js p evaluates a JS expression in the stopped frame", { skip }, async () => {
+test("js p evaluates a JS expression in the stopped frame", async () => {
   const out = await s.type("js p 6 * 7");
   assert.match(out, /\b42\b/);
 });
 
-test("js bt lists frames of the stopped thread", { skip }, async () => {
+test("js bt lists frames of the stopped thread", async () => {
   const out = await s.type("js bt");
   assert.match(out, /#0:/);
 });
 
-test("page console output is streamed to the terminal", { skip }, async () => {
+test("page console output is streamed to the terminal", async () => {
   await s.type("js p (console.log('hello-from-repl'), 1)");
   // The console message arrives asynchronously after the eval result.
   for (let i = 0; i < 20 && !s.output().includes("hello-from-repl"); i++) {

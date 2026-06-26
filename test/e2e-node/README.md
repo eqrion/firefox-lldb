@@ -8,13 +8,12 @@ process. The Python suite is unchanged and still the reference.
 Run:
 
 ```sh
-# Infrastructure smoke test only (no Firefox needed):
-npm run test:e2e-node
-
-# Full suite incl. attach/breakpoint/stepping (needs headless Firefox + fixtures):
 npm run build:fixtures   # once
-FIREFOX_LLDB_WASM_ATTACH=1 npm run test:e2e-node
+npm run test:e2e-node
 ```
+
+Requires Firefox installed in a standard location (see `findFirefoxBinary` in
+`src/rdp/firefox.ts`) and pre-built fixtures.
 
 ## How it works
 

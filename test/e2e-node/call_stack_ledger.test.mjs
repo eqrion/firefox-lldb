@@ -10,33 +10,28 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { Session } from "./harness.mjs";
 
-const skip =
-  process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
-    ? false
-    : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
-
 let s;
 before(async () => {
-  if (!skip) s = await Session.stoppedAtBreakpoint("ledger");
+  s = await Session.stoppedAtBreakpoint("ledger");
 });
 after(async () => {
   await s?.shutdown();
 });
 
-test("stopped in apply_transaction at ledger.cpp (call stack + DWARF)", { skip }, async () => {
+test("stopped in apply_transaction at ledger.cpp (call stack + DWARF)", async () => {
   const f0 = await s.topFrame();
   assert.match(f0.function, /apply_transaction/);
   assert.equal(f0.file?.endsWith("ledger.cpp"), true);
   assert.ok(f0.line > 0, "line number is positive");
 });
 
-test("txn->amount == 30 (struct through pointer)", { skip }, async () => {
+test("txn->amount == 30 (struct through pointer)", async () => {
   const amount = await s.variable(0, "txn->amount");
   assert.equal(amount.valid, true);
   assert.equal(amount.unsigned, 30);
 });
 
-test("g_accounts[0].balance is accessible as a global", { skip }, async () => {
+test("g_accounts[0].balance is accessible as a global", async () => {
   // g_accounts is a static global; the balance is 100 before the transaction
   // modifies it (or 70 after). Either is correct depending on stop timing.
   const balance = await s.variable(0, "g_accounts[0].balance");

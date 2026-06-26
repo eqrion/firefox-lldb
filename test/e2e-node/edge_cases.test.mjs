@@ -10,20 +10,15 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { Session } from "./harness.mjs";
 
-const skip =
-  process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
-    ? false
-    : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
-
 let s;
 before(async () => {
-  if (!skip) s = await Session.stoppedAtBreakpoint("factorial");
+  s = await Session.stoppedAtBreakpoint("factorial");
 });
 after(async () => {
   await s?.shutdown();
 });
 
-test("JS caller frames are visible above the wasm breakpoint frame", { skip }, async () => {
+test("JS caller frames are visible above the wasm breakpoint frame", async () => {
   const frames = await s.frames();
   const f0 = frames[0];
   assert.match(f0.function, /compute_factorial/);
@@ -37,7 +32,7 @@ test("JS caller frames are visible above the wasm breakpoint frame", { skip }, a
   );
 });
 
-test("watchpoint attempt does not crash the session", { skip }, async () => {
+test("watchpoint attempt does not crash the session", async () => {
   // Watchpoints are not supported for wasm. The bridge should return an
   // invalid watchpoint or a clear error without crashing.
   const n = await s.variable(0, "n");

@@ -9,14 +9,9 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { Session } from "./harness.mjs";
 
-const skip =
-  process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
-    ? false
-    : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
-
 let s;
 before(async () => {
-  if (!skip) s = await Session.attach("factorial");
+  s = await Session.attach("factorial");
 });
 after(async () => {
   await s?.shutdown();
@@ -24,7 +19,6 @@ after(async () => {
 
 test(
   "two breakpoints fire in execution order: compute_factorial then factorial",
-  { skip },
   async () => {
     await s.breakpointByName("compute_factorial");
     await s.breakpointByName("factorial");

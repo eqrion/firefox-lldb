@@ -18,7 +18,7 @@ jobs:
 
       - run: npm ci
 
-      - name: Install LLDB and Firefox
+      - name: Install Firefox
         run: |
           sudo install -d -m 0755 /etc/apt/keyrings
           wget -qO- https://packages.mozilla.org/apt/repo-signing-key.gpg \
@@ -28,25 +28,7 @@ jobs:
           printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' \
             | sudo tee /etc/apt/preferences.d/mozilla > /dev/null
           sudo apt-get update
-          sudo apt-get install -y lldb-18 python3-lldb-18 firefox
-
-      # TODO: LLDB 18 Python bindings have a circular import issue on the
-      # ubuntu-24.04 runner (pre-installed python3-lldb-18 leaves a stale
-      # partial module in sys.modules that we haven't been able to clear).
-      # Re-enable once the root cause is understood.
-      # - name: Run core e2e tests (PR)
-      #   if: github.event_name == 'pull_request'
-      #   env:
-      #     LLDB: lldb-18
-      #   run: python3 test/e2e/run.py --core -j 4
-      #
-      # - name: Run full e2e tests (main)
-      #   if: github.event_name == 'push'
-      #   env:
-      #     LLDB: lldb-18
-      #   run: python3 test/e2e/run.py -j 4
+          sudo apt-get install -y firefox
 
       - name: Run Node e2e tests
-        env:
-          FIREFOX_LLDB_WASM_ATTACH: "1"
         run: npm run test:e2e-node

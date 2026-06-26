@@ -10,39 +10,34 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { Session } from "./harness.mjs";
 
-const skip =
-  process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
-    ? false
-    : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
-
 let s;
 before(async () => {
-  if (!skip) s = await Session.stoppedAtBreakpoint("threaded");
+  s = await Session.stoppedAtBreakpoint("threaded");
 });
 after(async () => {
   await s?.shutdown();
 });
 
-test("thread list shows the main thread plus at least one pool worker", { skip }, async () => {
+test("thread list shows the main thread plus at least one pool worker", async () => {
   const res = await s.command("thread list");
   // Each thread appears on its own line starting with "thread #N"
   const threadLines = res.output.split("\n").filter((l) => /thread #\d/.test(l));
   assert.ok(threadLines.length >= 2, `expected >= 2 threads; thread list:\n${res.output}`);
 });
 
-test("breakpoint fires in matmul_threaded (frame0 is matmul_threaded)", { skip }, async () => {
+test("breakpoint fires in matmul_threaded (frame0 is matmul_threaded)", async () => {
   const f0 = await s.topFrame();
   assert.match(f0.function, /matmul_threaded/);
   assert.equal(f0.file?.endsWith("matmul.cpp"), true);
 });
 
-test("nthreads parameter is readable and > 0", { skip }, async () => {
+test("nthreads parameter is readable and > 0", async () => {
   const nthreads = await s.variable(0, "nthreads");
   assert.equal(nthreads.valid, true);
   assert.ok(nthreads.signed > 0, `nthreads should be > 0, got ${nthreads.signed}`);
 });
 
-test("StepInstruction advances the PC inside matmul_threaded", { skip }, async () => {
+test("StepInstruction advances the PC inside matmul_threaded", async () => {
   const pcBefore = (await s.topFrame()).pc;
   assert.notEqual(pcBefore, "0x0");
   await s.stepInstruction();

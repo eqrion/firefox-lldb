@@ -16,14 +16,8 @@ import { Session } from "./harness.mjs";
 const JS_BP_FILE = "math.js";
 const JS_BP_LINE = 725;
 
-const skip =
-  process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
-    ? false
-    : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
-
 let s;
 before(async () => {
-  if (skip) return;
   s = await Session.attach("factorial", {
     fire: "runFactorial(); setTimeout(runFactorial, 800)",
   });
@@ -38,7 +32,7 @@ after(async () => {
   await s?.shutdown();
 });
 
-test("JS breakpoint fires: stopped in math.js at/near line 725", { skip }, async () => {
+test("JS breakpoint fires: stopped in math.js at/near line 725", async () => {
   const st = await s.state();
   assert.equal(st.reason, "breakpoint", `stop reason: ${st.reason}`);
   const f0 = await s.topFrame();
@@ -47,7 +41,7 @@ test("JS breakpoint fires: stopped in math.js at/near line 725", { skip }, async
   assert.ok(f0.line - JS_BP_LINE <= 5, `line ${f0.line} too far from requested ${JS_BP_LINE}`);
 });
 
-test("thread step-over in a JS frame advances by one source line", { skip }, async () => {
+test("thread step-over in a JS frame advances by one source line", async () => {
   const lineBefore = (await s.topFrame()).line;
   await s.stepOver();
   assert.notEqual((await s.state()).reason, "exited");

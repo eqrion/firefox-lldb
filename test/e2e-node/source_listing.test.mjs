@@ -11,14 +11,9 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { Session } from "./harness.mjs";
 
-const skip =
-  process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
-    ? false
-    : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
-
 let s;
 before(async () => {
-  if (!skip) s = await Session.stoppedAtBreakpoint("factorial");
+  s = await Session.stoppedAtBreakpoint("factorial");
 });
 after(async () => {
   await s?.shutdown();
@@ -26,7 +21,6 @@ after(async () => {
 
 test(
   "wasm frame has a valid file and positive line number (DWARF source info)",
-  { skip },
   async () => {
     const f0 = await s.topFrame();
     assert.match(f0.function, /compute_factorial/);
@@ -37,7 +31,6 @@ test(
 
 test(
   "a JS caller frame has a valid file ending in .js with a positive line number",
-  { skip },
   async () => {
     const frames = await s.frames();
     const jsFrame = frames.find((f) => f.file?.endsWith(".js"));

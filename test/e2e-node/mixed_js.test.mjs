@@ -15,20 +15,15 @@ import { Session } from "./harness.mjs";
 const APP_JS_FILE = "app.js";
 const APP_JS_BREAKLINE = 14;
 
-const skip =
-  process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
-    ? false
-    : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
-
 let s;
 before(async () => {
-  if (!skip) s = await Session.stoppedAtBreakpoint("mixed_js");
+  s = await Session.stoppedAtBreakpoint("mixed_js");
 });
 after(async () => {
   await s?.shutdown();
 });
 
-test("math.js (emscripten glue) is visible in the call stack", { skip }, async () => {
+test("math.js (emscripten glue) is visible in the call stack", async () => {
   const frames = await s.frames();
   const files = frames.map((f) => f.file);
   assert.ok(
@@ -37,7 +32,7 @@ test("math.js (emscripten glue) is visible in the call stack", { skip }, async (
   );
 });
 
-test("app.js (application JS) is visible in the call stack", { skip }, async () => {
+test("app.js (application JS) is visible in the call stack", async () => {
   const frames = await s.frames();
   const files = frames.map((f) => f.file);
   assert.ok(
@@ -46,12 +41,12 @@ test("app.js (application JS) is visible in the call stack", { skip }, async () 
   );
 });
 
-test("math.cpp (DWARF source) is visible at the innermost wasm frame", { skip }, async () => {
+test("math.cpp (DWARF source) is visible at the innermost wasm frame", async () => {
   const f0 = await s.topFrame();
   assert.equal(f0.file?.endsWith("math.cpp"), true, `frame0 file: ${f0.file}`);
 });
 
-test("app.js breakpoint at line 14 resolves to >= 1 location", { skip }, async () => {
+test("app.js breakpoint at line 14 resolves to >= 1 location", async () => {
   const res = await s.breakpointByLocation(APP_JS_FILE, APP_JS_BREAKLINE);
   // Output should contain "Breakpoint N: N locations"
   assert.match(res.output, /Breakpoint \d+:/);

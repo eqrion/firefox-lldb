@@ -9,38 +9,33 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { Session } from "./harness.mjs";
 
-const skip =
-  process.env.FIREFOX_LLDB_WASM_ATTACH === "1"
-    ? false
-    : "requires headless Firefox + fixtures; set FIREFOX_LLDB_WASM_ATTACH=1";
-
 let s;
 before(async () => {
-  if (!skip) s = await Session.stoppedAtBreakpoint("heap");
+  s = await Session.stoppedAtBreakpoint("heap");
 });
 after(async () => {
   await s?.shutdown();
 });
 
-test("heap-allocated Point*: pointer is non-null", { skip }, async () => {
+test("heap-allocated Point*: pointer is non-null", async () => {
   const pt = await s.variable(0, "pt");
   assert.equal(pt.valid, true);
   assert.notEqual(pt.unsigned, 0);
 });
 
-test("pt->x == 1.5 (struct on heap, read through pointer)", { skip }, async () => {
+test("pt->x == 1.5 (struct on heap, read through pointer)", async () => {
   const x = await s.variable(0, "pt->x");
   assert.equal(x.valid, true);
   assert.ok(Math.abs(parseFloat(x.value) - 1.5) < 0.01, `pt->x: ${x.value}`);
 });
 
-test("heap-allocated int32_t[5]: pointer is non-null", { skip }, async () => {
+test("heap-allocated int32_t[5]: pointer is non-null", async () => {
   const arr = await s.variable(0, "arr");
   assert.equal(arr.valid, true);
   assert.notEqual(arr.unsigned, 0);
 });
 
-test("arr[0] == 10 (first element of heap array)", { skip }, async () => {
+test("arr[0] == 10 (first element of heap array)", async () => {
   const elem = await s.variable(0, "arr[0]");
   assert.equal(elem.valid, true);
   assert.equal(elem.signed, 10);
