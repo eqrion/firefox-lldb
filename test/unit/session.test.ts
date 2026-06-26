@@ -789,6 +789,21 @@ test("target-destroyed-form for top-level target emits 'detached'", async () => 
   srv.close();
 });
 
+test("session emits 'close' when the RDP connection drops", async () => {
+  const srv = new FakeRdpServer();
+  await srv.listen();
+  const session = await srv.acceptSession();
+
+  let closeFired = false;
+  session.on("close", () => { closeFired = true; });
+
+  srv.close();
+  await sleep(200);
+
+  assert.equal(closeFired, true, "session should emit 'close' on transport close");
+  session.close();
+});
+
 test("navigate() same-URL reload does not emit 'detached' for the old target", async () => {
   const srv = new FakeRdpServer();
   await srv.listen();

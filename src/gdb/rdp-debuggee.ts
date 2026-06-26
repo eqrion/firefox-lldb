@@ -105,8 +105,10 @@ export class RdpDebuggee {
   #envCacheByActor = new Map<string, Record<string, { value?: unknown }>>();
 
   // Resolves on the next all-stop "stopped" event (armed before resume/step).
+  // Rejects if the session closes before a stop arrives (see constructor).
   #stopped: Promise<StoppedEvent> = Promise.resolve({ tid: 1, pausePacket: {} });
   #resolveStopped: ((e: StoppedEvent) => void) | null = null;
+  #rejectStopped: ((e: Error) => void) | null = null;
   #lastPauseReason = "breakpoint";
 
   // Fired once on LLDB's first continue (drives the page's wasm export
@@ -122,6 +124,15 @@ export class RdpDebuggee {
         (e.pausePacket as { why?: { type?: string } })?.why?.type ?? "breakpoint";
       this.#resolveStopped?.(e);
       this.#resolveStopped = null;
+      this.#rejectStopped = null;
+    });
+
+    session.on("close", () => {
+      // Unblock any pending EventFuture.finish / primeStop so the gdbstub
+      // worker thread doesn't hang when the RDP connection drops mid-session.
+      this.#rejectStopped?.(new Error("session closed"));
+      this.#resolveStopped = null;
+      this.#rejectStopped = null;
     });
 
     const tmpDir = this.#tmpDir;
@@ -577,7 +588,10 @@ export class RdpDebuggee {
   }
 
   #armStopped(): void {
-    this.#stopped = new Promise((resolve) => (this.#resolveStopped = resolve));
+    this.#stopped = new Promise((resolve, reject) => {
+      this.#resolveStopped = resolve;
+      this.#rejectStopped = reject;
+    });
   }
 
   #eventFutureRef(): Ref {

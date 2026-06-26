@@ -221,6 +221,9 @@ export class RdpWasmSession extends EventEmitter {
   private constructor(client: RdpClient) {
     super();
     this.#client = client;
+    // Forward the transport close so consumers (e.g. RdpDebuggee) can unblock
+    // any promises that wait for RDP events (stopped, navigate target, etc.).
+    client.on("close", () => this.emit("close"));
   }
 
   // --- public accessors ---
