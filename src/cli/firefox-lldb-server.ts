@@ -138,10 +138,12 @@ async function watchTabs(
   while (!shouldStop()) {
     try {
       await watchAndPrimeFirefoxTabs(rdpPort, "127.0.0.1", onTabs);
-      break;
     } catch {
-      await sleep(250);
+      // Connection error; fall through to the sleep+retry below.
     }
+    // Whether the RDP connection closed cleanly or with an error, retry after
+    // a short delay so --connect mode recovers when Firefox restarts.
+    if (!shouldStop()) await sleep(250);
   }
 }
 

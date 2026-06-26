@@ -755,3 +755,36 @@ test("stepOne sends resume with resumeLimit:step only to the specified thread", 
   session.close();
   srv.close();
 });
+
+// ---------------------------------------------------------------------------
+// Tests: tab close / detached event
+// ---------------------------------------------------------------------------
+
+test("target-destroyed-form for top-level target emits 'detached'", async () => {
+  const srv = new FakeRdpServer();
+  await srv.listen();
+  const session = await srv.acceptSession();
+
+  srv.targetAvailable("mainThread", { isTopLevel: true });
+  srv.targetAvailable("workerThread");
+  await sleep(200);
+  assert.equal(session.listTids().length, 2);
+
+  let detachCount = 0;
+  session.on("detached", () => detachCount++);
+
+  // Destroying a worker should NOT emit "detached".
+  srv.targetDestroyed("workerThread");
+  await sleep(200);
+  assert.equal(detachCount, 0, "worker destruction should not emit detached");
+  assert.equal(session.listTids().length, 1, "worker removed from list");
+
+  // Destroying the top-level target (page closed) SHOULD emit "detached".
+  srv.targetDestroyed("mainThread");
+  await sleep(200);
+  assert.equal(detachCount, 1, "page close should emit detached exactly once");
+  assert.equal(session.listTids().length, 0, "main thread removed from list");
+
+  session.close();
+  srv.close();
+});
