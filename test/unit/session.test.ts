@@ -866,6 +866,34 @@ test("navigate() same-URL reload does not emit 'detached' for the old target", a
   srv.close();
 });
 
+test("frames() rejects immediately when session closes while waiting", async () => {
+  const srv = new FakeRdpServer();
+  await srv.listen();
+  const session = await srv.acceptSession();
+
+  srv.targetAvailable("thread1", { isTopLevel: true });
+  await sleep(200);
+  const tids = session.listTids();
+  assert.equal(tids.length, 1);
+
+  // Register a handler for frames that never responds, simulating a thread
+  // in mid-resume transition.
+  srv.onNext(
+    (r) => r.type === "frames",
+    () => null
+  );
+
+  const framesP = session.frames(tids[0]);
+
+  // Close the session before the frames response arrives.
+  await sleep(50);
+  srv.close();
+
+  await assert.rejects(framesP, /session closed/, "frames() should reject immediately on close");
+
+  session.close();
+});
+
 test("evalJS rejects immediately when session closes while waiting for evaluationResult", async () => {
   const srv = new FakeRdpServer();
   await srv.listen();

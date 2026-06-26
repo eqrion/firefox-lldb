@@ -550,16 +550,32 @@ export class RdpWasmSession extends EventEmitter {
   // --- frames ---
 
   async frames(tid: number, start = 0, count = 1000): Promise<FrameForm[]> {
-    const timeout = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error("frames timeout")), 5000)
-    );
-    const req = this.#client.request(this.#info(tid).threadActor, {
-      type: "frames",
-      start,
-      count,
+    // Cap at 5 s for threads in mid-resume transition (they never respond).
+    // Clear the timer and close listener whether req, timeout, or close wins,
+    // so neither lingers in the event loop after the call returns.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onClose: (() => void) | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("frames timeout")), 5000);
     });
-    const { frames } = (await Promise.race([req, timeout])) as { frames?: unknown };
-    return (frames ?? []) as FrameForm[];
+    const closeP = new Promise<never>((_, reject) => {
+      onClose = () => reject(new Error("session closed"));
+      this.once("close", onClose);
+    });
+    try {
+      const req = this.#client.request(this.#info(tid).threadActor, {
+        type: "frames",
+        start,
+        count,
+      });
+      const { frames } = (await Promise.race([req, timeout, closeP])) as {
+        frames?: unknown;
+      };
+      return (frames ?? []) as FrameForm[];
+    } finally {
+      clearTimeout(timer);
+      if (onClose) this.off("close", onClose);
+    }
   }
 
   // --- breakpoints ---
