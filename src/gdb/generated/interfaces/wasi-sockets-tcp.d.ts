@@ -26,6 +26,7 @@ export class TcpSocket {
   startListen(): void;
   finishListen(): void;
   accept(): [TcpSocket, InputStream, OutputStream];
+  localAddress(): IpSocketAddress;
   subscribe(): Pollable;
   shutdown(shutdownType: ShutdownType): void;
 }

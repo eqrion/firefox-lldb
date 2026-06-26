@@ -95,13 +95,15 @@ impl<'a> Debugger<'a> {
             .await
             .expect("Could not bind to TCP port");
 
+        let bound_addr = listener.local_addr().expect("Could not get local address");
+
         api::print_debugger_info(&format!(
             "Debugger listening on {}",
-            self.options.tcp_address,
+            bound_addr,
         ));
         api::print_debugger_info(&format!(
             "In LLDB, attach with: process connect --plugin wasm connect://{}",
-            self.options.tcp_address,
+            bound_addr,
         ));
 
         // Only accept one connection for the run; once the debugger
