@@ -36,8 +36,9 @@ export function startGdbServer({ dispatch, port, onInfo, verbose }) {
   });
 
   let resolveReady;
+  let rejectReady;
   let boundPort = port;
-  const ready = new Promise((r) => (resolveReady = r));
+  const ready = new Promise((r, j) => { resolveReady = r; rejectReady = j; });
 
   worker.on("message", async (m) => {
     if (m === 1) {
@@ -84,6 +85,10 @@ export function startGdbServer({ dispatch, port, onInfo, verbose }) {
     } else {
       console.error("[gdb worker error]", e);
     }
+    // If the worker crashed before the 'listening' message arrived, unblock
+    // the caller who is awaiting gdbServer.ready.
+    rejectReady?.(e);
+    rejectReady = null;
   });
 
   return {
