@@ -21,7 +21,9 @@ interface FakeClient {
   pause: () => Promise<void>;
 }
 
-function harness(client: FakeClient, session?: Partial<RdpWasmSession>) {
+type ExtraOpts = { onTargetInterrupt?: () => void; onTargetResume?: () => void };
+
+function harness(client: FakeClient, session?: Partial<RdpWasmSession>, extra?: ExtraOpts) {
   const input = new PassThrough();
   let out = "";
   let exited = false;
@@ -41,6 +43,7 @@ function harness(client: FakeClient, session?: Partial<RdpWasmSession>) {
     onExit: () => {
       exited = true;
     },
+    ...extra,
   });
   const settle = () =>
     new Promise<void>((resolve) => {
@@ -258,4 +261,49 @@ test("two Ctrl-C at an idle empty prompt exit the REPL", async () => {
   h.interrupt();
   await tick();
   assert.ok(h.exited, "double Ctrl-C at an empty prompt should exit");
+});
+
+test("Ctrl-C calls onTargetInterrupt not pause() when callback is provided", async () => {
+  let interruptCalled = false;
+  let pauseCalled = false;
+  let release!: (v: { output: string; error: string; status: number }) => void;
+  const client: FakeClient = {
+    sessionCommand: (cmd) =>
+      cmd === "c"
+        ? new Promise((r) => (release = r))
+        : Promise.resolve({ output: "", error: "", status: 0 }),
+    pause: async () => {
+      pauseCalled = true;
+    },
+  };
+  const h = harness(client, undefined, {
+    onTargetInterrupt: () => {
+      interruptCalled = true;
+      release({ output: "Process stopped.\n", error: "", status: 0 });
+    },
+  });
+  await h.start();
+  const typed = h.type("c");
+  await tick();
+  await tick();
+  h.interrupt();
+  const out = await typed;
+  assert.ok(interruptCalled, "onTargetInterrupt should be called");
+  assert.ok(!pauseCalled, "pause() must not be called when onTargetInterrupt is provided");
+  assert.match(out, /Process stopped/);
+  assert.ok(!h.exited);
+});
+
+test("continue commands print 'Process running.' and call onTargetResume", async () => {
+  let resumeCalled = false;
+  const h = harness(
+    okClient(() => ({ output: "Process stopped.\n", error: "", status: 0 })),
+    undefined,
+    { onTargetResume: () => { resumeCalled = true; } }
+  );
+  await h.start();
+  const out = await h.type("c");
+  assert.ok(resumeCalled, "onTargetResume should be called for a continue command");
+  assert.match(out, /Process running\./);
+  assert.match(out, /Process stopped\./);
 });

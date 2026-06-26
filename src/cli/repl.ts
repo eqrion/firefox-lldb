@@ -21,6 +21,10 @@ export interface ReplDeps {
   output?: Writable;
   /** Called when the REPL exits (Ctrl-D, `quit`, or double Ctrl-C). */
   onExit?: () => void;
+  /** Called when the user resumes the target (c/continue). */
+  onTargetResume?: () => void;
+  /** Called when the user Ctrl-C's a running target. Should interrupt Firefox directly. */
+  onTargetInterrupt?: () => void;
 }
 
 export interface Repl {
@@ -118,7 +122,11 @@ export function runRepl(deps: ReplDeps): Repl {
       // A target is running under `process continue`/`run`; interrupt it. The
       // pending sessionCommand resolves with the stop output.
       write("^C");
-      void deps.client.pause().catch(() => {});
+      if (deps.onTargetInterrupt) {
+        deps.onTargetInterrupt();
+      } else {
+        void deps.client.pause().catch(() => {});
+      }
       return;
     }
     const hadText = editable.line.length > 0;
@@ -150,8 +158,13 @@ export function runRepl(deps: ReplDeps): Repl {
     }
     if (cmd === "js" || cmd.startsWith("js ")) return dispatchJs(cmd.slice(2).trim());
 
+    const isContinue = cmd === "c" || cmd === "continue" || cmd === "process continue";
     inflight = true;
     try {
+      if (isContinue) {
+        write("Process running.");
+        deps.onTargetResume?.();
+      }
       const res = await deps.client.sessionCommand(cmd);
       if (res.output) write(res.output);
       if (res.error) write(res.error);

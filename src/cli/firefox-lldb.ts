@@ -12,6 +12,7 @@
 // we pump bytes between channel <id> and a localhost socket.
 
 import net from "node:net";
+import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { LLDBClient } from "lldb-wasm";
 import { parseCliArgs, startPlatformServer } from "./firefox-lldb-server.js";
@@ -22,6 +23,30 @@ import type { RdpWasmSession } from "../rdp/session.js";
 // Open bridge sockets, tracked so we can tear them down on exit (otherwise
 // net.Server.close() blocks on the live connections).
 const bridgeSockets = new Set<net.Socket>();
+
+function focusFirefox(): void {
+  switch (process.platform) {
+    case "darwin":
+      execFile("osascript", ["-e", 'tell application "Firefox" to activate'], () => {});
+      break;
+    case "linux":
+      execFile("wmctrl", ["-a", "Firefox"], () => {});
+      break;
+    case "win32":
+      execFile(
+        "powershell",
+        [
+          "-Command",
+          '$p=Get-Process firefox -EA SilentlyContinue|Select-Object -First 1;' +
+            'if($p){Add-Type -Name W -Namespace WU -MemberDefinition' +
+            ' \'[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);\';' +
+            "[WU.W]::SetForegroundWindow($p.MainWindowHandle)}",
+        ],
+        () => {}
+      );
+      break;
+  }
+}
 
 // Bridge a localhost TCP RSP server to an in-process channel the wasm LLDB
 // connects to via "inprocess://<id>". Returns the channel ID.
@@ -65,10 +90,13 @@ async function main(): Promise<void> {
   // The REPL owns the terminal; `js` commands and console streaming need the
   // live RDP session, which the platform server hands us via onSession.
   let session: RdpWasmSession | undefined;
+  let triggerInterrupt: (() => void) | undefined;
   const repl = runRepl({
     client,
     getSession: () => session,
     onExit: () => void cleanup(0),
+    onTargetResume: focusFirefox,
+    onTargetInterrupt: () => triggerInterrupt?.(),
   });
 
   // Each per-tab GDB server launched by qLaunchGDBServer gets bridged; the
@@ -78,12 +106,14 @@ async function main(): Promise<void> {
     wrapConnectPort: (port) => bridgeTcp(client, port),
     logger: quietLogger(verbose),
     onTab: (tab, pid) => repl.print(`tab available: ${tab.url}\n  attach --pid ${pid}`),
-    onSession: (s) => {
+    onSession: (s, interrupt) => {
       session = s;
+      triggerInterrupt = interrupt;
       void s.streamConsole((m) => repl.printConsole(m));
       s.on("detached", () => {
         repl.print("the attached tab was closed; detaching.");
         session = undefined;
+        triggerInterrupt = undefined;
         void client.sessionCommand("process detach").catch(() => {});
       });
     },
