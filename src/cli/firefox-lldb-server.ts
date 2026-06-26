@@ -31,7 +31,7 @@ const USAGE = `\
 Usage: firefox-lldb-server [options]
 
 Modes (default: --launch):
-  --launch            Launch a fresh headless Firefox with a throwaway profile.
+  --launch            Launch a fresh Firefox with a throwaway profile.
   --connect           Connect to an already-running Firefox.
 
 Options:

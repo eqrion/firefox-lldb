@@ -12,7 +12,7 @@
 import os from "node:os";
 import type { RspHandler, RspSession } from "../protocol/rsp-server.js";
 import { asciiToHex, hexToAscii } from "../protocol/hex.js";
-import type { GdbServerSpawner } from "./gdb-server-spawner.js";
+import type { GdbServerSpawner, SpawnedServer } from "./gdb-server-spawner.js";
 import type { TabInfo } from "../rdp/session.js";
 
 interface ProcessInfo {
@@ -47,6 +47,13 @@ export class PlatformServer implements RspHandler {
   #tabPidMap = new Map<number, string>();
   #tabActorPid = new Map<string, number>();
   #nextTabPid = 1;
+
+  // Deduplication of per-tab GDB server launches. A single promise per actor
+  // is shared across concurrent qLaunchGDBServer calls for the same tab, so a
+  // retry that races with an in-flight launch re-uses the same server rather
+  // than opening a second RDP session.
+  #serverByActor = new Map<string, Promise<SpawnedServer>>();
+  #actorByServerPid = new Map<number, string>();
 
   // Per-connection state.
   #workingDir = process.cwd();
@@ -123,6 +130,11 @@ export class PlatformServer implements RspHandler {
     if (data === "qQueryGDBServer") return this.#queryGdbServer();
     if (data.startsWith("qKillSpawnedProcess:")) {
       const pid = parseInt(data.slice("qKillSpawnedProcess:".length), 10);
+      const actor = this.#actorByServerPid.get(pid);
+      if (actor) {
+        this.#serverByActor.delete(actor);
+        this.#actorByServerPid.delete(pid);
+      }
       return (await this.#spawner.kill(pid)) ? "OK" : "E01";
     }
     if (data === "qLaunchSuccess") return "OK";
@@ -222,7 +234,30 @@ export class PlatformServer implements RspHandler {
     const pidParam = params.get("pid");
     const tabActor = pidParam !== undefined ? this.#tabPidMap.get(Number(pidParam)) : undefined;
     const url = tabActor ? undefined : this.#resolveLaunchUrl();
-    const { pid, port } = await this.#spawner.launch(0, url, tabActor);
+
+    let serverP: Promise<SpawnedServer>;
+    if (tabActor) {
+      const existing = this.#serverByActor.get(tabActor);
+      if (existing) {
+        serverP = existing;
+      } else {
+        serverP = this.#spawner.launch(0, url, tabActor).then(
+          (s) => {
+            this.#actorByServerPid.set(s.pid, tabActor);
+            return s;
+          },
+          (err) => {
+            this.#serverByActor.delete(tabActor);
+            throw err;
+          }
+        );
+        this.#serverByActor.set(tabActor, serverP);
+      }
+    } else {
+      serverP = this.#spawner.launch(0, url, undefined);
+    }
+
+    const { pid, port } = await serverP;
     const connectPort = this.#wrapConnectPort ? await this.#wrapConnectPort(port) : port;
     return `pid:${pid};port:${connectPort};`;
   }

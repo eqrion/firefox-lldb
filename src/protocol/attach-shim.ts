@@ -75,7 +75,12 @@ export function startAttachShim(opts: {
 
     // component -> LLDB is always a transparent pipe.
     upstream.on("data", (d) => client.write(d));
-    upstream.on("close", () => client.end());
+    upstream.on("close", () => {
+      // When the component closes after vAttach, send a clean exit notification
+      // so LLDB reports "exited with status = 0" instead of "lost connection".
+      if (attached && client.writable) client.write(frame("W00"));
+      client.end();
+    });
     upstream.on("error", () => client.destroy());
     client.on("close", () => upstream.end());
     client.on("error", () => upstream.destroy());
