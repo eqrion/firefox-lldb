@@ -139,6 +139,49 @@ test("qLaunchGDBServer spawns a reachable per-tab GDB server", async () => {
   assert.match(query, new RegExp(`"port":${port}`));
 });
 
+test("concurrent qLaunchGDBServer for same tab returns identical pid/port", async () => {
+  let launchCount = 0;
+  const concurrentLauncher: GdbServerLauncher = async ({ port }) => {
+    launchCount++;
+    const srv = new RspServer({ async handle() { return ""; } }, { singleConnection: true });
+    const boundPort = await srv.listen(port);
+    return { port: boundPort, stop: () => srv.close() };
+  };
+  const sp = new GdbServerSpawner(concurrentLauncher);
+  const ps = new PlatformServer({
+    spawner: sp,
+    listTabs: async () => [{ actor: "tab-concurrent", url: "http://example.com/", title: "" }],
+  });
+  const srv = new RspServer(ps);
+  const srvPort = await srv.listen(0);
+  const cl = await RspClient.connect(srvPort);
+
+  // Get the tab's stable pid.
+  const listResp = await cl.requestText("qfProcessInfo");
+  const pid = listResp.match(/pid:(\d+);/)![1];
+
+  // Fire two concurrent qLaunchGDBServer requests for the same tab.
+  const [r1, r2] = await Promise.all([
+    cl.requestText(`qLaunchGDBServer;host:localhost;pid:${pid};`),
+    cl.requestText(`qLaunchGDBServer;host:localhost;pid:${pid};`),
+  ]);
+
+  // Both responses must resolve to the same spawned server.
+  const port1 = r1.match(/pid:(\d+);port:(\d+);/);
+  const port2 = r2.match(/pid:(\d+);port:(\d+);/);
+  assert.ok(port1, "first response has pid;port");
+  assert.ok(port2, "second response has pid;port");
+  assert.equal(port1![1], port2![1], "same spawner pid");
+  assert.equal(port1![2], port2![2], "same port");
+
+  // The underlying launcher should have been called exactly once.
+  assert.equal(launchCount, 1, "launcher called once despite two concurrent requests");
+
+  cl.close();
+  await srv.close();
+  await sp.killAll();
+});
+
 test("unsupported packets get an empty response", async () => {
   assert.equal(await client.requestText("vCont?"), "");
 });
