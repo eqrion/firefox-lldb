@@ -223,6 +223,33 @@ test("Ctrl-C while a target is running interrupts instead of exiting", async () 
   assert.ok(!h.exited, "the REPL must stay alive after interrupting a running target");
 });
 
+test("js frame with out-of-range index prints an error", async () => {
+  const session = {
+    paused: () => true,
+    stoppedTid: 1,
+    frames: async () => [
+      { actor: "f0", type: "call", displayName: "foo", where: { actor: "s", line: 10, column: 0 } },
+    ],
+  } as unknown as RdpWasmSession;
+  const h = harness(okClient(() => ({ output: "", error: "", status: 0 })), session);
+  await h.start();
+  const out = await h.type("js frame 99");
+  assert.match(out, /no frame 99/);
+});
+
+test("js p with no expression prints usage", async () => {
+  const session = {
+    paused: () => true,
+    stoppedTid: 1,
+    frames: async () => [],
+    stoppedConsoleActor: "console1",
+  } as unknown as RdpWasmSession;
+  const h = harness(okClient(() => ({ output: "", error: "", status: 0 })), session);
+  await h.start();
+  const out = await h.type("js p");
+  assert.match(out, /usage/i);
+});
+
 test("two Ctrl-C at an idle empty prompt exit the REPL", async () => {
   const h = harness(okClient(() => ({ output: "", error: "", status: 0 })));
   await h.start();
