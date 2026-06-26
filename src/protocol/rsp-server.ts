@@ -146,6 +146,9 @@ export class RspServer {
         this.#log.info("client disconnected");
       });
     });
+    // Persistent error handler so unexpected server errors (e.g. EADDRINUSE
+    // on re-bind) are logged rather than crashing via unhandled-error.
+    this.#server.on("error", (err) => this.#log.error(`server error: ${err.message}`));
   }
 
   /** Begin listening. Port 0 auto-selects. Resolves with the bound port. */
