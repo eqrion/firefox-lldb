@@ -191,7 +191,7 @@ RDP facts confirmed experimentally:
   numbers without wasm types. Integer numbers are treated as i32, non-integers as
   f64, bigints as i64.
 - **JS locals/variable inspection** — JS frame locals are not yet exposed (returns empty). JS values don't map cleanly to wasm types; deferred to a future phase.
-- **Per-function JS names** — each JS source is one synthetic module with a file-level subprogram; `GetFunctionName()` returns the filename. Real per-function names (from the per-frame `displayName` RDP already provides) would need multi-subprogram modules with content-versioned unique ids.
+- **Per-function JS names** — each JS source is one synthetic module with one subprogram; the subprogram name is taken from `callee.displayName` of the innermost active JS frame, so the first JS caller correctly shows its function name instead of the filename. Outer JS frames from the same file (which Firefox reports at the same source line, see next bullet) still show the innermost function name. A full fix (distinct name per frame) requires multi-subprogram modules with per-depth unique ids, which needs a Rust change.
 - **Duplicate frame IDs for recursive JS frames** — `qWasmCallStack` reports only
   PCs; LLDB's wasm plugin derives `GetFrameID()` from the PC alone (no FP/SP
   equivalent for wasm). Multiple JS frames at the same source line (e.g., a

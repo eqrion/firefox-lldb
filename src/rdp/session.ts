@@ -266,6 +266,7 @@ export class RdpWasmSession extends EventEmitter {
       (tabActor ? tabs.find((t) => t.actor === tabActor) : undefined) ??
       tabs.find((t) => t.selected) ??
       tabs[0];
+    if (!tab) throw new Error("no Firefox tab found (Firefox may still be starting)");
     this.#tabActor = tab.actor;
 
     const { actor: watcher } = await this.#client.request(this.#tabActor, {
