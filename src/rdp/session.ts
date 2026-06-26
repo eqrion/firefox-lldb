@@ -361,10 +361,14 @@ export class RdpWasmSession extends EventEmitter {
 
   /** Navigate the tab; resolves once a top-level target with the given URL arrives. */
   async navigate(url: string): Promise<void> {
-    // Remove stale top-level target (pre-navigation). Workers are managed
-    // by Firefox's own target-destroyed-form events.
+    // Remove all top-level targets before navigating. Workers are managed
+    // by Firefox's own target-destroyed-form events. We must remove the
+    // current top-level target regardless of its URL — if we only remove
+    // targets with a different URL, a same-URL reload leaves the old target
+    // in #threads, so target-destroyed-form for it would emit "detached" and
+    // incorrectly trigger a process-detach in the consumer.
     for (const [tid, t] of this.#threads) {
-      if (t.isTopLevel && t.url !== url) {
+      if (t.isTopLevel) {
         this.#threads.delete(tid);
         this.#pausedTids.delete(tid);
         this.#interruptedTids.delete(tid);

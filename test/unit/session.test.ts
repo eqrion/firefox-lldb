@@ -788,3 +788,40 @@ test("target-destroyed-form for top-level target emits 'detached'", async () => 
   session.close();
   srv.close();
 });
+
+test("navigate() same-URL reload does not emit 'detached' for the old target", async () => {
+  const srv = new FakeRdpServer();
+  await srv.listen();
+  const session = await srv.acceptSession();
+
+  const PAGE_URL = "http://example.com/page.html";
+
+  // Start with a top-level target at PAGE_URL (simulating the page already loaded).
+  srv.targetAvailable("threadV1", { isTopLevel: true, url: PAGE_URL });
+  await sleep(200);
+  assert.equal(session.listTids().length, 1);
+
+  let detachCount = 0;
+  session.on("detached", () => detachCount++);
+
+  // When navigate() is called, it sends navigateTo to "tab1". The handler
+  // simulates Firefox destroying the old target and creating a new one with
+  // the same URL (a reload).
+  srv.onNext(
+    (r) => r.type === "navigateTo",
+    () => {
+      srv.targetDestroyed("threadV1");
+      srv.targetAvailable("threadV2", { isTopLevel: true, url: PAGE_URL });
+      return { from: "tab1" };
+    }
+  );
+
+  // navigate() should resolve (new target arrived) without emitting "detached".
+  await session.navigate(PAGE_URL);
+
+  assert.equal(detachCount, 0, "same-URL reload must NOT emit detached");
+  assert.equal(session.listTids().length, 1, "new target present after reload");
+
+  session.close();
+  srv.close();
+});
