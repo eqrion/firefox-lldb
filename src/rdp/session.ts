@@ -378,14 +378,23 @@ export class RdpWasmSession extends EventEmitter {
       }
     }
 
-    const target = new Promise<void>((resolve) => {
+    const target = new Promise<void>((resolve, reject) => {
+      const cleanup = () => {
+        this.off("target", onTarget);
+        this.off("close", onClose);
+      };
       const onTarget = (t: ThreadInfo) => {
         if (t.isTopLevel && t.url === url) {
-          this.off("target", onTarget);
+          cleanup();
           resolve();
         }
       };
+      const onClose = () => {
+        cleanup();
+        reject(new Error("session closed during navigate"));
+      };
       this.on("target", onTarget);
+      this.on("close", onClose);
     });
     await this.#client.request(this.#tabActor, { type: "navigateTo", url, waitForLoad: true });
     await target;

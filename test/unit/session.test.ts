@@ -804,6 +804,31 @@ test("session emits 'close' when the RDP connection drops", async () => {
   session.close();
 });
 
+test("navigate() rejects when the session closes before the new target arrives", async () => {
+  const srv = new FakeRdpServer();
+  await srv.listen();
+  const session = await srv.acceptSession();
+
+  // Start with a top-level target.
+  srv.targetAvailable("threadV0", { isTopLevel: true, url: "http://example.com/" });
+  await sleep(200);
+
+  // Register a navigateTo handler that responds but never sends a new target.
+  srv.onNext(
+    (r) => r.type === "navigateTo",
+    () => ({ from: "tab1" })
+  );
+
+  // Start navigate() then immediately close the session before the new target arrives.
+  const navP = session.navigate("http://example.com/new.html");
+  await sleep(50);
+  srv.close();
+
+  await assert.rejects(navP, /session closed during navigate/, "navigate should reject on close");
+
+  session.close();
+});
+
 test("navigate() same-URL reload does not emit 'detached' for the old target", async () => {
   const srv = new FakeRdpServer();
   await srv.listen();
