@@ -145,9 +145,17 @@ async function watchTabs(
   }
 }
 
-async function waitForWasm(session: RdpWasmSession): Promise<void> {
+async function waitForWasm(
+  session: RdpWasmSession,
+  onWaiting?: () => void
+): Promise<void> {
   let wasm = (await session.wasmSources())[0];
-  for (let i = 0; i < 80 && !wasm; i++) {
+  let notified = false;
+  for (let i = 0; i < 300 && !wasm; i++) {
+    if (!notified && i === 20) {
+      notified = true;
+      onWaiting?.();
+    }
     await sleep(100);
     wasm = (await session.wasmSources())[0];
   }
@@ -249,7 +257,7 @@ export async function startPlatformServer(
       if (navTo) {
         await session.navigate(navTo);
         logger.debug(`[rdp] navigated to ${navTo}`);
-        await waitForWasm(session);
+        await waitForWasm(session, () => logger.info("waiting for wasm sources to appear..."));
       } else if (!session.hasThreads()) {
         await sleep(500);
       }
