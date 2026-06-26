@@ -29,6 +29,17 @@ import { RdpClient } from "./client.js";
 import type { RdpPacket } from "./transport.js";
 import { EventEmitter } from "node:events";
 
+// Thread configuration applied before navigation. observeWasm/observeAsmJS so the
+// page's wasm compiles with debug support; pauseOnExceptions with
+// ignoreCaughtExceptions so we break on uncaught wasm traps (surfacing as a
+// stop) without pausing on routine caught JS exceptions.
+const THREAD_CONFIG = {
+  observeWasm: true,
+  observeAsmJS: true,
+  pauseOnExceptions: true,
+  ignoreCaughtExceptions: true,
+};
+
 export interface TabInfo {
   actor: string;
   url: string;
@@ -116,7 +127,7 @@ export async function watchAndPrimeFirefoxTabs(
       if (!configActor) throw new Error("no thread config actor");
       await client.request(configActor, {
         type: "updateConfiguration",
-        configuration: { observeWasm: true, observeAsmJS: true, pauseOnExceptions: false },
+        configuration: THREAD_CONFIG,
       });
       await client.request(watcher, { type: "watchTargets", targetType: "frame" });
       await client.request(watcher, { type: "watchTargets", targetType: "worker" });
@@ -296,7 +307,7 @@ export class RdpWasmSession extends EventEmitter {
     if (!configActor) throw new Error("Firefox did not return a thread config actor");
     await this.#client.request(configActor, {
       type: "updateConfiguration",
-      configuration: { observeWasm: true, observeAsmJS: true, pauseOnExceptions: false },
+      configuration: THREAD_CONFIG,
     });
 
     this.#client.on("event", (p) => this.#onEvent(p));
