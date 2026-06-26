@@ -80,7 +80,7 @@ export const FIXTURES = {
 
 const MIME = { ".html": "text/html", ".js": "text/javascript", ".wasm": "application/wasm" };
 
-function startStaticServer(pageDir) {
+export function startStaticServer(pageDir) {
   const dir = path.join(REPO, pageDir);
   const server = http.createServer((req, res) => {
     const rel =
