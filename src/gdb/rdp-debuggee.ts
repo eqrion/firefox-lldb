@@ -270,8 +270,8 @@ export class RdpDebuggee {
       case "Frame.getFuncIndex":
         return 0;
       case "Frame.getPc": {
-        const fi = this.#frameInfoById.get(id)!;
-        const frame = this.#framesByTid.get(fi.tid)?.[fi.index];
+        const fi = this.#frameInfoById.get(id);
+        const frame = fi ? this.#framesByTid.get(fi.tid)?.[fi.index] : undefined;
         const line = frame?.where?.line ?? 0;
         if (frame?.type === "call") {
           const url = this.#sourceActorToUrl.get(frame.where!.actor) ?? frame.where!.actor;
@@ -443,9 +443,9 @@ export class RdpDebuggee {
   }
 
   #frameInstance(frameId: number): Ref {
-    const fi = this.#frameInfoById.get(frameId)!;
-    const frames = this.#framesByTid.get(fi.tid) ?? [];
-    const frame = frames[fi.index];
+    const fi = this.#frameInfoById.get(frameId);
+    const frames = fi ? (this.#framesByTid.get(fi.tid) ?? []) : [];
+    const frame = fi ? frames[fi.index] : undefined;
     const url = this.#sourceActorToUrl.get(frame?.where?.actor ?? "") ?? frame?.where?.actor ?? "";
     return this.#instanceRef(url);
   }
