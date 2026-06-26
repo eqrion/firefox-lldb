@@ -76,6 +76,21 @@ export const FIXTURES = {
     breakFunc: "compute_factorial",
     file: "math.cpp",
   },
+  // Source-map fixtures: the wasm ships a source map (sourceMappingURL +
+  // math.wasm.map) instead of embedded DWARF, exercising the source-map ->
+  // DWARF conversion path.
+  sourcemap_factorial: {
+    pageDir: "test/e2e/fixtures/sourcemap",
+    fire: "runFactorial()",
+    breakFunc: "compute_factorial",
+    file: "math.cpp",
+  },
+  sourcemap_sum: {
+    pageDir: "test/e2e/fixtures/sourcemap",
+    fire: "runSum()",
+    breakFunc: "sum_range",
+    file: "math.cpp",
+  },
 };
 
 const MIME = { ".html": "text/html", ".js": "text/javascript", ".wasm": "application/wasm" };
