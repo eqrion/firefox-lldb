@@ -288,8 +288,10 @@ export class RdpWasmSession extends EventEmitter {
     const cfg = await this.#client.request(this.#watcher, {
       type: "getThreadConfigurationActor",
     });
-    const configActor = ((cfg.configuration as { actor?: string })?.actor ??
-      cfg.configuration) as string;
+    const configActor = (
+      (cfg.configuration as { actor?: string })?.actor ?? cfg.configuration
+    ) as string | undefined;
+    if (!configActor) throw new Error("Firefox did not return a thread config actor");
     await this.#client.request(configActor, {
       type: "updateConfiguration",
       configuration: { observeWasm: true, observeAsmJS: true, pauseOnExceptions: false },
