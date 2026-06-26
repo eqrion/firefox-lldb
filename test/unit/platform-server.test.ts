@@ -275,6 +275,39 @@ test("qProcessInfoPID returns info for a known PID even after tab list changes",
   await sp.killAll();
 });
 
+test("A packet sets launch args; qLaunchGDBServer uses arg0 as the URL when it looks like a URL", async () => {
+  // Simulate LLDB's `process launch http://example.com/` flow:
+  // 1. LLDB sends A packet with the URL as the first arg.
+  // 2. qLaunchGDBServer (no pid) resolves to the URL from the args.
+  let capturedUrl: string | undefined;
+  const urlCapturingLauncher: GdbServerLauncher = async ({ port, url }) => {
+    capturedUrl = url;
+    const srv = new RspServer({ async handle() { return ""; } }, { singleConnection: true });
+    const boundPort = await srv.listen(port);
+    return { port: boundPort, stop: () => srv.close() };
+  };
+  const sp = new GdbServerSpawner(urlCapturingLauncher);
+  const ps = new PlatformServer({ spawner: sp });
+  const srv = new RspServer(ps);
+  const srvPort = await srv.listen(0);
+  const cl = await RspClient.connect(srvPort);
+
+  // Encode "http://example.com/" as a hex arg.
+  const url = "http://example.com/";
+  const hexUrl = Buffer.from(url, "latin1").toString("hex");
+  // A packet: A<len>,<idx>,<hexarg>
+  const aPacket = `A${url.length},0,${hexUrl}`;
+  assert.equal(await cl.requestText(aPacket), "OK");
+
+  // qLaunchGDBServer without a pid should use the URL from args.
+  await cl.requestText("qLaunchGDBServer:port:0;host:localhost;");
+  assert.equal(capturedUrl, url, "launcher should receive the URL from A packet");
+
+  cl.close();
+  await srv.close();
+  await sp.killAll();
+});
+
 test("unsupported packets get an empty response", async () => {
   assert.equal(await client.requestText("vCont?"), "");
 });

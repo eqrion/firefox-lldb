@@ -161,7 +161,15 @@ export class PlatformServer implements RspHandler {
       return "OK";
     }
 
-    if (data.startsWith("qUserName:")) return asciiToHex(os.userInfo().username);
+    if (data.startsWith("qUserName:")) {
+      try {
+        return asciiToHex(os.userInfo().username);
+      } catch {
+        // os.userInfo() throws in some container/CI environments where the
+        // uid has no passwd entry. Fall back to the process env or "user".
+        return asciiToHex(process.env.USER ?? process.env.USERNAME ?? "user");
+      }
+    }
 
     // Empty response means "unsupported packet".
     return "";
