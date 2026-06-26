@@ -177,6 +177,29 @@ test("concurrent qLaunchGDBServer for same tab returns identical pid/port", asyn
   // The underlying launcher should have been called exactly once.
   assert.equal(launchCount, 1, "launcher called once despite two concurrent requests");
 
+  // Also verify wrapConnectPort is called once by using a PlatformServer with it.
+  let wrapCount = 0;
+  const spWrap = new GdbServerSpawner(concurrentLauncher);
+  const psWrap = new PlatformServer({
+    spawner: spWrap,
+    listTabs: async () => [{ actor: "tab-wrap", url: "http://example.com/", title: "" }],
+    wrapConnectPort: async (p) => { wrapCount++; return p + 10000; },
+  });
+  const srvWrap = new RspServer(psWrap);
+  const portWrap = await srvWrap.listen(0);
+  const clWrap = await RspClient.connect(portWrap);
+  const listRespWrap = await clWrap.requestText("qfProcessInfo");
+  const tabPidWrap = listRespWrap.match(/pid:(\d+);/)![1];
+  const [rw1, rw2] = await Promise.all([
+    clWrap.requestText(`qLaunchGDBServer;host:localhost;pid:${tabPidWrap};`),
+    clWrap.requestText(`qLaunchGDBServer;host:localhost;pid:${tabPidWrap};`),
+  ]);
+  assert.equal(rw1.match(/port:(\d+);/)![1], rw2.match(/port:(\d+);/)![1], "same wrapped port");
+  assert.equal(wrapCount, 1, "wrapConnectPort called once despite two concurrent requests");
+
+  clWrap.close();
+  await srvWrap.close();
+  await spWrap.killAll();
   cl.close();
   await srv.close();
   await sp.killAll();
