@@ -308,6 +308,15 @@ test("A packet sets launch args; qLaunchGDBServer uses arg0 as the URL when it l
   await sp.killAll();
 });
 
+test("qUserName returns a hex-encoded non-empty username string", async () => {
+  const resp = await client.requestText("qUserName:0");
+  // The response is a hex-encoded string; verify it decodes to something non-empty.
+  assert.ok(resp.length > 0, "qUserName response should not be empty");
+  assert.match(resp, /^[0-9a-f]+$/, "qUserName response should be lowercase hex");
+  const decoded = Buffer.from(resp, "hex").toString("utf8");
+  assert.ok(decoded.length > 0, "decoded username should not be empty");
+});
+
 test("unsupported packets get an empty response", async () => {
   assert.equal(await client.requestText("vCont?"), "");
 });
