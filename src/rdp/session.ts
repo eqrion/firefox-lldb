@@ -438,10 +438,12 @@ export class RdpWasmSession extends EventEmitter {
 
   /** Wasm sources from the given thread. */
   async wasmSourcesForTid(tid: number): Promise<SourceForm[]> {
-    const { sources } = await this.#client.request(this.#info(tid).threadActor, {
+    const { sources } = (await this.#client.request(this.#info(tid).threadActor, {
       type: "sources",
-    });
-    const wasm = (sources as SourceForm[]).filter((s) => s.introductionType === "wasm");
+    })) as { sources?: unknown[] };
+    const wasm = ((sources ?? []) as SourceForm[]).filter(
+      (s) => s.introductionType === "wasm"
+    );
     for (const s of wasm) this.#wasmActorByUrl.set(s.url, s.actor);
     return wasm;
   }
