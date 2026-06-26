@@ -58,8 +58,7 @@ test("shim injects W00 when component closes after vAttach", async () => {
           if (payload.startsWith("QStartNoAckMode")) {
             conn.write(`+$OK#9a`);
           } else if (payload.startsWith("vAttach")) {
-            // Send a minimal stop reply then close.
-            conn.write(`$T05thread:1;#`);
+            // Send a well-formed stop reply then close.
             const stop = "T05thread:1;";
             conn.write(Buffer.from(`$${stop}#${checksum(stop).toString(16).padStart(2, "0")}`, "latin1"));
             conn.destroy();
