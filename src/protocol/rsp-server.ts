@@ -72,7 +72,11 @@ export class RspSession {
 
   #onData(data: Buffer): void {
     // Serialize handling so async handlers reply in packet order.
-    this.#queue = this.#queue.then(() => this.#process(data));
+    // The catch prevents a rejection (e.g. an unexpected parser throw) from
+    // permanently breaking the queue and silently dropping all future packets.
+    this.#queue = this.#queue
+      .then(() => this.#process(data))
+      .catch((err) => this.#log.error(`packet processing error: ${(err as Error).message}`));
   }
 
   async #process(data: Buffer): Promise<void> {
@@ -116,6 +120,7 @@ export class RspServer {
   #server: net.Server;
   #log: RspLogger;
   #port = 0;
+  #sockets = new Set<net.Socket>();
 
   constructor(
     handler: RspHandler,
@@ -132,9 +137,11 @@ export class RspServer {
       }
       socket.setNoDelay(true);
       this.#log.info("client connected");
+      this.#sockets.add(socket);
       const session = new RspSession(socket, handler, this.#log);
       active = session;
       socket.on("close", () => {
+        this.#sockets.delete(socket);
         if (active === session) active = null;
         this.#log.info("client disconnected");
       });
@@ -159,6 +166,10 @@ export class RspServer {
   }
 
   close(): Promise<void> {
+    // Destroy any open client sockets so the close callback fires promptly even
+    // if LLDB is still connected. Without this, server.close() would wait
+    // indefinitely for LLDB to disconnect voluntarily.
+    for (const s of this.#sockets) s.destroy();
     return new Promise((resolve) => this.#server.close(() => resolve()));
   }
 }
