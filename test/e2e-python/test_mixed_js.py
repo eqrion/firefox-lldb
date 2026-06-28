@@ -25,10 +25,10 @@ from harness import *  # noqa: E402, F401, F403
 
 MIXED_FX = {
     "name": "mixed-js",
-    "module": "test/e2e/fixtures/mixed-js/math.wasm",
+    "module": "test/fixtures/mixed-js/math.wasm",
     "expect_func": "compute_factorial",
     "expect_file": "math.cpp",
-    "page_dir": "test/e2e/fixtures/mixed-js",
+    "page_dir": "test/fixtures/mixed-js",
     "fire": "runApp()",
     "break_func": "compute_factorial",
 }

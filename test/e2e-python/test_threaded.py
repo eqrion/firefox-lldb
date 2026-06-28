@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from harness import *
 
 _THREADED = {
-    "page_dir": "test/e2e/fixtures/threaded",
+    "page_dir": "test/fixtures/threaded",
     "fire": "runMatmul()",
 }
 

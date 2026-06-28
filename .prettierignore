@@ -4,4 +4,4 @@ src/sourcemap/generated/
 node_modules/
 vendor/
 *.wasm
-test/e2e/fixtures/
+test/fixtures/
