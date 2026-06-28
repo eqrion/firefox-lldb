@@ -13,6 +13,7 @@ src/rdp/           RDP client, RdpWasmSession, headless Firefox launcher
 src/gdb/           RdpDebuggee, worker + SAB-RPC, jco-generated gdbstub
 src/sourcemap/     source-map -> DWARF converter (host glue + jco-generated component)
 src/cli/           CLI entry points (firefox-lldb, firefox-lldb-server) + REPL
+src/mcp/           MCP server that drives the real REPL for coding agents
 test/unit/         unit tests (protocol + platform server)
 test/e2e/          Node e2e suite (primary)
 test/fixtures/     emscripten test fixtures (shared by both e2e suites)
@@ -68,6 +69,14 @@ URL=http://localhost:8080/index.html npm run launch
 (lldb) breakpoint set -n compute_factorial
 (lldb) continue
 ```
+
+## Driving the REPL from a coding agent
+
+`src/mcp/server.ts` is an MCP server that pty-spawns the real CLI and exposes
+the `(lldb)` REPL as tools (`lldb_launch`/`lldb_send`/`lldb_interrupt`/...), so
+an agent can do manual QA against a real Firefox the way a user would. Page
+automation comes from firefox-devtools-mcp on the same Firefox via Marionette.
+See HARNESS.md and `.mcp.json`.
 
 The standalone server + external native lldb is a secondary, manual path (needs
 a wasm-plugin lldb build from `../llvm-project`):

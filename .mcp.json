@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "firefox-lldb": {
+      "command": "node",
+      "args": ["--import", "tsx", "src/mcp/server.ts"]
+    },
+    "firefox-devtools": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "firefox-devtools-mcp@latest",
+        "--connect-existing",
+        "--marionette-port",
+        "2828",
+        "--enable-script"
+      ]
+    }
+  }
+}
