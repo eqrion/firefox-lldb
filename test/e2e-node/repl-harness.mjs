@@ -38,11 +38,15 @@ export class ReplSession {
     socket.setNoDelay(true);
     socket.on("data", (d) => void this.#client.channelServerWrite(channelId, new Uint8Array(d)));
     socket.on("error", () => {});
-    await this.#client.bridgeChannel(channelId, (data) => void socket.write(Buffer.from(data)));
-    await new Promise((resolve, reject) => {
+    // Register before bridgeChannel: on loopback the TCP handshake completes
+    // while bridgeChannel awaits, and a post-await socket.once("connect") misses
+    // the already-fired event, leaving the promise permanently unresolved.
+    const connected = new Promise((resolve, reject) => {
       socket.once("connect", resolve);
       socket.once("error", reject);
     });
+    await this.#client.bridgeChannel(channelId, (data) => void socket.write(Buffer.from(data)));
+    await connected;
     return channelId;
   }
 

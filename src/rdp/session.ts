@@ -129,8 +129,12 @@ export async function watchAndPrimeFirefoxTabs(
         type: "updateConfiguration",
         configuration: THREAD_CONFIG,
       });
-      await client.request(watcher, { type: "watchTargets", targetType: "frame" });
-      await client.request(watcher, { type: "watchTargets", targetType: "worker" });
+      // Do NOT call watchTargets here. With two connections both subscribed via
+      // watchTargets, Firefox routes paused events to whichever connection called
+      // watchTargets first (the watcher). The launcher's armAllStop never fires
+      // and EventFuture.finish hangs waiting for the trap's paused event.
+      // The launcher's own RdpWasmSession calls watchTargets in #init(), making
+      // it the sole subscriber and ensuring it receives all thread events.
     } catch {
       // Tab may have disappeared; ignore and let the next query re-prime it.
       primedActors.delete(tabActor);
@@ -818,6 +822,24 @@ export class RdpWasmSession extends EventEmitter {
 
   interrupt(tid: number): void {
     this.#client.send(this.#info(tid).threadActor, { type: "interrupt", when: {} });
+  }
+
+  /**
+   * If any thread is already paused (e.g. pauseOnExceptions fired during page
+   * load before primeStop had a chance to arm its listener), adopt the first
+   * paused thread as the stopped thread and interrupt any others. Returns true
+   * if a paused thread was found; false if all threads are running.
+   *
+   * Sending interrupt to an already-paused thread returns an alreadyPaused
+   * error reply (not a paused event), so armAllStop would silently lose it
+   * and primeStop would hang. This method sidesteps that by running #allStop
+   * directly when the paused state is already known.
+   */
+  async adoptPausedState(): Promise<boolean> {
+    const paused = [...this.#pausedTids];
+    if (paused.length === 0) return false;
+    await this.#allStop(paused[0], {} as PauseEvent);
+    return true;
   }
 
   // --- console ---

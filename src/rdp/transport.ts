@@ -45,7 +45,10 @@ export class RdpTransport extends EventEmitter {
 
   static connect(port: number, host = "127.0.0.1"): Promise<RdpTransport> {
     return new Promise((resolve, reject) => {
-      const socket = net.createConnection({ port, host }, () => resolve(new RdpTransport(socket)));
+      const socket = net.createConnection({ port, host }, () => {
+        socket.setNoDelay(true);
+        resolve(new RdpTransport(socket));
+      });
       socket.once("error", reject);
     });
   }

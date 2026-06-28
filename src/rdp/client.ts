@@ -34,6 +34,11 @@ const EVENT_TYPES = new Set([
   "newSource",
   "willNavigate",
   "networkEvent",
+  // Firefox sends {type:"interrupt"} as an ACK when a thread receives interrupt
+  // while already paused or in a transition. Without this entry the packet is
+  // routed to the per-actor FIFO pending queue, corrupting the next in-flight
+  // request (e.g. wasmSources / frames) with garbage data and causing hangs.
+  "interrupt",
 ]);
 
 interface Pending {
