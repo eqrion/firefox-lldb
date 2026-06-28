@@ -40,7 +40,10 @@ export interface Repl {
 }
 
 const PROMPT = "(lldb) ";
-const JS_USAGE = "js: usage: js p <expr> | js bt | js frame <n>";
+const JS_HELP =
+  "js p <expr>    evaluate JS (expression is literal to end of line; e.g. js p document.title)\n" +
+  "js bt          print the JS call stack\n" +
+  "js frame <n>   show frame details and select it for js p (default: top call frame)";
 
 export function runRepl(deps: ReplDeps): Repl {
   const input = deps.input ?? process.stdin;
@@ -56,6 +59,9 @@ export function runRepl(deps: ReplDeps): Repl {
   let consoleMuted = false;
   let closed = false;
   let lastSigintAt = 0;
+  let lastCommand = "";
+  let jsFrameIndex = 0;
+  let jsFrameTid: number | undefined;
   let resolveDone!: () => void;
   const done = new Promise<void>((r) => (resolveDone = r));
 
@@ -104,8 +110,10 @@ export function runRepl(deps: ReplDeps): Repl {
     if (draining) return;
     draining = true;
     while (queue.length && !closed) {
-      const cmd = queue.shift()!.trim();
+      const raw = queue.shift()!.trim();
+      const cmd = raw === "" ? lastCommand : raw;
       if (cmd === "") continue;
+      if (raw !== "") lastCommand = raw;
       busy = true;
       try {
         await dispatch(cmd);
@@ -156,7 +164,15 @@ export function runRepl(deps: ReplDeps): Repl {
       write("console output unmuted");
       return;
     }
+    if (cmd === "help js") {
+      write(JS_HELP);
+      return;
+    }
     if (cmd === "js" || cmd.startsWith("js ")) return dispatchJs(cmd.slice(2).trim());
+    if ((cmd.match(/`/g) ?? []).length % 2 !== 0) {
+      write("error: unbalanced backtick in command");
+      return;
+    }
 
     const isContinue = cmd === "c" || cmd === "continue" || cmd === "process continue";
     inflight = true;
@@ -195,8 +211,9 @@ export function runRepl(deps: ReplDeps): Repl {
         case "frame":
         case "f":
           return await jsFrame(session, arg);
+        case "help":
         case "":
-          write(JS_USAGE);
+          write(JS_HELP);
           return;
         default:
           write(`js: unknown subcommand '${sub}'`);
@@ -209,7 +226,7 @@ export function runRepl(deps: ReplDeps): Repl {
 
   async function jsEval(session: RdpWasmSession, expr: string): Promise<void> {
     if (!expr) {
-      write("js p: usage: js p <expr>");
+      write("js p: expression required — e.g. js p document.title");
       return;
     }
     const frameActor = await topJsFrameActor(session);
@@ -250,6 +267,8 @@ export function runRepl(deps: ReplDeps): Repl {
       write(`js frame: no frame ${n}`);
       return;
     }
+    jsFrameIndex = n;
+    jsFrameTid = session.stoppedTid;
     write(formatFrame(n, frame));
     const env = (await session.frameEnvironment(frame.actor)) as {
       bindings?: {
@@ -260,11 +279,14 @@ export function runRepl(deps: ReplDeps): Repl {
     for (const line of formatBindings(env.bindings)) write("    " + line);
   }
 
-  // The first JS call frame's actor (so `js p` sees locals), or undefined to
-  // evaluate in page scope.
+  // The frame actor to use for `js p`: the user-selected frame if it is still
+  // valid for this stop, otherwise the first JS call frame.
   async function topJsFrameActor(session: RdpWasmSession): Promise<string | undefined> {
     if (!session.paused()) return undefined;
     const frames = await session.frames(session.stoppedTid).catch(() => [] as FrameForm[]);
+    if (jsFrameTid === session.stoppedTid && jsFrameIndex < frames.length) {
+      return frames[jsFrameIndex]?.actor;
+    }
     return frames.find((f) => f.type === "call")?.actor;
   }
 
