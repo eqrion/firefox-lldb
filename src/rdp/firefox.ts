@@ -127,7 +127,10 @@ export async function launchFirefox(opts: {
   ];
   if (opts.headless ?? false) args.unshift("--headless");
 
-  const child: ChildProcess = spawn(binary, args, { stdio: "ignore" });
+  // detached: true makes the child a process group leader so we can kill
+  // the whole group (Firefox + plugin-container children) with -pid on close.
+  const child: ChildProcess = spawn(binary, args, { stdio: "ignore", detached: true });
+  child.unref();
 
   if (!(opts.headless ?? false) && child.pid !== undefined) {
     bringToForeground(child.pid);
@@ -139,7 +142,13 @@ export async function launchFirefox(opts: {
     profileDir,
     exited,
     close: async () => {
-      child.kill("SIGKILL");
+      if (child.pid !== undefined) {
+        try {
+          process.kill(-child.pid, "SIGKILL");
+        } catch {
+          // Process may have already exited.
+        }
+      }
       // Wait for the process to actually die before returning, so a subsequent
       // launch in the same process doesn't race a still-alive Firefox.
       await exited;
