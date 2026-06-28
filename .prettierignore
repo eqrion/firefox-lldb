@@ -5,3 +5,4 @@ node_modules/
 vendor/
 *.wasm
 test/fixtures/
+.claude/settings.local.json
