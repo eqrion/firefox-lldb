@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-// Heap-allocation inspection tests. Ported from test/e2e/test_inspect_heap.py.
+// Heap-allocation inspection tests. Ported from test/e2e-python/test_inspect_heap.py.
 // Stopped at check_heap(Point* pt, int32_t* arr); all tests share one session.
 
 import { test, before, after } from "node:test";

@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // StepOver advances the PC without increasing call-stack depth. Ported from
-// test/e2e/test_control_flow.py (test_step_over).
+// test/e2e-python/test_control_flow.py (test_step_over).
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";

@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // Multiple-argument locals on a second fixture/function (sum_range), ported from
-// test/e2e/test_locals.py. Own file => own attach/process (see README).
+// test/e2e-python/test_locals.py. Own file => own attach/process (see README).
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";

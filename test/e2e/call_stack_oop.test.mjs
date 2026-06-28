@@ -2,8 +2,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-// OOP fixture call-stack tests. Ported from test/e2e/test_call_stack.py (oop
-// entry) and test/e2e/test_control_flow.py (test_dynamic_dispatch,
+// OOP fixture call-stack tests. Ported from test/e2e-python/test_call_stack.py (oop
+// entry) and test/e2e-python/test_control_flow.py (test_dynamic_dispatch,
 // test_inspect_virtual_this). All tests share one stopped session.
 
 import { test, before, after } from "node:test";

@@ -45,7 +45,7 @@
       "Bash(npm ci)",
       "Bash(node *)",
       "Bash(npx jco *)",
-      "Bash(python3 test/e2e/*)",
+      "Bash(python3 test/e2e-python/*)",
       "Bash(tsc *)",
       "Bash(cargo build *)",
       "Bash(rg *)",

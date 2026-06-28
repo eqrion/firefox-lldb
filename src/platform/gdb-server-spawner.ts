@@ -65,6 +65,10 @@ export class GdbServerSpawner {
   }
 }
 
+// TOCTOU: we probe an OS-assigned port, release it, then hand the number to
+// Firefox via --start-debugger-server. Firefox doesn't support port 0, so
+// there's no way to eliminate the race. The window is tiny in practice and
+// Session.attach() retries on failure.
 export function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const s = net.createServer();

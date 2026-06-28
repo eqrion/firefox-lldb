@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // Multithreaded (pthreads / web workers) tests. Ported from
-// test/e2e/test_threaded.py. Stopped at matmul_threaded; non-mutating tests
+// test/e2e-python/test_threaded.py. Stopped at matmul_threaded; non-mutating tests
 // share the session; the step test is last.
 
 import { test, before, after } from "node:test";

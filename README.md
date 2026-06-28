@@ -158,7 +158,8 @@ debug binary or serve the wasm from localhost.
 ```sh
 npm install                          # install dependencies
 npm test                             # unit tests
-LLVM=/path/to/llvm npm run test:e2e  # e2e suite (needs wasm-plugin lldb + Firefox)
+npm run test:e2e                     # e2e suite (needs Firefox)
+LLVM=/path/to/llvm npm run test:e2e-python  # deprecated Python e2e (needs wasm-plugin lldb)
 npm run build:fixtures               # rebuild emscripten test fixtures (needs emsdk)
 npm run component                    # rebuild the vendored gdbstub-component (needs Rust + jco)
 ```
@@ -179,9 +180,9 @@ src/platform/        platform server (process list, qLaunchGDBServer)
 src/rdp/             RDP client + RdpWasmSession + headless Firefox launcher
 src/gdb/             RdpDebuggee, worker host + SAB RPC, generated/ (jco output)
 src/cli/             firefox-lldb-server (platform server), firefox-lldb (embeds wasm LLDB)
-test/unit/           unit tests (protocol + platform server)
-test/e2e/run.py      fixture-driven lldb API test suite
-test/e2e/fixtures/   emscripten wasm fixtures (simple/oop/parser/ledger)
+test/unit/              unit tests (protocol + platform server)
+test/e2e/               Node e2e suite (primary correctness signal)
+test/e2e-python/        deprecated Python e2e suite + emscripten fixtures
 vendor/              vendored wasmtime gdbstub-component (+ MODIFICATIONS.md)
 scripts/             patch-generated.mjs (jco patch), wasm-offsets.mjs
 ```

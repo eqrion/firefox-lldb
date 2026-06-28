@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // JS-source breakpoint and stepping tests. Ported from
-// test/e2e/test_js_debugging.py. The fire expression fires a second runFactorial()
+// test/e2e-python/test_js_debugging.py. The fire expression fires a second runFactorial()
 // via setTimeout so that the JS breakpoint can fire after the wasm one is deleted.
 // State mutates (stepOver) so the step test is last.
 

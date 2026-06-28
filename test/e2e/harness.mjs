@@ -4,7 +4,7 @@
 
 // Node e2e harness: drives the embedded wasm LLDB through its off-worker
 // "session" API (structured SB-API queries), the same path the `firefox-lldb`
-// command uses. This mirrors the Python harness (test/e2e/harness.py) but with
+// command uses. This mirrors the Python harness (test/e2e-python/harness.py) but with
 // no native lldb — everything runs in this Node process.
 
 import net from "node:net";
@@ -19,59 +19,59 @@ import { freePort } from "../../src/platform/gdb-server-spawner.ts";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..", "..");
 
-// Mirrors test/e2e/harness.py FIXTURES.
+// Mirrors test/e2e-python/harness.py FIXTURES.
 export const FIXTURES = {
   factorial: {
-    pageDir: "test/e2e/fixtures/simple",
+    pageDir: "test/e2e-python/fixtures/simple",
     fire: "runFactorial()",
     breakFunc: "compute_factorial",
     file: "math.cpp",
   },
   sum_range: {
-    pageDir: "test/e2e/fixtures/simple",
+    pageDir: "test/e2e-python/fixtures/simple",
     fire: "runSum()",
     breakFunc: "sum_range",
     file: "math.cpp",
   },
-  oop: { pageDir: "test/e2e/fixtures/oop", fire: "run()", breakFunc: "area", file: "oop.cpp" },
+  oop: { pageDir: "test/e2e-python/fixtures/oop", fire: "run()", breakFunc: "area", file: "oop.cpp" },
   parser: {
-    pageDir: "test/e2e/fixtures/parser",
+    pageDir: "test/e2e-python/fixtures/parser",
     fire: "run()",
     breakFunc: "parse_factor",
     file: "parser.cpp",
   },
   ledger: {
-    pageDir: "test/e2e/fixtures/ledger",
+    pageDir: "test/e2e-python/fixtures/ledger",
     fire: "run()",
     breakFunc: "apply_transaction",
     file: "ledger.cpp",
   },
   types: {
-    pageDir: "test/e2e/fixtures/types",
+    pageDir: "test/e2e-python/fixtures/types",
     fire: "run()",
     breakFunc: "stop_here",
     file: "types.cpp",
   },
   heap: {
-    pageDir: "test/e2e/fixtures/heap",
+    pageDir: "test/e2e-python/fixtures/heap",
     fire: "run()",
     breakFunc: "check_heap",
     file: "heap.cpp",
   },
   trap: {
-    pageDir: "test/e2e/fixtures/trap",
+    pageDir: "test/e2e-python/fixtures/trap",
     fire: "runDivZero()",
     breakFunc: "divide",
     file: "trap.cpp",
   },
   threaded: {
-    pageDir: "test/e2e/fixtures/threaded",
+    pageDir: "test/e2e-python/fixtures/threaded",
     fire: "runMatmul()",
     breakFunc: "matmul_threaded",
     file: "matmul.cpp",
   },
   mixed_js: {
-    pageDir: "test/e2e/fixtures/mixed-js",
+    pageDir: "test/e2e-python/fixtures/mixed-js",
     fire: "runApp()",
     breakFunc: "compute_factorial",
     file: "math.cpp",
@@ -80,13 +80,13 @@ export const FIXTURES = {
   // math.wasm.map) instead of embedded DWARF, exercising the source-map ->
   // DWARF conversion path.
   sourcemap_factorial: {
-    pageDir: "test/e2e/fixtures/sourcemap",
+    pageDir: "test/e2e-python/fixtures/sourcemap",
     fire: "runFactorial()",
     breakFunc: "compute_factorial",
     file: "math.cpp",
   },
   sourcemap_sum: {
-    pageDir: "test/e2e/fixtures/sourcemap",
+    pageDir: "test/e2e-python/fixtures/sourcemap",
     fire: "runSum()",
     breakFunc: "sum_range",
     file: "math.cpp",

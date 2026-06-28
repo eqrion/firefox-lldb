@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // Ledger fixture call-stack and locals tests. Ported from
-// test/e2e/test_call_stack.py (ledger entry) and test/e2e/test_locals.py
+// test/e2e-python/test_call_stack.py (ledger entry) and test/e2e-python/test_locals.py
 // (test_struct_pointer_arg, test_global_array). All tests share one session.
 
 import { test, before, after } from "node:test";

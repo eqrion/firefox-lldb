@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // Parser fixture call-stack and recursion tests. Ported from
-// test/e2e/test_call_stack.py (parser entry) and test/e2e/test_recursion.py.
+// test/e2e-python/test_call_stack.py (parser entry) and test/e2e-python/test_recursion.py.
 // All tests share one stopped session.
 
 import { test, before, after } from "node:test";

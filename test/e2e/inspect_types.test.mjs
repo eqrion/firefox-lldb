@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-// Type-breadth variable inspection. Ported from test/e2e/test_inspect_types.py.
+// Type-breadth variable inspection. Ported from test/e2e-python/test_inspect_types.py.
 // Breakpoint fires in stop_here() (frame0); the interesting locals are in
 // check_types() (frame1). All tests share one stopped session.
 

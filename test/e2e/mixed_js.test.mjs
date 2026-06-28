@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // Mixed JS/wasm source discovery tests. Ported from
-// test/e2e/test_mixed_js.py (TestAppJsSourceDiscovery, TestAppJsBreakpoints).
+// test/e2e-python/test_mixed_js.py (TestAppJsSourceDiscovery, TestAppJsBreakpoints).
 // Stopped at compute_factorial in the mixed-js fixture; all non-mutating tests
 // share the session.
 

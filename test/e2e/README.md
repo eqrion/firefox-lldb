@@ -1,15 +1,14 @@
 # Node e2e suite (embedded wasm LLDB)
 
 An e2e suite that drives the **embedded wasm LLDB** (the same path the
-`firefox-lldb` command uses) instead of a native lldb. It mirrors the Python
-suite in `../e2e/` but needs no external lldb — everything runs in this Node
-process. The Python suite is unchanged and still the reference.
+`firefox-lldb` command uses) instead of a native lldb. This is the primary
+correctness signal. The Python suite in `../e2e-python/` is deprecated.
 
 Run:
 
 ```sh
 npm run build:fixtures   # once
-npm run test:e2e-node
+npm run test:e2e
 ```
 
 Requires Firefox installed in a standard location (see `findFirefoxBinary` in
@@ -65,16 +64,14 @@ Requires Firefox installed in a standard location (see `findFirefoxBinary` in
 - `threaded.test.mjs` — multithreaded fixture: thread list, matmul_threaded frame, step.
 - `wasm_trap.test.mjs` — wasm traps (divide-by-zero, unreachable, out-of-bounds, call_indirect mismatch) pause as a signal stop; trapping frame is inspectable.
 
-## Why one attach per file + `--test-concurrency=1`
+## Why one attach per file
 
 Each attach spins up a wasm LLDB worker, an in-wasm gdbstub component, and a
-headless Firefox. Tearing all of that down and standing it up again **within one
-process** is currently racy, and running attach tests **concurrently** spawns
-competing Firefoxes. So each attach-based file performs a single attach in
-`before()` and asserts against that one stopped session, and the suite runs with
-`--test-concurrency=1` (each file is a fresh, serial process — the same process
-isolation the Python `run.py` relies on). Making multiple sequential attaches
-reliable within one process is a known follow-up.
+headless Firefox. Each attach-based file performs a single attach in `before()`
+and asserts against that one stopped session. The suite runs files concurrently
+(default `--test-concurrency=8`; override with `E2E_CONCURRENCY=N`) since each
+file gets its own process. Making multiple sequential attaches reliable within
+one process is a known follow-up.
 
 Tests that mutate state (step/continue) are the only test in their file. Tests
 that only read state from one stopped session can share a `before()` attach.

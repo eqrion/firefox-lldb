@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // Edge case and boundary behaviour tests. Ported from
-// test/e2e/test_edge_cases.py. Both tests share one stopped session (factorial
+// test/e2e-python/test_edge_cases.py. Both tests share one stopped session (factorial
 // stopped at compute_factorial).
 
 import { test, before, after } from "node:test";

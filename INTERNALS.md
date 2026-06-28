@@ -136,7 +136,7 @@ section is mapped at `(module_id << 32)`.
 
 - **Unit tests** (`npm test`) — protocol layer and platform server. Run without
   Firefox or a wasm-plugin lldb.
-- **e2e suite** (`npm run test:e2e`) — fixture-driven tests via the real bridge
+- **e2e suite** (`npm run test:e2e`) — fixture-driven tests via the embedded wasm LLDB
   against headless Firefox. Needs a wasm-plugin lldb build and emsdk-built
   fixtures (`npm run build:fixtures`). Tests: call-stack symbolication across all
   four fixtures; breakpoint by file:line; multiple breakpoints + continue;

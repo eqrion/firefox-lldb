@@ -5,7 +5,7 @@
 // End-to-end attach test for the embedded wasm LLDB. Proves the wasm process
 // plugin and its GDB-remote extensions work: attach, breakpoints, DWARF symbols
 // + line table, the call stack (qWasmCallStack, with JS frames interleaved), and
-// locals (qWasmLocal). Ported from test/e2e/test_call_stack.py + test_locals.py.
+// locals (qWasmLocal). Ported from test/e2e-python/test_call_stack.py + test_locals.py.
 //
 // Requires headless Firefox + built fixtures (`npm run build:fixtures`). Each
 // attach must run in its own process (see README), so this file does a single

@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // factorial(10) recurses; the call stack contains multiple factorial frames.
-// Ported from test/e2e/test_recursion.py (test_factorial_recursion_depth).
+// Ported from test/e2e-python/test_recursion.py (test_factorial_recursion_depth).
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";

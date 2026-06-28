@@ -13,20 +13,21 @@ src/rdp/           RDP client, RdpWasmSession, headless Firefox launcher
 src/gdb/           RdpDebuggee, worker + SAB-RPC, jco-generated gdbstub
 src/cli/           CLI entry points (firefox-lldb, firefox-lldb-server)
 test/unit/         unit tests (protocol + platform server)
-test/e2e/          fixture-driven lldb API suite + raw GDB pipeline test
+test/e2e/          Node e2e suite (primary)
+test/e2e-python/   deprecated Python e2e suite + fixtures
 vendor/            vendored wasmtime gdbstub-component (Rust, wasm32-wasip2)
 ```
 
 ## Development
 
 ```sh
-npm install                             # install deps
-npm test                                # unit tests (no external deps)
-npm run check                           # typecheck + prettier
-LLVM=../llvm-project npm run test:e2e  # e2e suite
+npm install                    # install deps
+npm test                       # unit tests (no external deps)
+npm run check                  # typecheck + prettier
+npm run test:e2e               # Node e2e suite (primary correctness signal)
 ```
 
-A wasm-plugin lldb is usually available at `../llvm-project/build/bin/lldb`. The e2e suite drives the full bridge between a real lldb and headless Firefox and is the primary correctness signal. Unit tests are rarely useful here.
+The Node e2e suite drives the full bridge against headless Firefox using the embedded wasm LLDB — no native lldb required. It runs at concurrency 8 by default; override with `E2E_CONCURRENCY=N`. Unit tests are rarely useful here.
 
 Run `npm run check` before committing.
 

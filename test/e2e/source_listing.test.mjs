@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // Source listing and file-backed line-entry tests. Ported from
-// test/e2e/test_source_listing.py. Tests verify the wasm and JS frames carry
+// test/e2e-python/test_source_listing.py. Tests verify the wasm and JS frames carry
 // valid file/line information; they do not call into the LLDB source manager
 // (the embedded wasm LLDB has no filesystem access to the host source tree).
 

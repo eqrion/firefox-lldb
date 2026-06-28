@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // After instruction steps, Continue correctly hits the next breakpoint. Ported
-// from test/e2e/test_control_flow.py (test_continue_after_step).
+// from test/e2e-python/test_control_flow.py (test_continue_after_step).
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";

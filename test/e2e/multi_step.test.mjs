@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // Five sequential step-instructions each advance the PC. Ported from
-// test/e2e/test_control_flow.py (test_multiple_step_instructions).
+// test/e2e-python/test_control_flow.py (test_multiple_step_instructions).
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";

@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // A breakpoint in a recursive function fires on each recursion level. Ported
-// from test/e2e/test_control_flow.py (test_breakpoint_fires_multiple_times).
+// from test/e2e-python/test_control_flow.py (test_breakpoint_fires_multiple_times).
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";

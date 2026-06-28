@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // Stepping test for the embedded wasm LLDB (ThreadPlanWasmStep + the wasm step
-// GDB-remote path). Ported from test/e2e/test_control_flow.py. Separate file so
+// GDB-remote path). Ported from test/e2e-python/test_control_flow.py. Separate file so
 // it gets its own attach/process (see README); the step mutates state, so it is
 // the only test against this session.
 

@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // Loop variable 'i' becomes visible once execution enters the loop body.
-// Ported from test/e2e/test_locals.py (test_loop_variable).
+// Ported from test/e2e-python/test_locals.py (test_loop_variable).
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";

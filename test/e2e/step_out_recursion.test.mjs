@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // StepOut from a recursive frame returns to the immediate caller. Ported from
-// test/e2e/test_control_flow.py (test_step_out_in_recursion).
+// test/e2e-python/test_control_flow.py (test_step_out_in_recursion).
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";

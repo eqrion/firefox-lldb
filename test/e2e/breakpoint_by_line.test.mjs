@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // Source breakpoint by file:line. Ported from
-// test/e2e/test_control_flow.py (test_breakpoint_by_line). Separate file for
+// test/e2e-python/test_control_flow.py (test_breakpoint_by_line). Separate file for
 // its own attach; stepping mutates state.
 
 import { test, before, after } from "node:test";
