@@ -12,7 +12,8 @@
   ],
   "bin": {
     "firefox-lldb": "./dist/cli/firefox-lldb.js",
-    "firefox-lldb-server": "./dist/cli/firefox-lldb-server.js"
+    "firefox-lldb-server": "./dist/cli/firefox-lldb-server.js",
+    "firefox-lldb-mcp": "./dist/mcp/server.js"
   },
   "scripts": {
     "postinstall": "chmod +x node_modules/node-pty/prebuilds/*/spawn-helper 2>/dev/null || true",
@@ -27,6 +28,7 @@
     "launch": "node --import tsx src/cli/firefox-lldb.ts --launch --rdp-port ${RDP_PORT:-6080} ${URL:+--url $URL}",
     "launch-server": "node --import tsx src/cli/firefox-lldb-server.ts --launch --port ${PORT:-1234} --rdp-port ${RDP_PORT:-6080} ${URL:+--url $URL}",
     "connect": "node --import tsx src/cli/firefox-lldb-server.ts --connect --port ${PORT:-1234} --rdp-port ${RDP_PORT:-6080} ${URL:+--url $URL}",
+    "mcp": "node --import tsx src/mcp/server.ts",
     "component:build": "cd vendor/gdbstub-component && cargo build --release --target wasm32-wasip2",
     "component:transpile": "npx jco transpile vendor/gdbstub-component/target/wasm32-wasip2/release/firefox_lldb_gdbstub_component.wasm -o src/gdb/generated --name gdbstub --instantiation async && node scripts/patch-generated.mjs",
     "component": "npm run component:build && npm run component:transpile",
@@ -47,12 +49,13 @@
   },
   "dependencies": {
     "@bytecodealliance/preview2-shim": "^0.18.1",
-    "lldb-wasm": "^0.1.1"
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "lldb-wasm": "^0.1.1",
+    "node-pty": "^1.1.0"
   },
   "devDependencies": {
     "@bytecodealliance/jco": "1.24.3",
     "@types/node": "^22.10.0",
-    "node-pty": "^1.1.0",
     "prettier": "^3.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"
