@@ -115,6 +115,10 @@ export class RdpDebuggee {
   #resolveStopped: ((e: StoppedEvent) => void) | null = null;
   #rejectStopped: ((e: Error) => void) | null = null;
   #lastPauseReason = "breakpoint";
+  // Set when triggerInterrupt() fires before Debuggee.continue has armed #stopped
+  // (the SIGINT handler runs synchronously but dispatch runs on the drain timer).
+  // #armStopped() checks this and resolves immediately.
+  #pendingInterrupt = false;
 
   // Fired once on LLDB's first continue (drives the page's wasm export
   // after a breakpoint is armed, so the engine pauses inside wasm).
@@ -169,11 +173,15 @@ export class RdpDebuggee {
       }
       case "Debuggee.continue": {
         this.#armStopped();
-        this.#session.armAllStop();
-        this.#session.resumeAll().catch(() => {});
-        const cb = this.#onFirstContinue;
-        this.#onFirstContinue = null;
-        cb?.();
+        // #resolveStopped is null when a pending interrupt was already consumed.
+        // In that case the stop is immediate — skip the resume so Firefox stays paused.
+        if (this.#resolveStopped !== null) {
+          this.#session.armAllStop();
+          this.#session.resumeAll().catch(() => {});
+          const cb = this.#onFirstContinue;
+          this.#onFirstContinue = null;
+          cb?.();
+        }
         return this.#eventFutureRef();
       }
       case "Debuggee.singleStep": {
@@ -670,10 +678,20 @@ export class RdpDebuggee {
       this.#resolveStopped({ tid: this.#session.stoppedTid, pausePacket: {} as PauseEvent });
       this.#resolveStopped = null;
       this.#rejectStopped = null;
+    } else {
+      this.#pendingInterrupt = true;
     }
   }
 
   #armStopped(): void {
+    if (this.#pendingInterrupt) {
+      this.#pendingInterrupt = false;
+      this.#lastPauseReason = "signal";
+      this.#stopped = Promise.resolve({ tid: this.#session.stoppedTid, pausePacket: {} as PauseEvent });
+      this.#resolveStopped = null;
+      this.#rejectStopped = null;
+      return;
+    }
     this.#stopped = new Promise((resolve, reject) => {
       this.#resolveStopped = resolve;
       this.#rejectStopped = reject;
