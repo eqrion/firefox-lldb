@@ -53,4 +53,9 @@ export class RspClient {
   close(): void {
     this.#socket.destroy();
   }
+
+  /** The underlying socket, for test introspection. */
+  get socket(): net.Socket {
+    return this.#socket;
+  }
 }

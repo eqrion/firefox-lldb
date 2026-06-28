@@ -26,7 +26,7 @@ test("RspServer in singleConnection mode rejects a second client", async () => {
 
   // cl2 should get closed quickly (second connection was rejected).
   await new Promise<void>((resolve) => {
-    (cl2 as unknown as { _socket: import("node:net").Socket })["#socket"]?.on("close", resolve);
+    cl2.socket.on("close", resolve);
     // Fallback: if already closed, resolve immediately.
     setTimeout(resolve, 200);
   });
@@ -41,12 +41,6 @@ test("RspServer.close() destroys open client sockets promptly", async () => {
   const port = await srv.listen(0);
 
   const cl = await RspClient.connect(port);
-
-  let closedAt: number | null = null;
-  // Track when the client socket closes.
-  const closeP = new Promise<void>((resolve) => {
-    setTimeout(resolve, 500); // fallback
-  });
 
   const before = Date.now();
   await srv.close(); // should destroy the socket immediately
