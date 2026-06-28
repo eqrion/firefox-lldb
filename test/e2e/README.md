@@ -69,7 +69,7 @@ Requires Firefox installed in a standard location (see `findFirefoxBinary` in
 Each attach spins up a wasm LLDB worker, an in-wasm gdbstub component, and a
 headless Firefox. Each attach-based file performs a single attach in `before()`
 and asserts against that one stopped session. The suite runs files concurrently
-(default `--test-concurrency=8`; override with `E2E_CONCURRENCY=N`) since each
+(default `--test-concurrency=4`; override with `E2E_CONCURRENCY=N`) since each
 file gets its own process. Making multiple sequential attaches reliable within
 one process is a known follow-up.
 

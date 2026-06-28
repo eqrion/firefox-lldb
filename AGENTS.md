@@ -7,15 +7,17 @@ Read INTERNALS.md for a summary of the architecture.
 ## Layout
 
 ```
-src/protocol/      RSP framing + TCP server
+src/protocol/      RSP framing + TCP server + attach-shim
 src/platform/      LLDB platform server (process list, qLaunchGDBServer)
 src/rdp/           RDP client, RdpWasmSession, headless Firefox launcher
 src/gdb/           RdpDebuggee, worker + SAB-RPC, jco-generated gdbstub
-src/cli/           CLI entry points (firefox-lldb, firefox-lldb-server)
+src/sourcemap/     source-map -> DWARF converter (host glue + jco-generated component)
+src/cli/           CLI entry points (firefox-lldb, firefox-lldb-server) + REPL
 test/unit/         unit tests (protocol + platform server)
 test/e2e/          Node e2e suite (primary)
-test/e2e-python/   deprecated Python e2e suite + fixtures
-vendor/            vendored wasmtime gdbstub-component (Rust, wasm32-wasip2)
+test/fixtures/     emscripten test fixtures (shared by both e2e suites)
+test/e2e-python/   deprecated Python e2e suite
+vendor/            vendored gdbstub-component + source-map-dwarf crate/component (Rust, wasm32-wasip2)
 ```
 
 ## Development
@@ -27,9 +29,19 @@ npm run check                  # typecheck + prettier
 npm run test:e2e               # Node e2e suite (primary correctness signal)
 ```
 
-The Node e2e suite drives the full bridge against headless Firefox using the embedded wasm LLDB — no native lldb required. It runs at concurrency 8 by default; override with `E2E_CONCURRENCY=N`. Unit tests are rarely useful here.
+The Node e2e suite drives the full bridge against headless Firefox using the embedded wasm LLDB — no native lldb required. It runs at concurrency 4 by default; override with `E2E_CONCURRENCY=N`. Unit tests are rarely useful here.
 
 Run `npm run check` before committing.
+
+### Tests are required
+
+**Every significant change must add or update an e2e test** under `test/e2e/`.
+The e2e suite is the primary correctness signal — a feature or fix that the
+suite doesn't exercise is considered unverified. Add a focused `*.test.mjs`
+(see the existing files and `test/e2e/README.md` for the per-file attach
+convention), and a new emscripten fixture under `test/fixtures/`
+plus a `build:fixture-*` script when an existing fixture can't reproduce the
+behavior. Unit tests are for the protocol/platform layers only.
 
 ### Rebuild the gdbstub component (Rust)
 
@@ -45,15 +57,27 @@ EMSDK=~/src/emsdk npm run build:fixtures
 
 ## Running a debug session
 
-```sh
-# Terminal 1: start Firefox + platform server
-URL=http://localhost:8080/index.html npm run launch
+The primary path is the embedded wasm LLDB: `firefox-lldb` launches Firefox,
+runs the platform server in-process, and drops you into an interactive `(lldb)`
+prompt — no native lldb binary involved.
 
-# Terminal 2: attach lldb
+```sh
+URL=http://localhost:8080/index.html npm run launch
+# then, at the prompt:
+(lldb) attach --pid 1          # alias for: process attach --plugin wasm --pid 1
+(lldb) breakpoint set -n compute_factorial
+(lldb) continue
+```
+
+The standalone server + external native lldb is a secondary, manual path (needs
+a wasm-plugin lldb build from `../llvm-project`):
+
+```sh
+# Terminal 1
+URL=http://localhost:8080/index.html npm run launch-server
+# Terminal 2
 ../llvm-project/build/bin/lldb
 (lldb) platform select remote-gdb-server
 (lldb) platform connect connect://127.0.0.1:1234
 (lldb) process attach --plugin wasm --pid 1
-(lldb) breakpoint set -n compute_factorial
-(lldb) continue
 ```

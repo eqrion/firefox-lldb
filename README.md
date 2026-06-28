@@ -182,7 +182,8 @@ src/gdb/             RdpDebuggee, worker host + SAB RPC, generated/ (jco output)
 src/cli/             firefox-lldb-server (platform server), firefox-lldb (embeds wasm LLDB)
 test/unit/              unit tests (protocol + platform server)
 test/e2e/               Node e2e suite (primary correctness signal)
-test/e2e-python/        deprecated Python e2e suite + emscripten fixtures
+test/fixtures/          emscripten test fixtures (shared by both e2e suites)
+test/e2e-python/        deprecated Python e2e suite
 vendor/              vendored wasmtime gdbstub-component (+ MODIFICATIONS.md)
 scripts/             patch-generated.mjs (jco patch), wasm-offsets.mjs
 ```
