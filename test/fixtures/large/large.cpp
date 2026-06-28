@@ -4,6 +4,7 @@
 // internal (sqlite3_prepare_v2) is reachable and inspectable.
 
 #include <emscripten.h>
+#include <cstdint>
 #include <cstring>
 
 extern "C" {
