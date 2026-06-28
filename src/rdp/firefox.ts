@@ -92,7 +92,7 @@ const PROFILE_PREFS = [
   ["browser.aboutwelcome.enabled", false],
   ["startup.homepage_welcome_url", ""],
   ["startup.homepage_welcome_url.additional", ""],
-  ["javascript.options.experimental.wasm_jspi", true],
+  ["javascript.options.wasm_js_promise_integration", true],
 ] as const;
 
 export interface FirefoxHandle {
