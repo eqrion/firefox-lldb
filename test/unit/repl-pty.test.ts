@@ -18,11 +18,7 @@ const HELPER = join(__dirname, "..", "helpers", "repl-pty-helper.ts");
 
 const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
 
-function waitFor(
-  getOutput: () => string,
-  pred: (s: string) => boolean,
-  ms = 4000
-): Promise<void> {
+function waitFor(getOutput: () => string, pred: (s: string) => boolean, ms = 4000): Promise<void> {
   return new Promise((resolve, reject) => {
     const deadline = Date.now() + ms;
     const poll = () => {
@@ -62,19 +58,31 @@ test("PTY: Ctrl-C interrupts a running target via onTargetInterrupt", async (t: 
   child.onData((d) => (out += d));
 
   try {
-    await waitFor(() => out, (s) => s.includes("(lldb)"));
+    await waitFor(
+      () => out,
+      (s) => s.includes("(lldb)")
+    );
 
     child.write("c\r");
-    await waitFor(() => out, (s) => s.includes("Process running."));
+    await waitFor(
+      () => out,
+      (s) => s.includes("Process running.")
+    );
 
     child.write("\x03");
-    await waitFor(() => out, (s) => s.includes("Process 1 stopped."));
+    await waitFor(
+      () => out,
+      (s) => s.includes("Process 1 stopped.")
+    );
 
     // Prompt should return (REPL must not exit)
-    await waitFor(() => out, (s) => {
-      const idx = s.indexOf("Process 1 stopped.");
-      return idx !== -1 && s.slice(idx).includes("(lldb)");
-    });
+    await waitFor(
+      () => out,
+      (s) => {
+        const idx = s.indexOf("Process 1 stopped.");
+        return idx !== -1 && s.slice(idx).includes("(lldb)");
+      }
+    );
 
     assert.match(stripAnsi(out), /Process 1 stopped\./);
     assert.doesNotMatch(stripAnsi(out), /\^C again to quit/);

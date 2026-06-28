@@ -38,7 +38,10 @@ export function startGdbServer({ dispatch, port, onInfo, verbose }) {
   let resolveReady;
   let rejectReady;
   let boundPort = port;
-  const ready = new Promise((r, j) => { resolveReady = r; rejectReady = j; });
+  const ready = new Promise((r, j) => {
+    resolveReady = r;
+    rejectReady = j;
+  });
 
   worker.on("message", async (m) => {
     if (m === 1) {

@@ -111,16 +111,16 @@ npm run connect
 
 ### Flags
 
-| Flag               | Default        | Description                           |
-| ------------------ | -------------- | ------------------------------------- |
-| `--port`           | `1234`         | Platform server RSP port              |
-| `--rdp-port`       | `6080`         | Firefox RDP port                      |
-| `--url`            | —              | URL to navigate to on `process attach` (Firefox starts on `about:blank`) |
-| `--firefox`        | auto-detected  | Path to Firefox binary                |
-| `--headless`       | off            | Run Firefox headlessly                |
-| `--launch`         | (default)      | Launch a fresh Firefox                |
-| `--connect`        | —              | Connect to an already-running Firefox |
-| `--verbose` / `-v` | off            | Log debug output                      |
+| Flag               | Default       | Description                                                              |
+| ------------------ | ------------- | ------------------------------------------------------------------------ |
+| `--port`           | `1234`        | Platform server RSP port                                                 |
+| `--rdp-port`       | `6080`        | Firefox RDP port                                                         |
+| `--url`            | —             | URL to navigate to on `process attach` (Firefox starts on `about:blank`) |
+| `--firefox`        | auto-detected | Path to Firefox binary                                                   |
+| `--headless`       | off           | Run Firefox headlessly                                                   |
+| `--launch`         | (default)     | Launch a fresh Firefox                                                   |
+| `--connect`        | —             | Connect to an already-running Firefox                                    |
+| `--verbose` / `-v` | off           | Log debug output                                                         |
 
 ## What works
 
@@ -144,10 +144,10 @@ Attaching to a large wasm module (e.g. ~30 MB) takes longer than small
 ones because Firefox must download the binary and debug-compile it before
 the GDB server can start. Typical breakdown on a local server + M-series Mac:
 
-| Phase                                 | Time      |
-| ------------------------------------- | --------- |
-| Firefox downloads + compiles (30 MB)  | ~15–25 s  |
-| GDB server startup + LLDB handshake   | ~3–5 s    |
+| Phase                                | Time     |
+| ------------------------------------ | -------- |
+| Firefox downloads + compiles (30 MB) | ~15–25 s |
+| GDB server startup + LLDB handshake  | ~3–5 s   |
 
 The server prints `waiting for wasm sources to appear...` during this wait
 so you know it has not hung. For faster iteration, build with a smaller

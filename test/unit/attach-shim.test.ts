@@ -49,8 +49,14 @@ test("shim injects W00 when component closes after vAttach", async () => {
         // Parse complete RSP packets from buf.
         for (;;) {
           if (buf.length === 0) break;
-          if (buf[0] === 0x2b || buf[0] === 0x2d) { buf = buf.subarray(1); continue; }
-          if (buf[0] !== 0x24) { buf = buf.subarray(1); continue; }
+          if (buf[0] === 0x2b || buf[0] === 0x2d) {
+            buf = buf.subarray(1);
+            continue;
+          }
+          if (buf[0] !== 0x24) {
+            buf = buf.subarray(1);
+            continue;
+          }
           const hash = buf.indexOf(0x23);
           if (hash === -1 || buf.length < hash + 3) break;
           const payload = buf.toString("latin1", 1, hash);
@@ -60,7 +66,9 @@ test("shim injects W00 when component closes after vAttach", async () => {
           } else if (payload.startsWith("vAttach")) {
             // Send a well-formed stop reply then close.
             const stop = "T05thread:1;";
-            conn.write(Buffer.from(`$${stop}#${checksum(stop).toString(16).padStart(2, "0")}`, "latin1"));
+            conn.write(
+              Buffer.from(`$${stop}#${checksum(stop).toString(16).padStart(2, "0")}`, "latin1")
+            );
             conn.destroy();
           }
         }

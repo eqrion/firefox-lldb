@@ -25,7 +25,10 @@ function startFakeRdpServer(
       const port = (srv.address() as net.AddressInfo).port;
       resolve({
         port,
-        close: () => { connSocket?.destroy(); srv.close(); },
+        close: () => {
+          connSocket?.destroy();
+          srv.close();
+        },
         socket: () => connSocket,
       });
     });
@@ -42,7 +45,13 @@ test("RdpClient.connect() rejects if the transport closes before the root greeti
     });
     srv.listen(0, "127.0.0.1", () => {
       const port = (srv.address() as net.AddressInfo).port;
-      resolve({ port, close: () => { connSocket?.destroy(); srv.close(); } });
+      resolve({
+        port,
+        close: () => {
+          connSocket?.destroy();
+          srv.close();
+        },
+      });
     });
   });
   const srv = await srvP;

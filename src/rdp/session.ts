@@ -121,9 +121,8 @@ export async function watchAndPrimeFirefoxTabs(
       const watcher = watcherR.actor as string | undefined;
       if (!watcher) throw new Error("no watcher actor");
       const cfg = await client.request(watcher, { type: "getThreadConfigurationActor" });
-      const configActor = (
-        (cfg.configuration as { actor?: string })?.actor ?? cfg.configuration
-      ) as string | undefined;
+      const configActor = ((cfg.configuration as { actor?: string })?.actor ??
+        cfg.configuration) as string | undefined;
       if (!configActor) throw new Error("no thread config actor");
       await client.request(configActor, {
         type: "updateConfiguration",
@@ -305,9 +304,9 @@ export class RdpWasmSession extends EventEmitter {
     const cfg = await this.#client.request(this.#watcher, {
       type: "getThreadConfigurationActor",
     });
-    const configActor = (
-      (cfg.configuration as { actor?: string })?.actor ?? cfg.configuration
-    ) as string | undefined;
+    const configActor = ((cfg.configuration as { actor?: string })?.actor ?? cfg.configuration) as
+      | string
+      | undefined;
     if (!configActor) throw new Error("Firefox did not return a thread config actor");
     await this.#client.request(configActor, {
       type: "updateConfiguration",
@@ -465,9 +464,7 @@ export class RdpWasmSession extends EventEmitter {
     const { sources } = (await this.#client.request(this.#info(tid).threadActor, {
       type: "sources",
     })) as { sources?: unknown[] };
-    const wasm = ((sources ?? []) as SourceForm[]).filter(
-      (s) => s.introductionType === "wasm"
-    );
+    const wasm = ((sources ?? []) as SourceForm[]).filter((s) => s.introductionType === "wasm");
     for (const s of wasm) this.#wasmActorByUrl.set(s.url, s.actor);
     return wasm;
   }

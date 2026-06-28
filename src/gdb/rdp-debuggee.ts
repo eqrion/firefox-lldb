@@ -687,7 +687,10 @@ export class RdpDebuggee {
     if (this.#pendingInterrupt) {
       this.#pendingInterrupt = false;
       this.#lastPauseReason = "signal";
-      this.#stopped = Promise.resolve({ tid: this.#session.stoppedTid, pausePacket: {} as PauseEvent });
+      this.#stopped = Promise.resolve({
+        tid: this.#session.stoppedTid,
+        pausePacket: {} as PauseEvent,
+      });
       this.#resolveStopped = null;
       this.#rejectStopped = null;
       return;

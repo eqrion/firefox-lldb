@@ -37,9 +37,9 @@ function focusFirefox(): void {
         "powershell",
         [
           "-Command",
-          '$p=Get-Process firefox -EA SilentlyContinue|Select-Object -First 1;' +
-            'if($p){Add-Type -Name W -Namespace WU -MemberDefinition' +
-            ' \'[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);\';' +
+          "$p=Get-Process firefox -EA SilentlyContinue|Select-Object -First 1;" +
+            "if($p){Add-Type -Name W -Namespace WU -MemberDefinition" +
+            " '[DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr h);';" +
             "[WU.W]::SetForegroundWindow($p.MainWindowHandle)}",
         ],
         () => {}

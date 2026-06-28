@@ -18,14 +18,11 @@ after(async () => {
   await s?.shutdown();
 });
 
-test(
-  "source breakpoint at math.cpp:24 resolves and fires at the exact line",
-  async () => {
-    await s.breakpointByLocation("math.cpp", 24);
-    await s.continue();
-    const f0 = await s.topFrame();
-    assert.match(f0.function, /compute_factorial/);
-    assert.equal(f0.file?.endsWith("math.cpp"), true);
-    assert.equal(f0.line, 24);
-  }
-);
+test("source breakpoint at math.cpp:24 resolves and fires at the exact line", async () => {
+  await s.breakpointByLocation("math.cpp", 24);
+  await s.continue();
+  const f0 = await s.topFrame();
+  assert.match(f0.function, /compute_factorial/);
+  assert.equal(f0.file?.endsWith("math.cpp"), true);
+  assert.equal(f0.line, 24);
+});

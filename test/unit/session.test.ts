@@ -587,8 +587,12 @@ test("removeWasmBreakpoint uses same offset wire as setWasmBreakpoint", async ()
   await session.setWasmBreakpoint("http://host/mod.wasm", 42);
   await session.removeWasmBreakpoint("http://host/mod.wasm", 42);
 
-  const setLine = (srv.received.find((r) => r.type === "setBreakpoint")?.location as { line?: number })?.line;
-  const removeLine = (srv.received.find((r) => r.type === "removeBreakpoint")?.location as { line?: number })?.line;
+  const setLine = (
+    srv.received.find((r) => r.type === "setBreakpoint")?.location as { line?: number }
+  )?.line;
+  const removeLine = (
+    srv.received.find((r) => r.type === "removeBreakpoint")?.location as { line?: number }
+  )?.line;
 
   assert.equal(setLine, 42);
   assert.equal(removeLine, 42, "removeBreakpoint must send same offset as setBreakpoint");
@@ -824,7 +828,9 @@ test("session emits 'close' when the RDP connection drops", async () => {
   const session = await srv.acceptSession();
 
   let closeFired = false;
-  session.on("close", () => { closeFired = true; });
+  session.on("close", () => {
+    closeFired = true;
+  });
 
   srv.close();
   await sleep(200);
@@ -936,7 +942,13 @@ test("navigate() clears stale source-actor caches so post-navigation breakpoints
     (r) => r.type === "sources",
     () => ({
       from: "thread1",
-      sources: [{ actor: "oldJsActor", url: "http://example.com/app.js", introductionType: "scriptElement" }],
+      sources: [
+        {
+          actor: "oldJsActor",
+          url: "http://example.com/app.js",
+          introductionType: "scriptElement",
+        },
+      ],
     })
   );
   await session.jsSources();
@@ -957,7 +969,13 @@ test("navigate() clears stale source-actor caches so post-navigation breakpoints
     (r) => r.type === "sources",
     () => ({
       from: "thread2",
-      sources: [{ actor: "newJsActor", url: "http://example.com/app.js", introductionType: "scriptElement" }],
+      sources: [
+        {
+          actor: "newJsActor",
+          url: "http://example.com/app.js",
+          introductionType: "scriptElement",
+        },
+      ],
     })
   );
   const sources = await session.jsSources();

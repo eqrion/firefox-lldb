@@ -168,7 +168,11 @@ export class ReplSession {
       const check = () => {
         if (this.#out.includes(text)) return resolve();
         if (Date.now() > deadline)
-          return reject(new Error(`timeout waiting for ${JSON.stringify(text)}; got: ${JSON.stringify(this.#out.slice(-300))}`));
+          return reject(
+            new Error(
+              `timeout waiting for ${JSON.stringify(text)}; got: ${JSON.stringify(this.#out.slice(-300))}`
+            )
+          );
         this.#waiters.push(check);
       };
       check();

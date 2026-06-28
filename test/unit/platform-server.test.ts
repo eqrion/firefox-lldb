@@ -143,7 +143,14 @@ test("concurrent qLaunchGDBServer for same tab returns identical pid/port", asyn
   let launchCount = 0;
   const concurrentLauncher: GdbServerLauncher = async ({ port }) => {
     launchCount++;
-    const srv = new RspServer({ async handle() { return ""; } }, { singleConnection: true });
+    const srv = new RspServer(
+      {
+        async handle() {
+          return "";
+        },
+      },
+      { singleConnection: true }
+    );
     const boundPort = await srv.listen(port);
     return { port: boundPort, stop: () => srv.close() };
   };
@@ -183,7 +190,10 @@ test("concurrent qLaunchGDBServer for same tab returns identical pid/port", asyn
   const psWrap = new PlatformServer({
     spawner: spWrap,
     listTabs: async () => [{ actor: "tab-wrap", url: "http://example.com/", title: "" }],
-    wrapConnectPort: async (p) => { wrapCount++; return p + 10000; },
+    wrapConnectPort: async (p) => {
+      wrapCount++;
+      return p + 10000;
+    },
   });
   const srvWrap = new RspServer(psWrap);
   const portWrap = await srvWrap.listen(0);
@@ -210,7 +220,14 @@ test("qKillSpawnedProcess then qLaunchGDBServer launches a fresh server", async 
   let launchCount = 0;
   const countingLauncher: GdbServerLauncher = async ({ port }) => {
     launchCount++;
-    const srv = new RspServer({ async handle() { return ""; } }, { singleConnection: true });
+    const srv = new RspServer(
+      {
+        async handle() {
+          return "";
+        },
+      },
+      { singleConnection: true }
+    );
     const boundPort = await srv.listen(port);
     return { port: boundPort, stop: () => srv.close() };
   };
@@ -282,7 +299,14 @@ test("A packet sets launch args; qLaunchGDBServer uses arg0 as the URL when it l
   let capturedUrl: string | undefined;
   const urlCapturingLauncher: GdbServerLauncher = async ({ port, url }) => {
     capturedUrl = url;
-    const srv = new RspServer({ async handle() { return ""; } }, { singleConnection: true });
+    const srv = new RspServer(
+      {
+        async handle() {
+          return "";
+        },
+      },
+      { singleConnection: true }
+    );
     const boundPort = await srv.listen(port);
     return { port: boundPort, stop: () => srv.close() };
   };

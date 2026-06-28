@@ -25,23 +25,17 @@ test("stopped in parse_factor at parser.cpp (call stack + DWARF)", async () => {
   assert.ok(f0.line > 0, "line number is positive");
 });
 
-test(
-  "call stack is >= 3 frames deep (parse_factor / parse_term / parse_expr)",
-  async () => {
-    const frames = await s.frames();
-    assert.ok(frames.length >= 3, `expected >= 3 frames, got ${frames.length}`);
-  }
-);
+test("call stack is >= 3 frames deep (parse_factor / parse_term / parse_expr)", async () => {
+  const frames = await s.frames();
+  assert.ok(frames.length >= 3, `expected >= 3 frames, got ${frames.length}`);
+});
 
-test(
-  "parent frame names: frame0=parse_factor, frame1=parse_term, frame2=parse_expr",
-  async () => {
-    const frames = await s.frames();
-    assert.match(frames[0].function, /parse_factor/);
-    assert.match(frames[1].function, /parse_term/);
-    assert.match(frames[2].function, /parse_expr/);
-  }
-);
+test("parent frame names: frame0=parse_factor, frame1=parse_term, frame2=parse_expr", async () => {
+  const frames = await s.frames();
+  assert.match(frames[0].function, /parse_factor/);
+  assert.match(frames[1].function, /parse_term/);
+  assert.match(frames[2].function, /parse_expr/);
+});
 
 test("local 'value' is visible in parse_factor frame", async () => {
   const value = await s.variable(0, "value");

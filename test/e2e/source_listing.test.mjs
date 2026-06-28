@@ -19,22 +19,16 @@ after(async () => {
   await s?.shutdown();
 });
 
-test(
-  "wasm frame has a valid file and positive line number (DWARF source info)",
-  async () => {
-    const f0 = await s.topFrame();
-    assert.match(f0.function, /compute_factorial/);
-    assert.equal(f0.file?.endsWith("math.cpp"), true);
-    assert.ok(f0.line > 0, "line number is positive");
-  }
-);
+test("wasm frame has a valid file and positive line number (DWARF source info)", async () => {
+  const f0 = await s.topFrame();
+  assert.match(f0.function, /compute_factorial/);
+  assert.equal(f0.file?.endsWith("math.cpp"), true);
+  assert.ok(f0.line > 0, "line number is positive");
+});
 
-test(
-  "a JS caller frame has a valid file ending in .js with a positive line number",
-  async () => {
-    const frames = await s.frames();
-    const jsFrame = frames.find((f) => f.file?.endsWith(".js"));
-    assert.ok(jsFrame, "no JS caller frame found in call stack");
-    assert.ok(jsFrame.line > 0, `JS frame line number is positive (got ${jsFrame.line})`);
-  }
-);
+test("a JS caller frame has a valid file ending in .js with a positive line number", async () => {
+  const frames = await s.frames();
+  const jsFrame = frames.find((f) => f.file?.endsWith(".js"));
+  assert.ok(jsFrame, "no JS caller frame found in call stack");
+  assert.ok(jsFrame.line > 0, `JS frame line number is positive (got ${jsFrame.line})`);
+});

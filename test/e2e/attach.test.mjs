@@ -30,18 +30,15 @@ test("stopped in compute_factorial at math.cpp:24", async () => {
   assert.equal(f0.line, 24);
 });
 
-test(
-  "call stack interleaves the wasm frame with JS frames (qWasmCallStack)",
-  async () => {
-    const frames = await s.frames();
-    assert.ok(frames.length >= 2, `expected >= 2 frames, got ${frames.length}`);
-    assert.match(frames[0].function, /compute_factorial/);
-    assert.ok(
-      frames.some((f) => /\.js$/.test(f.file ?? "")),
-      "a JS caller frame is present"
-    );
-  }
-);
+test("call stack interleaves the wasm frame with JS frames (qWasmCallStack)", async () => {
+  const frames = await s.frames();
+  assert.ok(frames.length >= 2, `expected >= 2 frames, got ${frames.length}`);
+  assert.match(frames[0].function, /compute_factorial/);
+  assert.ok(
+    frames.some((f) => /\.js$/.test(f.file ?? "")),
+    "a JS caller frame is present"
+  );
+});
 
 test("local argument n == 10 (qWasmLocal + DWARF)", async () => {
   const n = await s.variable(0, "n");

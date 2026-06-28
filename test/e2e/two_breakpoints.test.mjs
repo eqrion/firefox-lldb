@@ -17,19 +17,16 @@ after(async () => {
   await s?.shutdown();
 });
 
-test(
-  "two breakpoints fire in execution order: compute_factorial then factorial",
-  async () => {
-    await s.breakpointByName("compute_factorial");
-    await s.breakpointByName("factorial");
+test("two breakpoints fire in execution order: compute_factorial then factorial", async () => {
+  await s.breakpointByName("compute_factorial");
+  await s.breakpointByName("factorial");
 
-    await s.continue();
-    const f0first = await s.topFrame();
-    assert.match(f0first.function, /compute_factorial/);
+  await s.continue();
+  const f0first = await s.topFrame();
+  assert.match(f0first.function, /compute_factorial/);
 
-    await s.continue();
-    const f0second = await s.topFrame();
-    assert.match(f0second.function, /factorial/);
-    assert.doesNotMatch(f0second.function, /compute_/);
-  }
-);
+  await s.continue();
+  const f0second = await s.topFrame();
+  assert.match(f0second.function, /factorial/);
+  assert.doesNotMatch(f0second.function, /compute_/);
+});
