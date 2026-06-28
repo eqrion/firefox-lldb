@@ -7,10 +7,7 @@
 import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
 import { RspServer, type RspLogger } from "../protocol/rsp-server.js";
-import {
-  GdbServerSpawner,
-  type GdbServerLauncher,
-} from "../platform/gdb-server-spawner.js";
+import { GdbServerSpawner, type GdbServerLauncher } from "../platform/gdb-server-spawner.js";
 import { startAttachShim } from "../protocol/attach-shim.js";
 import { PlatformServer } from "../platform/platform-server.js";
 import {
@@ -36,6 +33,8 @@ Modes (default: --launch):
 Options:
   -p, --port <N>      Platform server RSP port (default: 1234).
   --rdp-port <N>      Firefox RDP port (default: 6080).
+  --marionette-port <N>  Also start Marionette on this port (for a BiDi page
+                      driver like firefox-devtools-mcp). Off by default.
   --url <U>           URL navigated to when LLDB spawns a process (connect or
                       attach). Firefox itself starts on about:blank.
   --firefox <path>    Firefox binary (default: auto-detected from standard locations).
@@ -56,6 +55,7 @@ export interface Args {
   headless: boolean;
   port: number;
   rdpPort: number;
+  marionettePort?: number;
   url?: string;
   firefox?: string;
   fire?: string;
@@ -74,6 +74,7 @@ export function parseCliArgs(argv: string[]): Args {
         headless: { type: "boolean" },
         port: { type: "string", short: "p" },
         "rdp-port": { type: "string" },
+        "marionette-port": { type: "string" },
         url: { type: "string" },
         firefox: { type: "string" },
         fire: { type: "string" },
@@ -101,12 +102,23 @@ export function parseCliArgs(argv: string[]): Args {
     process.stderr.write(`error: --rdp-port must be a number, got "${values["rdp-port"]}"\n`);
     process.exit(1);
   }
+  let marionettePort: number | undefined;
+  if (values["marionette-port"] !== undefined) {
+    marionettePort = Number(values["marionette-port"]);
+    if (Number.isNaN(marionettePort)) {
+      process.stderr.write(
+        `error: --marionette-port must be a number, got "${values["marionette-port"]}"\n`
+      );
+      process.exit(1);
+    }
+  }
 
   return {
     connect: values.launch ? false : !!values.connect,
     headless: !!values.headless,
     port,
     rdpPort,
+    marionettePort,
     url: values.url,
     firefox: values.firefox,
     fire: values.fire,
@@ -147,15 +159,14 @@ async function watchTabs(
   }
 }
 
-async function waitForWasm(
-  session: RdpWasmSession,
-  onWaiting?: () => void
-): Promise<void> {
+async function waitForWasm(session: RdpWasmSession, onWaiting?: () => void): Promise<void> {
   // Abort early if the session closes so we don't poll for 30 s on a dead
   // connection (wasmSources() catches errors and returns [], but sleep(100)
   // still runs each iteration without this guard).
   let sessionClosed = false;
-  const onClose = () => { sessionClosed = true; };
+  const onClose = () => {
+    sessionClosed = true;
+  };
   session.on("close", onClose);
   try {
     let wasm = (await session.wasmSources())[0];
@@ -216,6 +227,7 @@ export async function startPlatformServer(
       rdpPort: args.rdpPort,
       binary: args.firefox,
       headless: args.headless,
+      marionettePort: args.marionettePort,
       // NOTE: deliberately not passing url here. Firefox starts on about:blank;
       // the tab is navigated to the page lazily on the first qLaunchGDBServer
       // (see the launcher below). Launching Firefox directly at the page would

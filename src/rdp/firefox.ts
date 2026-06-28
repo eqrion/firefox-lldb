@@ -48,7 +48,7 @@ export function findFirefoxBinary(): string | undefined {
       candidates.push(
         "/Applications/Firefox.app/Contents/MacOS/firefox",
         join(homedir(), "Applications/Firefox.app/Contents/MacOS/firefox"),
-        "/Applications/Firefox Developer Edition.app/Contents/MacOS/firefox",
+        "/Applications/Firefox Developer Edition.app/Contents/MacOS/firefox"
       );
       break;
     case "win32": {
@@ -68,7 +68,10 @@ export function findFirefoxBinary(): string | undefined {
   // Fall back to PATH lookup.
   try {
     const cmd = process.platform === "win32" ? "where" : "which";
-    const result = execFileSync(cmd, ["firefox"], { encoding: "utf8", stdio: ["pipe", "pipe", "ignore"] });
+    const result = execFileSync(cmd, ["firefox"], {
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "ignore"],
+    });
     const first = result.trim().split(/\r?\n/)[0];
     if (first) return first;
   } catch {
@@ -102,6 +105,9 @@ export async function launchFirefox(opts: {
   binary?: string;
   headless?: boolean;
   url?: string;
+  /** When set, also start Marionette on this port so a WebDriver-BiDi client
+   * (e.g. firefox-devtools-mcp --connect-existing) can drive the same Firefox. */
+  marionettePort?: number;
 }): Promise<FirefoxHandle> {
   const binary = opts.binary ?? findFirefoxBinary();
   if (!binary) {
@@ -111,10 +117,13 @@ export async function launchFirefox(opts: {
   }
   const profileDir = await mkdtemp(join(tmpdir(), "ff-rdp-"));
 
-  const prefs =
+  let prefs =
     PROFILE_PREFS.map(([k, v]) => `user_pref(${JSON.stringify(k)}, ${JSON.stringify(v)});`).join(
       "\n"
     ) + `\nuser_pref("devtools.debugger.remote-port", ${opts.rdpPort});\n`;
+  if (opts.marionettePort !== undefined) {
+    prefs += `user_pref("marionette.port", ${opts.marionettePort});\n`;
+  }
   await writeFile(join(profileDir, "user.js"), prefs);
 
   const args = [
@@ -123,8 +132,11 @@ export async function launchFirefox(opts: {
     profileDir,
     "--start-debugger-server",
     String(opts.rdpPort),
-    opts.url ?? "about:blank",
   ];
+  // RDP (debugger server) and Marionette are independent and coexist; enabling
+  // both lets one Firefox serve firefox-lldb (RDP) and a BiDi page driver.
+  if (opts.marionettePort !== undefined) args.push("--marionette");
+  args.push(opts.url ?? "about:blank");
   if (opts.headless ?? false) args.unshift("--headless");
 
   // detached: true makes the child a process group leader so we can kill
