@@ -23,7 +23,7 @@
     "format:check": "prettier --check .",
     "check": "npm run typecheck && npm run format:check",
     "test": "node --import tsx --test test/unit/*.test.ts",
-    "test:e2e": "node --import tsx --test --test-concurrency=${E2E_CONCURRENCY:-8} --test-timeout=120000 --test-reporter=./test/e2e/reporter.mjs test/e2e/*.test.mjs",
+    "test:e2e": "node --import tsx --test --test-concurrency=${E2E_CONCURRENCY:-4} --test-timeout=120000 --test-reporter=./test/e2e/reporter.mjs test/e2e/*.test.mjs",
     "launch": "node --import tsx src/cli/firefox-lldb.ts --launch --rdp-port ${RDP_PORT:-6080} ${URL:+--url $URL}",
     "launch-server": "node --import tsx src/cli/firefox-lldb-server.ts --launch --port ${PORT:-1234} --rdp-port ${RDP_PORT:-6080} ${URL:+--url $URL}",
     "connect": "node --import tsx src/cli/firefox-lldb-server.ts --connect --port ${PORT:-1234} --rdp-port ${RDP_PORT:-6080} ${URL:+--url $URL}",
