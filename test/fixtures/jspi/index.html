@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>JSPI Fixture</title>
+</head>
+<body>
+  <script src="jspi.js"></script>
+  <script>
+    var mod = null;
+    JspiModule().then(function(m) { mod = m; });
+
+    function runAsync() {
+      if (!mod) { setTimeout(runAsync, 20); return; }
+      // cwrap with async:true returns a Promise (JSPI path).
+      mod.ccall('run_async', 'number', ['number'], [99], { async: true })
+        .then(function(r) { document.title = 'result: ' + r; });
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>EH Fixture</title>
+</head>
+<body>
+  <script src="eh.js"></script>
+  <script>
+    var mod = null;
+    EhModule().then(function(m) { mod = m; });
+
+    function callExport(name) {
+      if (!mod) { setTimeout(function() { callExport(name); }, 20); return; }
+      mod.cwrap(name, 'number', [])();
+    }
+    // Use setTimeout so the exception propagates uncaught into JS (not swallowed
+    // by the --fire harness's own try/catch), mirroring the trap fixture.
+    function runThrowCatch() { setTimeout(function() { callExport('run_throw_catch'); }, 0); }
+    function runRethrow()    { setTimeout(function() { callExport('run_rethrow'); }, 0); }
+    function runUncaught()   { setTimeout(function() { callExport('run_uncaught'); }, 0); }
+  </script>
+</body>
+</html>

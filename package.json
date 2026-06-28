@@ -36,7 +36,7 @@
     "sourcemap:transpile": "npx jco transpile vendor/source-map-dwarf-component/target/wasm32-wasip2/release/firefox_lldb_source_map_component.wasm -o src/sourcemap/generated --name sourcemap --instantiation async",
     "sourcemap": "npm run sourcemap:build && npm run sourcemap:transpile",
     "test:rust": "cargo test --manifest-path vendor/source-map-dwarf/Cargo.toml",
-    "build:fixtures": "npm run build:fixture-simple && npm run build:fixture-oop && npm run build:fixture-parser && npm run build:fixture-ledger && npm run build:fixture-types && npm run build:fixture-heap && npm run build:fixture-trap && npm run build:fixture-sourcemap",
+    "build:fixtures": "npm run build:fixture-simple && npm run build:fixture-oop && npm run build:fixture-parser && npm run build:fixture-ledger && npm run build:fixture-types && npm run build:fixture-heap && npm run build:fixture-trap && npm run build:fixture-sourcemap && npm run build:fixture-eh && npm run build:fixture-jspi && npm run build:fixture-large",
     "build:fixture-sourcemap": "cd test/fixtures/sourcemap && ${EMSDK:+$EMSDK/upstream/emscripten/}emcc math.cpp -o math.js -gsource-map -O0 -s EXPORTED_RUNTIME_METHODS='[\"cwrap\"]' -s MODULARIZE=1 -s EXPORT_NAME=MathModule",
     "build:fixture-simple": "cd test/fixtures/simple && ${EMSDK:+$EMSDK/upstream/emscripten/}emcc math.cpp -o math.js -g -O0 -s EXPORTED_RUNTIME_METHODS='[\"cwrap\"]' -s MODULARIZE=1 -s EXPORT_NAME=MathModule",
     "build:fixture-oop": "cd test/fixtures/oop && ${EMSDK:+$EMSDK/upstream/emscripten/}emcc oop.cpp -o oop.js -g -O0 -s EXPORTED_RUNTIME_METHODS='[\"cwrap\"]' -s MODULARIZE=1 -s EXPORT_NAME=OopModule",
@@ -45,6 +45,9 @@
     "build:fixture-types": "cd test/fixtures/types && ${EMSDK:+$EMSDK/upstream/emscripten/}emcc types.cpp -o types.js -g -O0 -s EXPORTED_RUNTIME_METHODS='[\"cwrap\"]' -s MODULARIZE=1 -s EXPORT_NAME=TypesModule",
     "build:fixture-heap": "cd test/fixtures/heap && ${EMSDK:+$EMSDK/upstream/emscripten/}emcc heap.cpp -o heap.js -g -O0 -s EXPORTED_RUNTIME_METHODS='[\"cwrap\"]' -s MODULARIZE=1 -s EXPORT_NAME=HeapModule",
     "build:fixture-trap": "cd test/fixtures/trap && ${EMSDK:+$EMSDK/upstream/emscripten/}emcc trap.cpp -o trap.js -g -O0 -s EXPORTED_RUNTIME_METHODS='[\"cwrap\"]' -s MODULARIZE=1 -s EXPORT_NAME=TrapModule",
+    "build:fixture-eh": "cd test/fixtures/eh && ${EMSDK:+$EMSDK/upstream/emscripten/}emcc eh.cpp -o eh.js -fwasm-exceptions -g -O0 -s EXPORTED_RUNTIME_METHODS='[\"cwrap\"]' -s MODULARIZE=1 -s EXPORT_NAME=EhModule",
+    "build:fixture-jspi": "cd test/fixtures/jspi && ${EMSDK:+$EMSDK/upstream/emscripten/}emcc jspi.c -o jspi.js -sJSPI -g -O0 -s EXPORTED_RUNTIME_METHODS='[\"cwrap\",\"ccall\"]' -s MODULARIZE=1 -s EXPORT_NAME=JspiModule",
+    "build:fixture-large": "bash scripts/build-fixture-large.sh",
     "test:e2e-python": "LLDB=${LLDB:-$LLVM/build/bin/lldb} python3 test/e2e-python/run.py"
   },
   "dependencies": {

@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Large Fixture</title>
+</head>
+<body>
+  <script src="large.js"></script>
+  <script>
+    var mod = null;
+    LargeModule().then(function(m) { mod = m; });
+
+    function runLarge() {
+      if (!mod) { setTimeout(runLarge, 20); return; }
+      var result = mod.cwrap('run_large', 'number', [])();
+      document.title = 'result: ' + result;
+    }
+  </script>
+</body>
+</html>

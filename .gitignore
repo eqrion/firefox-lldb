@@ -3,3 +3,8 @@ node_modules/
 dist/
 *.log
 .claude/settings.local.json
+# large fixture: downloaded sqlite3 source + built artifacts (too big for git)
+test/fixtures/large/sqlite3.c
+test/fixtures/large/sqlite3.h
+test/fixtures/large/large.js
+test/fixtures/large/large.wasm

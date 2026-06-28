@@ -76,6 +76,28 @@ export const FIXTURES = {
     breakFunc: "compute_factorial",
     file: "math.cpp",
   },
+  // Exception-handling fixture: C++ try/catch/throw compiled with -fwasm-exceptions.
+  eh: {
+    pageDir: "test/fixtures/eh",
+    fire: "runThrowCatch()",
+    breakFunc: "handle_error",
+    file: "eh.cpp",
+  },
+  // JSPI fixture: wasm suspends and resumes across a JS Promise (setTimeout).
+  jspi: {
+    pageDir: "test/fixtures/jspi",
+    fire: "runAsync()",
+    breakFunc: "before_suspend",
+    file: "jspi.c",
+  },
+  // Large fixture: sqlite3 amalgamation, thousands of real symbols + multi-MB DWARF.
+  // Requires building first: EMSDK=~/src/emsdk npm run build:fixture-large
+  large: {
+    pageDir: "test/fixtures/large",
+    fire: "runLarge()",
+    breakFunc: "sqlite3_prepare_v2",
+    file: "large.cpp",
+  },
   // Source-map fixtures: the wasm ships a source map (sourceMappingURL +
   // math.wasm.map) instead of embedded DWARF, exercising the source-map ->
   // DWARF conversion path.
