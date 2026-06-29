@@ -1,203 +1,165 @@
 # firefox-lldb
 
-Debug WebAssembly running inside Firefox with LLDB.
+Source-level debugging for WebAssembly running in your browser.
 
-The `firefox-lldb` command embeds LLDB compiled to WebAssembly (the `lldb-wasm`
-package) and runs it in-process, so no separate lldb binary is required. It
-wraps that wasm LLDB in a terminal REPL that adds command history, Ctrl-C to
-interrupt a running target, `js` commands that query the page over Firefox's
-RDP, and live console output. It only supports the embedded wasm LLDB; to drive
-the debugger from your own native wasm-plugin lldb, run the standalone platform
-server instead (see [Manual two-step](#manual-two-step)).
+`firefox-lldb` gives you a real LLDB prompt attached to a WebAssembly module
+executing inside a live Firefox tab. Set breakpoints by function name or
+`file:line`, step through your original C/C++/Rust source, inspect locals,
+structs, and globals, and read linear memory, all against the code as it
+actually runs in the page.
 
 ```
-(lldb) process attach --plugin wasm --pid 1
-* thread #1, stop reason = signal SIGTRAP
-    frame #0: wasm-0`compute_factorial(n=...) at math.cpp:23
+(lldb) breakpoint set -n compute_factorial
+(lldb) continue
+* thread #1, stop reason = breakpoint 1.1
+    frame #0: wasm-0`compute_factorial(n=5) at math.cpp:23
+   22     int compute_factorial(int n) {
+-> 23       if (n <= 1) return 1;
+   24       return n * compute_factorial(n - 1);
+(lldb) p n
+(int) 5
 ```
+
+No separate LLDB install is needed: the tool ships LLDB compiled to
+WebAssembly and runs it in-process. You just need Node and Firefox.
 
 ## Requirements
 
-- Node.js 20+
-- Firefox 120+
-- For the manual two-step flow only: a wasm-plugin lldb build (Apple's
-  `/usr/bin/lldb` lacks the wasm process plugin — build from `../llvm-project`).
-  The bundled `firefox-lldb` command does not need this.
+- Node.js 20 or newer
+- Firefox 120 or newer
+- A WebAssembly module built with debug info (see [below](#preparing-your-wasm))
 
 ## Install
 
 ```sh
-npm install
+npm install -g firefox-lldb
 ```
 
-## Usage
+This puts the `firefox-lldb` command on your `PATH`. (You can also run it
+without installing via `npx firefox-lldb`.)
 
-### One-command debug session
+## Getting started
 
-`firefox-lldb` launches Firefox, starts the platform server in-process, and
-drops you into an interactive lldb prompt backed by the embedded wasm LLDB. Once
-the page loads, it prints a hint above the prompt:
+Say your app is served at `http://localhost:8080/index.html` and loads a wasm
+module built with debug info. Point `firefox-lldb` at it:
 
 ```sh
-node --import tsx src/cli/firefox-lldb.ts \
-  --launch --url http://localhost:8080/index.html
+firefox-lldb --url http://localhost:8080/index.html
 ```
 
-```
-tab available: http://localhost:8080/
-  attach --pid 1
-```
-
-From the lldb prompt (`attach` is aliased to `process attach --plugin wasm`, so
-the plugin is supplied for you):
+This launches a fresh Firefox, opens the page, attaches to its wasm module, and
+drops you at an `(lldb)` prompt. From there:
 
 ```
-(lldb) platform process list        # see open tabs and their PIDs
-(lldb) attach --pid <N>             # attach to the wasm tab
-(lldb) breakpoint set -n compute_factorial
-(lldb) continue
+(lldb) breakpoint set -n compute_factorial   # break on a function
+(lldb) continue                              # run until it's hit
+(lldb) bt                                     # see the call stack
+(lldb) p n                                    # inspect a local
+(lldb) step                                   # step to the next source line
+(lldb) frame variable                         # list all locals + args
 ```
 
-Use the up/down arrows for command history, and Ctrl-C to interrupt a running
-target (press it again at an empty prompt to quit). The prompt is redrawn after
-any asynchronous notice (tab hints, console output) so input is never lost.
+That's the whole loop: break, run, inspect, step.
 
-#### Inspecting JavaScript (`js`)
+### Attaching by hand
 
-The wasm LLDB cannot evaluate JS, so `firefox-lldb` answers JS questions over
-RDP through `js` subcommands that run against the attached tab:
-
-```
-(lldb) js p document.title          # evaluate a JS expression (in the stopped frame, if any)
-(lldb) js bt                        # JS backtrace of the stopped thread
-(lldb) js frame 0                   # show a JS frame and its locals
-```
-
-#### Console output
-
-Console messages and uncaught errors from the page are streamed to the terminal
-as they happen. Type `console off` to mute them and `console on` to resume.
-
-Wasm targets must be driven through LLDB's `wasm` process plugin. If you attach
-with the bare `process attach` (no `--plugin wasm`), LLDB falls back to the
-generic gdb-remote plugin, which misreads the wasm address space — the session
-will not work. The server bounds the bogus reads such a plugin produces so it
-fails instead of exhausting memory; run with `-v` to trace the protocol.
-
-### Manual two-step
-
-Start the platform server separately, then connect lldb by hand:
-
-```sh
-# Terminal 1 — launch Firefox + platform server
-URL=http://localhost:8080/index.html npm run launch
-
-# Terminal 2 — connect lldb
-lldb
-(lldb) platform select remote-gdb-server
-(lldb) platform connect connect://localhost:1234
-(lldb) platform process list          # find the tab's PID
-(lldb) process attach --plugin wasm --pid <N>   # server pauses the tab automatically
-```
-
-(In your own lldb the `attach` alias is not defined, so pass `--plugin wasm`
-explicitly.)
-
-Connect to an already-running Firefox instead of launching a new one:
-
-```sh
-npm run connect
-```
-
-### Flags
-
-| Flag               | Default       | Description                                                              |
-| ------------------ | ------------- | ------------------------------------------------------------------------ |
-| `--port`           | `1234`        | Platform server RSP port                                                 |
-| `--rdp-port`       | `6080`        | Firefox RDP port                                                         |
-| `--url`            | —             | URL to navigate to on `process attach` (Firefox starts on `about:blank`) |
-| `--firefox`        | auto-detected | Path to Firefox binary                                                   |
-| `--headless`       | off           | Run Firefox headlessly                                                   |
-| `--launch`         | (default)     | Launch a fresh Firefox                                                   |
-| `--connect`        | —             | Connect to an already-running Firefox                                    |
-| `--verbose` / `-v` | off           | Log debug output                                                         |
-
-## What works
-
-| Feature                                              | Status                                  |
-| ---------------------------------------------------- | --------------------------------------- |
-| Call stack + DWARF symbolication                     | ✅                                      |
-| Breakpoints (by name, file:line)                     | ✅                                      |
-| Continue, StepInstruction, StepOver, StepIn, StepOut | ✅                                      |
-| Locals and globals                                   | ✅                                      |
-| Linear memory reads                                  | ✅                                      |
-| Struct/pointer inspection via SB API                 | ✅                                      |
-| Operand stack (`qWasmStackValue`)                    | ✗ — SpiderMonkey does not expose it yet |
-| Expression evaluation (`expr`)                       | ✗ — no wasm JIT backend in lldb         |
-| JS expression eval / backtrace (`js`)                | ✅ — over Firefox RDP                   |
-| Live page console output                             | ✅ — streamed to the terminal           |
-| Multithreading (pthreads/web workers)                | ✅ — all-stop via per-thread RDP actors |
-
-### Attach time for large modules
-
-Attaching to a large wasm module (e.g. ~30 MB) takes longer than small
-ones because Firefox must download the binary and debug-compile it before
-the GDB server can start. Typical breakdown on a local server + M-series Mac:
-
-| Phase                                | Time     |
-| ------------------------------------ | -------- |
-| Firefox downloads + compiles (30 MB) | ~15–25 s |
-| GDB server startup + LLDB handshake  | ~3–5 s   |
-
-The server prints `waiting for wasm sources to appear...` during this wait
-so you know it has not hung. For faster iteration, build with a smaller
-debug binary or serve the wasm from localhost.
-
-## Development
-
-```sh
-npm install                          # install dependencies
-npm test                             # unit tests
-npm run test:e2e                     # e2e suite (needs Firefox)
-LLVM=/path/to/llvm npm run test:e2e-python  # deprecated Python e2e (needs wasm-plugin lldb)
-npm run build:fixtures               # rebuild emscripten test fixtures (needs emsdk)
-npm run component                    # rebuild the vendored gdbstub-component (needs Rust + jco)
-```
-
-The embedded LLDB is the `lldb-wasm` package (LLDB compiled to WebAssembly),
-built from `../llvm-project/lldb/tools/lldb-wasm`.
-To rebuild it after changing the LLVM fork, run `just build-wasm && npm run build`
-in that package's directory (needs emsdk), then `npm install` here.
-
-See [INTERNALS.md](INTERNALS.md) for architecture, protocol details, and
-implementation notes.
-
-## Repo layout
+If you don't pass `--url`, Firefox starts on a blank page and the prompt lists
+the open tabs instead. Navigate to your page (in the Firefox window that
+opened), then attach:
 
 ```
-src/protocol/        RSP packet framing, hex, generic TCP server
-src/platform/        platform server (process list, qLaunchGDBServer)
-src/rdp/             RDP client + RdpWasmSession + headless Firefox launcher
-src/gdb/             RdpDebuggee, worker host + SAB RPC, generated/ (jco output)
-src/cli/             firefox-lldb-server (platform server), firefox-lldb (embeds wasm LLDB)
-test/unit/              unit tests (protocol + platform server)
-test/e2e/               Node e2e suite (primary correctness signal)
-test/fixtures/          emscripten test fixtures (shared by both e2e suites)
-test/e2e-python/        deprecated Python e2e suite
-vendor/              vendored wasmtime gdbstub-component (+ MODIFICATIONS.md)
-scripts/             patch-generated.mjs (jco patch), wasm-offsets.mjs
+(lldb) platform process list   # list open tabs and their PIDs
+(lldb) attach --pid 1          # attach to the wasm tab
 ```
 
-## Licensing
+`attach` is a shortcut for `process attach --plugin wasm`; the `--plugin wasm`
+part is what makes LLDB understand the wasm address space, and it's filled in
+for you.
 
-This project is licensed under the Mozilla Public License, v. 2.0 (see
-[LICENSE](LICENSE)).
+### Preparing your wasm
 
-`vendor/gdbstub-component/` is vendored from
-[wasmtime](https://github.com/bytecodealliance/wasmtime) and remains under its
-original Apache License 2.0 with LLVM-exception (see
-[vendor/gdbstub-component/LICENSE](vendor/gdbstub-component/LICENSE)). Local
-changes are documented in
-[vendor/gdbstub-component/MODIFICATIONS.md](vendor/gdbstub-component/MODIFICATIONS.md).
-The transpiled output under `src/gdb/generated/` is jco-generated from that
-component and derives from the same Apache-2.0 source.
+Your module needs debug info for source-level debugging to work:
+
+- **Emscripten / C / C++:** compile with `-g` (e.g. `emcc app.cpp -g -O0 -o app.js`).
+- **Rust / wasm-pack:** debug builds embed DWARF by default.
+- **Source maps only:** if your toolchain emits a source map (a
+  `sourceMappingURL`) but no embedded DWARF, `firefox-lldb` synthesizes the
+  debug info from the source map automatically at attach time. Nothing extra to
+  do; just make sure the `.map` and original sources are reachable.
+
+Unoptimized builds (`-O0`) give the most faithful stepping and variable
+inspection; optimized builds may inline or drop locals.
+
+## Working at the prompt
+
+This is a real LLDB prompt, so standard LLDB commands work: `breakpoint`,
+`continue`/`c`, `step`/`s`, `next`/`n`, `finish`, `bt`, `frame`,
+`frame variable`, `p <var>`, `memory read`/`x`, `thread list`, and so on.
+
+A few conveniences on top of plain LLDB:
+
+- **Command history:** up/down arrows recall previous commands.
+- **Repeat:** pressing Enter on an empty line repeats the last command (handy
+  for stepping).
+- **Interrupt a running target:** press **Ctrl-C** while the program is running
+  to stop it where it is. At an empty prompt, press Ctrl-C twice to quit.
+- **Quit:** `quit`, `q`, `exit`, or Ctrl-D.
+
+### Inspecting JavaScript (`js`)
+
+The wasm debugger can't see into the surrounding JavaScript, so `firefox-lldb`
+adds `js` subcommands that query the live page directly. They run against the
+attached tab (and against the stopped frame, when the program is paused):
+
+| Command | What it does |
+| --- | --- |
+| `js p <expr>` | Evaluate a JavaScript expression and print the result. The expression runs to the end of the line, e.g. `js p document.title` or `js p window.location.href`. |
+| `js bt` | Print the JavaScript call stack of the stopped thread. |
+| `js frame <n>` | Show JS frame `n` (default `0`) and its locals/arguments, and select it as the context for subsequent `js p`. |
+| `help js` | Show the `js` help. |
+
+`js eval` and `js expr` are aliases for `js p`; `js f` is an alias for
+`js frame`. If nothing is attached, `js` reports "no attached tab".
+
+### Console output
+
+Messages your page logs to the console (and uncaught errors) stream into the
+terminal as they happen, so you can correlate them with where you've stopped.
+
+- `console off` mutes the stream.
+- `console on` resumes it.
+
+## What works, what doesn't
+
+| You want to... | Works? | Notes |
+| --- | --- | --- |
+| Break by function name or `file:line` | ✅ | |
+| Step in / over / out, and instruction-step | ✅ | |
+| See the call stack with source locations (`bt`) | ✅ | |
+| View source while stopped (`source list`) | ✅ | |
+| Inspect locals, arguments, and globals (`frame variable`, `p x`) | ✅ | |
+| Drill into structs, pointers, and arrays (`p obj`, `p *ptr`) | ✅ | |
+| Read linear memory (`memory read`, `x`) | ✅ | Bounded to ~8 KB per read (see below) |
+| Debug multithreaded wasm (pthreads / web workers) | ✅ | All threads stop together |
+| Evaluate JavaScript in the page (`js p`) | ✅ | Over Firefox's remote protocol |
+| Watch live console output | ✅ | |
+| Evaluate expressions over variables (`p n + 1`, `expr a > b`) | ✅ | Arithmetic, comparisons, casts, temp vars |
+| Call functions from an expression (`expr foo(3)`) | ❌ | Needs a JIT, which wasm targets don't have |
+
+## Options
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--url <U>` | — | Page to open and attach to. Omit to start blank and attach by hand. |
+| `--connect` | — | Attach to an already-running Firefox instead of launching one. |
+| `--headless` | off | Run Firefox without a visible window. |
+| `--firefox <path>` | auto-detected | Path to the Firefox binary. |
+| `--port <N>` | `1234` | Internal debug server port. |
+| `--rdp-port <N>` | `6080` | Firefox remote-debugging port. |
+| `-v`, `--verbose` | off | Log protocol/debug output. |
+| `-h`, `--help` | — | Show usage. |
+
+## License
+
+Mozilla Public License, v. 2.0 (see [LICENSE](LICENSE)). Portions are vendored
+from third parties under their own licenses; see the files under `vendor/`.
