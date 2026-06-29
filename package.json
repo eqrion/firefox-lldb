@@ -2,6 +2,19 @@
   "name": "firefox-lldb",
   "version": "0.1.0",
   "description": "LLDB platform server and GDB remote stub for debugging WebAssembly running inside Firefox",
+  "keywords": [
+    "lldb",
+    "wasm",
+    "webassembly",
+    "debugger",
+    "firefox",
+    "gdb"
+  ],
+  "homepage": "https://github.com/eqrion/firefox-lldb",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/eqrion/firefox-lldb.git"
+  },
   "type": "module",
   "license": "MPL-2.0",
   "engines": {
