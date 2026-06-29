@@ -250,17 +250,24 @@ export class Session {
 
   // Attach to a fixture, set a breakpoint on its target function, and continue
   // until stopped there. Mirrors harness.py `_stopped_at_breakpoint`.
+  // Continues past signals (e.g. SIGSEGV from -fwasm-exceptions throw) until
+  // a breakpoint or terminal state is reached.
   static async stoppedAtBreakpoint(fxName) {
     const session = await Session.attach(fxName);
     const fx = FIXTURES[fxName];
     await session.breakpointByName(fx.breakFunc);
-    await session.continue();
-    const st = await session.state();
-    if (st.reason === "none" || st.reason === "exited") {
-      await session.shutdown();
-      throw new Error(`did not stop at ${fx.breakFunc}: state ${st.reason}`);
+    for (let i = 0; i < 20; i++) {
+      await session.continue();
+      const st = await session.state();
+      if (st.reason === "none" || st.reason === "exited") {
+        await session.shutdown();
+        throw new Error(`did not stop at ${fx.breakFunc}: state ${st.reason}`);
+      }
+      if (st.reason === "breakpoint") return session;
+      // signal (e.g. SIGSEGV from C++ throw via -fwasm-exceptions): continue past it
     }
-    return session;
+    await session.shutdown();
+    throw new Error(`did not reach breakpoint at ${fx.breakFunc} after 20 continues`);
   }
 
   command(cmd) {
