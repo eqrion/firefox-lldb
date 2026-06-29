@@ -173,16 +173,19 @@ export function runRepl(deps: ReplDeps): Repl {
       write("error: unbalanced backtick in command");
       return;
     }
-    // Guard: very large memory reads overflow the lldb-wasm JSON IPC (64 KiB).
-    // LLDB chunks reads into PacketSize=1000 byte requests, all of which succeed
-    // individually, but the combined hex dump in one lldb-wasm message exceeds 64 KiB.
-    // Cap at 8 KiB (produces ~32 KiB of hex output, safely under the ceiling).
-    // Handles both: `memory read -c N` and `x/N`.
+    // Guard: commands that produce very large LLDB output overflow the lldb-wasm
+    // JSON IPC (64 KiB message limit). The following are known to hit this:
+    //   - `memory read -c N` / `x/N` with N > 8192
+    //   - `image lookup -r` (regex lookup returns thousands of results for large modules)
     const memReadCount =
       cmd.match(/^\s*(?:memory\s+read)\b.*?-c\s+(\d+)/i)?.[1] ??
       cmd.match(/^\s*x\/(\d+)/i)?.[1];
     if (memReadCount !== undefined && Number(memReadCount) > 8192) {
       write(`error: read count ${memReadCount} exceeds the 8192-byte limit (lldb-wasm JSON IPC constraint)`);
+      return;
+    }
+    if (/^\s*image\s+lookup\s+.*-r\b/i.test(cmd)) {
+      write("error: regex image lookup (-r) can produce thousands of results and overflow the lldb-wasm IPC; use a specific name with -n instead");
       return;
     }
 
