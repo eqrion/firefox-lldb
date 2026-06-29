@@ -488,12 +488,6 @@ export class RdpWasmSession extends EventEmitter {
     }
   }
 
-  /** Expose the wasm actor map so rdp-debuggee can fall back to it. */
-  wasmActorForUrl(url: string): string | undefined {
-    return this.#wasmActorByUrl.get(url);
-  }
-
-  /** Expose the wasm actor map so rdp-debuggee can fall back to it. */
   wasmActorForUrl(url: string): string | undefined {
     return this.#wasmActorByUrl.get(url);
   }
