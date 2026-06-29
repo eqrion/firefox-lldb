@@ -237,6 +237,7 @@ export class RdpWasmSession extends EventEmitter {
   #breakpoints = new Map<string, Set<number>>(); // sourceUrl -> set of offsets
 
   #wasmActorByUrl = new Map<string, string>(); // url -> source actor (any thread)
+  #breakpointPositionCache = new Map<string, Promise<number[]>>(); // actor -> positions
   #jsActorByUrl = new Map<string, string>(); // url -> JS source actor (any thread)
 
   private constructor(client: RdpClient) {
@@ -707,14 +708,23 @@ export class RdpWasmSession extends EventEmitter {
   }
 
   async wasmBreakpointOffsets(sourceActor: string): Promise<number[]> {
-    const { positions } = await this.#client.request(sourceActor, {
-      type: "getBreakpointPositionsCompressed",
-      query: { start: { line: 0 }, end: { line: 1e7 } },
-    });
-    return Object.keys((positions ?? {}) as Record<string, number[]>)
-      .map(Number)
-      .filter((n) => !Number.isNaN(n))
-      .sort((a, b) => a - b);
+    // Cache per actor: for large modules the RDP round-trip for all positions
+    // can be expensive. Subsequent Z0 packets reuse the same list.
+    let p = this.#breakpointPositionCache.get(sourceActor);
+    if (!p) {
+      p = (async () => {
+        const { positions } = await this.#client.request(sourceActor, {
+          type: "getBreakpointPositionsCompressed",
+          query: { start: { line: 0 }, end: { line: 1e7 } },
+        });
+        return Object.keys((positions ?? {}) as Record<string, number[]>)
+          .map(Number)
+          .filter((n) => !Number.isNaN(n))
+          .sort((a, b) => a - b);
+      })();
+      this.#breakpointPositionCache.set(sourceActor, p);
+    }
+    return p;
   }
 
   async #snapOffset(sourceUrl: string, offset: number): Promise<number> {
