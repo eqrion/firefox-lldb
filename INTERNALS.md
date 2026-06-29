@@ -263,9 +263,14 @@ RDP facts confirmed experimentally:
 
 - **Operand stack** (`qWasmStackValue` → empty) — SpiderMonkey does not expose
   the wasm value stack yet.
-- **Expression evaluation** (`expr` / `p`) is unavailable — it JIT-compiles for
-  the target, which wasm has no support for. Inspect variables via the SB value
-  API (`frame.FindVariable`, `GetChildMemberWithName`, `Dereference`) which reads
+- **Expression evaluation** (`expr` / `p`) works only for expressions LLDB's IR
+  interpreter can fold without running code in the target: arithmetic,
+  comparisons, casts, and temp vars over existing variables (`p n + 1`,
+  `expr (int)n + 1`, `expr int $x = n * n; $x`). Anything that requires calling a
+  function in the target (`expr foo(3)`) JIT-compiles, which wasm has no support
+  for, and fails with "Interpreter doesn't handle one of the expression's
+  opcodes". Variables can also be inspected via the SB value API
+  (`frame.FindVariable`, `GetChildMemberWithName`, `Dereference`), which reads
   DWARF + linear memory directly.
 - **Stepping across the JS/wasm boundary at step-in** — `thread step-in` from a
   JS frame at a wasm call site does cross the boundary and enter the wasm function.
