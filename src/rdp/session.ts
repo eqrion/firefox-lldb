@@ -487,8 +487,52 @@ export class RdpWasmSession extends EventEmitter {
     }
   }
 
+  /** Expose the wasm actor map so rdp-debuggee can fall back to it. */
+  wasmActorForUrl(url: string): string | undefined {
+    return this.#wasmActorByUrl.get(url);
+  }
+
+  /** Expose the wasm actor map so rdp-debuggee can fall back to it. */
+  wasmActorForUrl(url: string): string | undefined {
+    return this.#wasmActorByUrl.get(url);
+  }
+
   async fetchModuleBytes(url: string): Promise<Uint8Array> {
-    return new Uint8Array(await (await fetch(url)).arrayBuffer());
+    if (url.startsWith("http://") || url.startsWith("https://")) {
+      return new Uint8Array(await (await fetch(url)).arrayBuffer());
+    }
+    // Non-HTTP URL (e.g. "wasm:" for JSPI synthetic wrapper modules): try the
+    // RDP source actor. If that also fails, return a minimal valid wasm binary
+    // (magic + version only) so the gdbstub doesn't crash — it will find no
+    // DWARF and continue without debug info for this synthetic module.
+    const actor = this.#wasmActorByUrl.get(url);
+    if (actor) {
+      const bytes = await this.#fetchWasmBytesFromActor(actor);
+      if (bytes) return bytes;
+    }
+    return new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+  }
+
+  /** Try to fetch raw wasm bytes from a source actor via RDP. */
+  async #fetchWasmBytesFromActor(sourceActor: string): Promise<Uint8Array | null> {
+    try {
+      const resp = (await this.#client.request(sourceActor, { type: "source" })) as {
+        source?: unknown;
+      };
+      const src = resp.source;
+      if (src instanceof Uint8Array) return src;
+      if (ArrayBuffer.isView(src)) return new Uint8Array((src as ArrayBufferView).buffer);
+      if (src instanceof ArrayBuffer) return new Uint8Array(src);
+      if (typeof src === "string" && src.length > 4 && src.charCodeAt(0) === 0) {
+        // Binary string (latin-1 encoded wasm bytes starting with \0asm)
+        const out = new Uint8Array(src.length);
+        for (let i = 0; i < src.length; i++) out[i] = src.charCodeAt(i) & 0xff;
+        return out;
+      }
+    } catch {
+      // fall through
+    }
+    return null;
   }
 
   async fetchSourceText(sourceActor: string): Promise<string> {
