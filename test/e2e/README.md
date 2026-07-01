@@ -33,6 +33,10 @@ Requires Firefox installed in a standard location (see `findFirefoxBinary` in
 
 - `session_smoke.test.mjs` — platform connect, `version`, process state before attach.
 
+### Launch safety (Firefox binary must be present, but none is spawned)
+
+- `launch_port_conflict.test.mjs` — launch refuses when another process already holds the RDP port.
+
 ### Core (call stack, locals, control flow)
 
 - `attach.test.mjs` — attach, breakpoint, DWARF symbols, call stack with JS frames, locals (factorial).

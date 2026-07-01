@@ -28,6 +28,7 @@
 import { RdpClient } from "./client.js";
 import type { RdpPacket } from "./transport.js";
 import { EventEmitter } from "node:events";
+import { LAUNCH_TOKEN_PREF } from "./firefox.js";
 
 // Thread configuration applied before navigation. observeWasm/observeAsmJS so the
 // page's wasm compiles with debug support; pauseOnExceptions with
@@ -44,6 +45,52 @@ export interface TabInfo {
   actor: string;
   url: string;
   title: string;
+}
+
+/**
+ * Confirm the Firefox listening on port:host is the one that produced
+ * expectedToken (see LAUNCH_TOKEN_PREF in rdp/firefox.ts), not an unrelated
+ * instance (e.g. a stale leftover from a previous run) squatting on the same
+ * port. Retries the connection itself, but fails immediately on a token
+ * mismatch since retrying can't fix that.
+ */
+export async function verifyFirefoxLaunchToken(
+  port: number,
+  host: string,
+  expectedToken: string,
+  attempts = 80
+): Promise<void> {
+  let lastConnectErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    let client: RdpClient;
+    try {
+      client = await RdpClient.connect(port, host);
+    } catch (err) {
+      lastConnectErr = err;
+      await new Promise((r) => setTimeout(r, 250));
+      continue;
+    }
+    try {
+      const root = await client.request("root", { type: "getRoot" });
+      const actor = root.preferenceActor as string | undefined;
+      if (!actor) throw new Error("Firefox RDP root actor has no preferenceActor");
+      const { value } = await client.request(actor, {
+        type: "getCharPref",
+        value: LAUNCH_TOKEN_PREF,
+      });
+      if (value !== expectedToken) {
+        throw new Error(
+          `RDP port ${port} is answering, but not from the Firefox instance this process just ` +
+            `launched — a different (possibly stale) Firefox is listening there.`
+        );
+      }
+      return;
+    } finally {
+      client.close();
+    }
+  }
+  const msg = lastConnectErr instanceof Error ? lastConnectErr.message : String(lastConnectErr);
+  throw new Error(`could not connect to Firefox RDP on ${port}: ${msg}`);
 }
 
 /** One-shot: connect, list tabs, disconnect. */

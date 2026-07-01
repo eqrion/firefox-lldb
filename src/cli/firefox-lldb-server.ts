@@ -14,6 +14,7 @@ import {
   RdpWasmSession,
   listFirefoxTabs,
   watchAndPrimeFirefoxTabs,
+  verifyFirefoxLaunchToken,
   type TabInfo,
 } from "../rdp/session.js";
 import { setRdpTrace } from "../rdp/transport.js";
@@ -233,6 +234,18 @@ export async function startPlatformServer(
       // (see the launcher below). Launching Firefox directly at the page would
       // make that navigate a redundant reload of an already-loaded tab.
     });
+    try {
+      // The launch-time port check in launchFirefox is best-effort (a stale
+      // Firefox could grab the port between that check and this one binding
+      // it). Confirm the RDP port actually answers as the instance we just
+      // spawned before trusting anything it reports (issue: a leftover
+      // Firefox from a previous run can otherwise silently intercept the
+      // whole session).
+      await verifyFirefoxLaunchToken(args.rdpPort, "127.0.0.1", firefox.launchToken);
+    } catch (err) {
+      await firefox.close().catch(() => {});
+      throw err;
+    }
     logger.info("launched Firefox");
   }
 

@@ -9,8 +9,26 @@
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { accessSync } from "node:fs";
+import { connect as netConnect } from "node:net";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+
+/** True if something is already accepting connections on host:port. */
+function isPortOpen(port: number, host = "127.0.0.1", timeoutMs = 200): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = netConnect({ port, host, timeout: timeoutMs });
+    socket.once("connect", () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.once("timeout", () => {
+      socket.destroy();
+      resolve(false);
+    });
+    socket.once("error", () => resolve(false));
+  });
+}
 
 function bringToForeground(pid: number): void {
   switch (process.platform) {
@@ -95,10 +113,17 @@ const PROFILE_PREFS = [
   ["javascript.options.wasm_js_promise_integration", true],
 ] as const;
 
+/** Pref used to confirm an RDP connection actually reached the Firefox this
+ * process launched, rather than an unrelated (e.g. stale leftover) instance
+ * that happens to be listening on the same port. See verifyFirefoxLaunchToken. */
+export const LAUNCH_TOKEN_PREF = "firefoxLldb.launchToken";
+
 export interface FirefoxHandle {
   profileDir: string;
   exited: Promise<void>;
   close: () => Promise<void>;
+  /** Random value written to LAUNCH_TOKEN_PREF in this launch's profile. */
+  launchToken: string;
 }
 
 export async function launchFirefox(opts: {
@@ -116,12 +141,21 @@ export async function launchFirefox(opts: {
       "Firefox not found. Install Firefox in a standard location or pass --firefox <path>."
     );
   }
+  if (await isPortOpen(opts.rdpPort)) {
+    throw new Error(
+      `something is already listening on 127.0.0.1:${opts.rdpPort} (the RDP port). ` +
+        `This is likely a leftover Firefox from a previous run — kill it or pass a different --rdp-port.`
+    );
+  }
   const profileDir = await mkdtemp(join(tmpdir(), "ff-rdp-"));
+  const launchToken = randomUUID();
 
   let prefs =
     PROFILE_PREFS.map(([k, v]) => `user_pref(${JSON.stringify(k)}, ${JSON.stringify(v)});`).join(
       "\n"
-    ) + `\nuser_pref("devtools.debugger.remote-port", ${opts.rdpPort});\n`;
+    ) +
+    `\nuser_pref("devtools.debugger.remote-port", ${opts.rdpPort});\n` +
+    `user_pref(${JSON.stringify(LAUNCH_TOKEN_PREF)}, ${JSON.stringify(launchToken)});\n`;
   if (opts.marionettePort !== undefined) {
     prefs += `user_pref("marionette.port", ${opts.marionettePort});\n`;
   }
@@ -154,6 +188,7 @@ export async function launchFirefox(opts: {
   return {
     profileDir,
     exited,
+    launchToken,
     close: async () => {
       if (child.pid !== undefined) {
         try {
