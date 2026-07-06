@@ -37,7 +37,7 @@ fi
 
 echo "Compiling large fixture..."
 "$EMCC" large.cpp sqlite3.c -o large.js \
-  -g -O1 \
+  -gdwarf-5 -gembed-source -O1 \
   -DSQLITE_OMIT_LOAD_EXTENSION \
   -DSQLITE_DEFAULT_MEMSTATUS=0 \
   -DSQLITE_OMIT_DEPRECATED \
