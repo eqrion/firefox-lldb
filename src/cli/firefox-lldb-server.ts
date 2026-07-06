@@ -20,7 +20,7 @@ import {
 } from "../rdp/session.js";
 import { setRdpTrace } from "../rdp/transport.js";
 import { RdpDebuggee } from "../gdb/rdp-debuggee.js";
-import { launchFirefox, type FirefoxHandle } from "../rdp/firefox.js";
+import { launchFirefox, type FirefoxChannel, type FirefoxHandle } from "../rdp/firefox.js";
 // @ts-expect-error - .mjs host has no type declarations
 import { startGdbServer } from "../gdb/worker/host.mjs";
 import { consoleLogger } from "./logger.js";
@@ -40,6 +40,8 @@ Options:
   --url <U>           URL navigated to when LLDB spawns a process (connect or
                       attach). Firefox itself starts on about:blank.
   --firefox <path>    Firefox binary (default: auto-detected from standard locations).
+  --beta              Auto-detect and launch the Beta channel instead of stable.
+  --nightly           Auto-detect and launch the Nightly channel instead of stable.
   --headless          Run Firefox headlessly.
   --fire <js>         Evaluate JS after the first breakpoint arms (test use).
   -v, --verbose       Log debug output.
@@ -60,6 +62,7 @@ export interface Args {
   marionettePort?: number;
   url?: string;
   firefox?: string;
+  channel: FirefoxChannel;
   fire?: string;
   verbose: boolean;
 }
@@ -79,6 +82,8 @@ export function parseCliArgs(argv: string[]): Args {
         "marionette-port": { type: "string" },
         url: { type: "string" },
         firefox: { type: "string" },
+        beta: { type: "boolean" },
+        nightly: { type: "boolean" },
         fire: { type: "string" },
         verbose: { type: "boolean", short: "v" },
         help: { type: "boolean", short: "h" },
@@ -114,6 +119,15 @@ export function parseCliArgs(argv: string[]): Args {
       process.exit(1);
     }
   }
+  if (values.beta && values.nightly) {
+    process.stderr.write("error: --beta and --nightly are mutually exclusive\n");
+    process.exit(1);
+  }
+  if (values.firefox && (values.beta || values.nightly)) {
+    process.stderr.write("error: --firefox already specifies a binary; drop --beta/--nightly\n");
+    process.exit(1);
+  }
+  const channel: FirefoxChannel = values.beta ? "beta" : values.nightly ? "nightly" : "release";
 
   return {
     connect: values.launch ? false : !!values.connect,
@@ -123,6 +137,7 @@ export function parseCliArgs(argv: string[]): Args {
     marionettePort,
     url: values.url,
     firefox: values.firefox,
+    channel,
     fire: values.fire,
     verbose: !!values.verbose,
   };
@@ -228,6 +243,7 @@ export async function startPlatformServer(
     firefox = await launchFirefox({
       rdpPort: args.rdpPort,
       binary: args.firefox,
+      channel: args.channel,
       headless: args.headless,
       marionettePort: args.marionettePort,
       // NOTE: deliberately not passing url here. Firefox starts on about:blank;

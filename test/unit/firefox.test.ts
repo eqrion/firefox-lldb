@@ -24,3 +24,16 @@ test("findFirefoxBinary result, when present, is a non-empty path string", () =>
     assert.match(result, /firefox/i, "path should contain 'firefox'");
   }
 });
+
+for (const channel of ["beta", "nightly"] as const) {
+  test(`findFirefoxBinary(${channel}) returns a string or undefined (never throws)`, () => {
+    let result: string | undefined;
+    assert.doesNotThrow(() => {
+      result = findFirefoxBinary(channel);
+    });
+    assert.ok(
+      result === undefined || typeof result === "string",
+      `expected string or undefined, got ${typeof result}`
+    );
+  });
+}

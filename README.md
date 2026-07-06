@@ -154,6 +154,8 @@ terminal as they happen, so you can correlate them with where you've stopped.
 | `--connect` | — | Attach to an already-running Firefox instead of launching one. |
 | `--headless` | off | Run Firefox without a visible window. |
 | `--firefox <path>` | auto-detected | Path to the Firefox binary. |
+| `--beta` | off | Launch the Beta channel instead of stable. |
+| `--nightly` | off | Launch the Nightly channel instead of stable. |
 | `--port <N>` | `1234` | Internal debug server port. |
 | `--rdp-port <N>` | `6080` | Firefox remote-debugging port. |
 | `-v`, `--verbose` | off | Log protocol/debug output. |

@@ -58,26 +58,48 @@ function isExecutable(p: string): boolean {
   }
 }
 
-/** Find a Firefox binary to launch, preferring stable over Nightly. */
-export function findFirefoxBinary(): string | undefined {
+export type FirefoxChannel = "release" | "beta" | "nightly";
+
+/** Find a Firefox binary to launch for the given release channel.
+ *
+ * Release and Beta share the same branding (app name / install directory) on
+ * both macOS and Windows, so there's no separate on-disk location to look for
+ * Beta specifically there; only Nightly gets a distinct install location on
+ * those platforms. Linux is the exception: Mozilla's official APT repo ships
+ * "beta" and "nightly" as separate binaries, so those get dedicated paths. */
+export function findFirefoxBinary(channel: FirefoxChannel = "release"): string | undefined {
   const candidates: string[] = [];
   switch (process.platform) {
     case "darwin":
-      candidates.push(
-        "/Applications/Firefox.app/Contents/MacOS/firefox",
-        join(homedir(), "Applications/Firefox.app/Contents/MacOS/firefox"),
-        "/Applications/Firefox Developer Edition.app/Contents/MacOS/firefox"
-      );
+      if (channel === "nightly") {
+        candidates.push(
+          "/Applications/Firefox Nightly.app/Contents/MacOS/firefox",
+          join(homedir(), "Applications/Firefox Nightly.app/Contents/MacOS/firefox")
+        );
+      } else {
+        candidates.push(
+          "/Applications/Firefox.app/Contents/MacOS/firefox",
+          join(homedir(), "Applications/Firefox.app/Contents/MacOS/firefox"),
+          "/Applications/Firefox Developer Edition.app/Contents/MacOS/firefox"
+        );
+      }
       break;
     case "win32": {
       const pf = [process.env["ProgramFiles"], process.env["ProgramFiles(x86)"]];
+      const dir = channel === "nightly" ? "Firefox Nightly" : "Mozilla Firefox";
       for (const base of pf) {
-        if (base) candidates.push(join(base, "Mozilla Firefox", "firefox.exe"));
+        if (base) candidates.push(join(base, dir, "firefox.exe"));
       }
       break;
     }
     default: // Linux and other Unix
-      candidates.push("/usr/bin/firefox", "/usr/local/bin/firefox", "/snap/bin/firefox");
+      if (channel === "nightly") {
+        candidates.push("/usr/bin/firefox-nightly", "/usr/local/bin/firefox-nightly");
+      } else if (channel === "beta") {
+        candidates.push("/usr/bin/firefox-beta", "/usr/local/bin/firefox-beta");
+      } else {
+        candidates.push("/usr/bin/firefox", "/usr/local/bin/firefox", "/snap/bin/firefox");
+      }
       break;
   }
   for (const c of candidates) {
@@ -86,7 +108,8 @@ export function findFirefoxBinary(): string | undefined {
   // Fall back to PATH lookup.
   try {
     const cmd = process.platform === "win32" ? "where" : "which";
-    const result = execFileSync(cmd, ["firefox"], {
+    const bin = channel === "release" ? "firefox" : `firefox-${channel}`;
+    const result = execFileSync(cmd, [bin], {
       encoding: "utf8",
       stdio: ["pipe", "pipe", "ignore"],
     });
@@ -129,16 +152,19 @@ export interface FirefoxHandle {
 export async function launchFirefox(opts: {
   rdpPort: number;
   binary?: string;
+  /** Release channel to auto-detect a binary for when `binary` isn't given. */
+  channel?: FirefoxChannel;
   headless?: boolean;
   url?: string;
   /** When set, also start Marionette on this port so a WebDriver-BiDi client
    * (e.g. firefox-devtools-mcp --connect-existing) can drive the same Firefox. */
   marionettePort?: number;
 }): Promise<FirefoxHandle> {
-  const binary = opts.binary ?? findFirefoxBinary();
+  const binary = opts.binary ?? findFirefoxBinary(opts.channel);
   if (!binary) {
     throw new Error(
-      "Firefox not found. Install Firefox in a standard location or pass --firefox <path>."
+      `Firefox${opts.channel && opts.channel !== "release" ? ` (${opts.channel})` : ""} not found. ` +
+        "Install it in a standard location or pass --firefox <path>."
     );
   }
   if (await isPortOpen(opts.rdpPort)) {
