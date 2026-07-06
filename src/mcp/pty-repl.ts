@@ -17,7 +17,7 @@ const promptCount = (s: string): number => (stripAnsi(s).match(/\(lldb\)/g) ?? [
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // In dev we run the .ts CLI through tsx; a built dist runs the .js directly.
-const IS_TS = __dirname.endsWith("src/mcp") || __filename.endsWith(".ts");
+const IS_TS = __dirname.endsWith("src/mcp");
 const CLI = join(__dirname, "..", "cli", IS_TS ? "firefox-lldb.ts" : "firefox-lldb.js");
 
 export interface LaunchOptions {
