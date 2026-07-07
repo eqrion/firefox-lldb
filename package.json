@@ -1,6 +1,6 @@
 {
   "name": "firefox-lldb",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "LLDB platform server and GDB remote stub for debugging WebAssembly running inside Firefox",
   "keywords": [
     "lldb",
