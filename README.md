@@ -1,12 +1,11 @@
 # firefox-lldb
 
+*Experimental prototype: not an official product, nor fully working yet!*
+
 Source-level debugging for WebAssembly running in your browser.
 
 `firefox-lldb` gives you a real LLDB prompt attached to a WebAssembly module
-executing inside a live Firefox tab. Set breakpoints by function name or
-`file:line`, step through your original C/C++/Rust source, inspect locals,
-structs, and globals, and read linear memory, all against the code as it
-actually runs in the page.
+executing inside a live Firefox tab.
 
 ```
 (lldb) breakpoint set -n compute_factorial
@@ -35,9 +34,6 @@ WebAssembly and runs it in-process. You just need Node and Firefox.
 npm install -g firefox-lldb
 ```
 
-This puts the `firefox-lldb` command on your `PATH`. (You can also run it
-without installing via `npx firefox-lldb`.)
-
 ## Getting started
 
 Say your app is served at `http://localhost:8080/index.html` and loads a wasm
@@ -51,30 +47,25 @@ This launches a fresh Firefox, opens the page, attaches to its wasm module, and
 drops you at an `(lldb)` prompt. From there:
 
 ```
-(lldb) breakpoint set -n compute_factorial   # break on a function
-(lldb) continue                              # run until it's hit
-(lldb) bt                                     # see the call stack
-(lldb) p n                                    # inspect a local
-(lldb) step                                   # step to the next source line
-(lldb) frame variable                         # list all locals + args
+(lldb) b compute_factorial   # break on a function
+(lldb) continue              # run until it's hit
+(lldb) bt                    # see the call stack
+(lldb) p n                   # inspect a local
+(lldb) step                  # step to the next source line
+(lldb) frame variable        # list all locals + args
 ```
-
-That's the whole loop: break, run, inspect, step.
 
 ### Attaching by hand
 
-If you don't pass `--url`, Firefox starts on a blank page and the prompt lists
-the open tabs instead. Navigate to your page (in the Firefox window that
-opened), then attach:
+If you don't pass `--url`, Firefox starts on a blank page. Navigate to your page,
+then attach:
 
 ```
 (lldb) platform process list   # list open tabs and their PIDs
 (lldb) attach --pid 1          # attach to the wasm tab
 ```
 
-`attach` is a shortcut for `process attach --plugin wasm`; the `--plugin wasm`
-part is what makes LLDB understand the wasm address space, and it's filled in
-for you.
+(`attach` is a shortcut for `process attach --plugin wasm`)
 
 ### Preparing your wasm
 
@@ -84,11 +75,12 @@ Your module needs debug info for source-level debugging to work:
 - **Rust / wasm-pack:** debug builds embed DWARF by default.
 - **Source maps only:** if your toolchain emits a source map (a
   `sourceMappingURL`) but no embedded DWARF, `firefox-lldb` synthesizes the
-  debug info from the source map automatically at attach time. Nothing extra to
-  do; just make sure the `.map` and original sources are reachable.
+  debug info from the source map automatically at attach time. Breakpoints and
+  source listing should work, but you won't get variable printing or
+  evaluation.
 
 Unoptimized builds (`-O0`) give the most faithful stepping and variable
-inspection; optimized builds may inline or drop locals.
+inspection. Optimized builds may inline or drop variables.
 
 ## Working at the prompt
 
@@ -96,20 +88,12 @@ This is a real LLDB prompt, so standard LLDB commands work: `breakpoint`,
 `continue`/`c`, `step`/`s`, `next`/`n`, `finish`, `bt`, `frame`,
 `frame variable`, `p <var>`, `memory read`/`x`, `thread list`, and so on.
 
-A few conveniences on top of plain LLDB:
-
-- **Command history:** up/down arrows recall previous commands.
-- **Repeat:** pressing Enter on an empty line repeats the last command (handy
-  for stepping).
-- **Interrupt a running target:** press **Ctrl-C** while the program is running
-  to stop it where it is. At an empty prompt, press Ctrl-C twice to quit.
-- **Quit:** `quit`, `q`, `exit`, or Ctrl-D.
-
 ### Inspecting JavaScript (`js`)
 
-The wasm debugger can't see into the surrounding JavaScript, so `firefox-lldb`
-adds `js` subcommands that query the live page directly. They run against the
-attached tab (and against the stopped frame, when the program is paused):
+`lldb` is able to list JS sources in backtraces, but has no support for
+printing or evaluating JS expressions. A `js` subcommand is added that
+queries the live page directly. The command runs against the attached
+tab:
 
 | Command | What it does |
 | --- | --- |
@@ -145,21 +129,6 @@ terminal as they happen, so you can correlate them with where you've stopped.
 | Watch live console output | ✅ | |
 | Evaluate expressions over variables (`p n + 1`, `expr a > b`) | ✅ | Arithmetic, comparisons, casts, temp vars |
 | Call functions from an expression (`expr foo(3)`) | ❌ | Needs a JIT, which wasm targets don't have |
-
-## Options
-
-| Flag | Default | Description |
-| --- | --- | --- |
-| `--url <U>` | — | Page to open and attach to. Omit to start blank and attach by hand. |
-| `--connect` | — | Attach to an already-running Firefox instead of launching one. |
-| `--headless` | off | Run Firefox without a visible window. |
-| `--firefox <path>` | auto-detected | Path to the Firefox binary. |
-| `--beta` | off | Launch the Beta channel instead of stable. |
-| `--nightly` | off | Launch the Nightly channel instead of stable. |
-| `--port <N>` | `1234` | Internal debug server port. |
-| `--rdp-port <N>` | `6080` | Firefox remote-debugging port. |
-| `-v`, `--verbose` | off | Log protocol/debug output. |
-| `-h`, `--help` | — | Show usage. |
 
 ## License
 
