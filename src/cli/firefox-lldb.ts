@@ -57,15 +57,19 @@ async function bridgeTcp(client: LLDBClient, port: number): Promise<number> {
   bridgeSockets.add(socket);
   socket.on("close", () => bridgeSockets.delete(socket));
   socket.setNoDelay(true);
+  // Capture the connect result now: the loopback connect can complete during the
+  // bridgeChannel await below, and a listener attached after that would miss the
+  // one-shot "connect" event and hang forever.
+  const connected = new Promise<void>((resolve, reject) => {
+    socket.once("connect", resolve);
+    socket.once("error", reject);
+  });
   // server -> LLDB
   socket.on("data", (d) => void client.channelServerWrite(channelId, new Uint8Array(d)));
   socket.on("error", () => {});
   // LLDB -> server
   await client.bridgeChannel(channelId, (data) => void socket.write(Buffer.from(data)));
-  await new Promise<void>((resolve, reject) => {
-    socket.once("connect", resolve);
-    socket.once("error", reject);
-  });
+  await connected;
   return channelId;
 }
 
