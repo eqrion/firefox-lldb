@@ -32,7 +32,6 @@ export function startGdbServer({ dispatch, port, onInfo, verbose }) {
 
   const worker = new Worker(new URL("./component-worker.mjs", import.meta.url), {
     workerData: { sab, port, verbose: !!verbose },
-    execArgv: ["--import", "tsx"],
   });
 
   let resolveReady;
