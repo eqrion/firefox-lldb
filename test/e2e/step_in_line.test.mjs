@@ -46,5 +46,9 @@ test("step-in advances exactly one source line at a time through factorial's mul
   await s.stepIn();
   const line6 = await s.topFrame();
   assert.equal(line6.function, "factorial(int)");
-  assert.equal(line6.line, 6, "the next step-in crosses the whole if-line in one step, landing on line 6");
+  assert.equal(
+    line6.line,
+    6,
+    "the next step-in crosses the whole if-line in one step, landing on line 6"
+  );
 });

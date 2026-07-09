@@ -50,7 +50,7 @@ test(
   "image lookup resolves sqlite3VdbeExec with source line",
   { skip: !BUILT ? "large fixture not built" : false },
   async () => {
-    const r = await s.command('image lookup -n sqlite3VdbeExec');
+    const r = await s.command("image lookup -n sqlite3VdbeExec");
     assert.match(r.output + r.error, /sqlite3VdbeExec/, `image lookup: ${r.output}`);
   }
 );
@@ -59,7 +59,7 @@ test(
   "image lookup resolves run_query to large.cpp",
   { skip: !BUILT ? "large fixture not built" : false },
   async () => {
-    const r = await s.command('image lookup -n run_query');
+    const r = await s.command("image lookup -n run_query");
     assert.match(r.output + r.error, /large\.cpp/, `image lookup: ${r.output}`);
   }
 );

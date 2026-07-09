@@ -178,14 +178,17 @@ export function runRepl(deps: ReplDeps): Repl {
     //   - `memory read -c N` / `x/N` with N > 8192
     //   - `image lookup -r` (regex lookup returns thousands of results for large modules)
     const memReadCount =
-      cmd.match(/^\s*(?:memory\s+read)\b.*?-c\s+(\d+)/i)?.[1] ??
-      cmd.match(/^\s*x\/(\d+)/i)?.[1];
+      cmd.match(/^\s*(?:memory\s+read)\b.*?-c\s+(\d+)/i)?.[1] ?? cmd.match(/^\s*x\/(\d+)/i)?.[1];
     if (memReadCount !== undefined && Number(memReadCount) > 8192) {
-      write(`error: read count ${memReadCount} exceeds the 8192-byte limit (lldb-wasm JSON IPC constraint)`);
+      write(
+        `error: read count ${memReadCount} exceeds the 8192-byte limit (lldb-wasm JSON IPC constraint)`
+      );
       return;
     }
     if (/^\s*image\s+lookup\s+.*-r\b/i.test(cmd)) {
-      write("error: regex image lookup (-r) can produce thousands of results and overflow the lldb-wasm IPC; use a specific name with -n instead");
+      write(
+        "error: regex image lookup (-r) can produce thousands of results and overflow the lldb-wasm IPC; use a specific name with -n instead"
+      );
       return;
     }
 
