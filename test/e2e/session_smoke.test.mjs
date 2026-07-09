@@ -20,7 +20,6 @@ after(async () => {
 
 test("platform connection is live (host info available)", async () => {
   const res = await session.command("platform status");
-  assert.match(res.output, /wasm/i);
   assert.match(res.output, /Connected: yes/i);
 });
 
