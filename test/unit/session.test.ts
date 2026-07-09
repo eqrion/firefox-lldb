@@ -902,6 +902,35 @@ test("navigate() rejects when the session closes before the new target arrives",
   session.close();
 });
 
+test("navigate() resolves when the resulting page URL differs from the requested one (redirect)", async () => {
+  const srv = new FakeRdpServer();
+  await srv.listen();
+  const session = await srv.acceptSession();
+
+  // Real servers commonly redirect (bare domain -> www, http -> https,
+  // trailing slash, etc.), so the top-level target that actually arrives can
+  // have a different URL than the one requested. navigate() must still
+  // resolve instead of waiting forever for an exact URL match.
+  srv.onNext(
+    (r) => r.type === "navigateTo",
+    () => {
+      srv.targetAvailable("threadRedirected", {
+        isTopLevel: true,
+        url: "https://www.example.com/",
+      });
+      return { from: "tab1" };
+    }
+  );
+
+  await session.navigate("https://example.com/");
+
+  assert.equal(session.listTids().length, 1);
+  assert.equal(session.topLevelUrl(), "https://www.example.com/");
+
+  session.close();
+  srv.close();
+});
+
 test("navigate() same-URL reload does not emit 'detached' for the old target", async () => {
   const srv = new FakeRdpServer();
   await srv.listen();

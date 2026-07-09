@@ -480,8 +480,14 @@ export class RdpWasmSession extends EventEmitter {
         this.off("close", onClose);
       };
       cleanupRef.fn = cleanup;
+      // Any top-level target arriving after the targets above were cleared is
+      // the result of this navigation — do not require its URL to match the
+      // requested one: a server-side redirect (bare domain -> www, http ->
+      // https, trailing slash, etc.) means the resulting page's URL often
+      // differs from what was requested, and requiring an exact match here
+      // means navigate() never resolves.
       const onTarget = (t: ThreadInfo) => {
-        if (t.isTopLevel && t.url === url) {
+        if (t.isTopLevel) {
           cleanup();
           resolve();
         }
