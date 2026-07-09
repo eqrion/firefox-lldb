@@ -13,10 +13,10 @@
 // we pump bytes between channel <id> and a localhost socket.
 
 import net from "node:net";
-import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { LLDBClient } from "lldb-wasm";
 import { parseCliArgs, startPlatformServer } from "./firefox-lldb-server.js";
+import { focusFirefoxWindow } from "../rdp/firefox.js";
 import { quietLogger } from "./logger.js";
 import { runRepl } from "./repl.js";
 import type { RdpWasmSession } from "../rdp/session.js";
@@ -24,30 +24,6 @@ import type { RdpWasmSession } from "../rdp/session.js";
 // Open bridge sockets, tracked so we can tear them down on exit (otherwise
 // net.Server.close() blocks on the live connections).
 const bridgeSockets = new Set<net.Socket>();
-
-function focusFirefox(): void {
-  switch (process.platform) {
-    case "darwin":
-      execFile("osascript", ["-e", 'tell application "Firefox" to activate'], () => {});
-      break;
-    case "linux":
-      execFile("wmctrl", ["-a", "Firefox"], () => {});
-      break;
-    case "win32":
-      execFile(
-        "powershell",
-        [
-          "-Command",
-          "$p=Get-Process firefox -EA SilentlyContinue|Select-Object -First 1;" +
-            "if($p){Add-Type -Name W -Namespace WU -MemberDefinition" +
-            " '[DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr h);';" +
-            "[WU.W]::SetForegroundWindow($p.MainWindowHandle)}",
-        ],
-        () => {}
-      );
-      break;
-  }
-}
 
 // Bridge a localhost TCP RSP server to an in-process channel the wasm LLDB
 // connects to via "inprocess://<id>". Returns the channel ID.
@@ -100,7 +76,9 @@ async function main(): Promise<void> {
     client,
     getSession: () => session,
     onExit: () => void cleanup(0),
-    onTargetResume: focusFirefox,
+    onTargetResume: () => {
+      if (handle?.firefoxPid !== undefined) focusFirefoxWindow(handle.firefoxPid);
+    },
     onTargetInterrupt: () => triggerInterrupt?.(),
   });
 

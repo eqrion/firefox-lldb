@@ -198,6 +198,8 @@ export interface PlatformServerHandle {
   shutdown: () => Promise<void>;
   /** Resolves when a launched Firefox exits (undefined in --connect mode). */
   firefoxExited?: Promise<void>;
+  /** PID of the launched Firefox (undefined in --connect mode). */
+  firefoxPid?: number;
 }
 
 // Bring up Firefox (if launching), the per-tab GDB server launcher, and the
@@ -399,7 +401,14 @@ export async function startPlatformServer(
     await firefox?.close();
   };
 
-  return { port: bound, platformServer, spawner, shutdown, firefoxExited: firefox?.exited };
+  return {
+    port: bound,
+    platformServer,
+    spawner,
+    shutdown,
+    firefoxExited: firefox?.exited,
+    firefoxPid: firefox?.pid,
+  };
 }
 
 async function main(): Promise<void> {

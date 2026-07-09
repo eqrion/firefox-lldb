@@ -30,23 +30,26 @@ function isPortOpen(port: number, host = "127.0.0.1", timeoutMs = 200): Promise<
   });
 }
 
-function bringToForeground(pid: number): void {
+/** Bring the Firefox window owned by `pid` to the front. PID-targeted (rather
+ * than by app name) so it works regardless of release channel, and can never
+ * end up launching/activating an unrelated installed Firefox. */
+export function focusFirefoxWindow(pid: number): void {
   switch (process.platform) {
     case "darwin":
-      setTimeout(
-        () =>
-          spawn(
-            "osascript",
-            [
-              "-e",
-              `tell application "System Events" to set frontmost of (first process whose unix id is ${pid}) to true`,
-            ],
-            { stdio: "ignore" }
-          ),
-        1500
+      spawn(
+        "osascript",
+        [
+          "-e",
+          `tell application "System Events" to set frontmost of (first process whose unix id is ${pid}) to true`,
+        ],
+        { stdio: "ignore" }
       );
       break;
   }
+}
+
+function bringToForeground(pid: number): void {
+  setTimeout(() => focusFirefoxWindow(pid), 1500);
 }
 
 function isExecutable(p: string): boolean {
@@ -147,6 +150,8 @@ export interface FirefoxHandle {
   close: () => Promise<void>;
   /** Random value written to LAUNCH_TOKEN_PREF in this launch's profile. */
   launchToken: string;
+  /** PID of the launched Firefox process, for PID-targeted window focus. */
+  pid: number | undefined;
 }
 
 export async function launchFirefox(opts: {
@@ -215,6 +220,7 @@ export async function launchFirefox(opts: {
     profileDir,
     exited,
     launchToken,
+    pid: child.pid,
     close: async () => {
       if (child.pid !== undefined) {
         try {
