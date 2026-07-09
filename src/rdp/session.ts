@@ -41,6 +41,14 @@ const THREAD_CONFIG = {
   ignoreCaughtExceptions: true,
 };
 
+// Fission can destroy-and-recreate the top-level target as an internal process
+// swap (e.g. the process reassignment that often follows the very first
+// cross-origin navigation from about:blank) with no signal distinguishing it
+// from a real tab close, and the replacement's target-available-form can
+// arrive after the destroy. Wait this long for a replacement before treating
+// a top-level target-destroyed-form as a genuine close.
+const DETACH_GRACE_MS = 250;
+
 export interface TabInfo {
   actor: string;
   url: string;
@@ -288,6 +296,9 @@ export class RdpWasmSession extends EventEmitter {
   #breakpointPositionCache = new Map<string, Promise<number[]>>(); // actor -> positions
   #jsActorByUrl = new Map<string, string>(); // url -> JS source actor (any thread)
 
+  // Pending "is this top-level destroy a real close?" checks (see DETACH_GRACE_MS).
+  #pendingDetachChecks = new Set<ReturnType<typeof setTimeout>>();
+
   private constructor(client: RdpClient) {
     super();
     this.#client = client;
@@ -422,8 +433,17 @@ export class RdpWasmSession extends EventEmitter {
           this.#pausedTids.delete(tid);
           this.#interruptedTids.delete(tid);
           // The page's tab was closed or navigated away; let consumers react
-          // (e.g. firefox-lldb detaches the lldb process).
-          if (info.isTopLevel) this.emit("detached", info);
+          // (e.g. firefox-lldb detaches the lldb process). Give a Fission
+          // process-swap replacement (see DETACH_GRACE_MS) a chance to arrive
+          // first, so a swap isn't mistaken for a real close.
+          if (info.isTopLevel) {
+            const timer = setTimeout(() => {
+              this.#pendingDetachChecks.delete(timer);
+              const hasTopLevel = [...this.#threads.values()].some((t) => t.isTopLevel);
+              if (!hasTopLevel) this.emit("detached", info);
+            }, DETACH_GRACE_MS);
+            this.#pendingDetachChecks.add(timer);
+          }
         }
         break;
       }
@@ -1063,6 +1083,8 @@ export class RdpWasmSession extends EventEmitter {
   }
 
   close(): void {
+    for (const timer of this.#pendingDetachChecks) clearTimeout(timer);
+    this.#pendingDetachChecks.clear();
     this.#client.close();
   }
 }

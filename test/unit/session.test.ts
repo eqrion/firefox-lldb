@@ -850,11 +850,41 @@ test("target-destroyed-form for top-level target emits 'detached'", async () => 
   assert.equal(detachCount, 0, "worker destruction should not emit detached");
   assert.equal(session.listTids().length, 1, "worker removed from list");
 
-  // Destroying the top-level target (page closed) SHOULD emit "detached".
+  // Destroying the top-level target (page closed) SHOULD emit "detached",
+  // after the grace period for a possible process-swap replacement elapses.
   srv.targetDestroyed("mainThread");
-  await sleep(200);
+  await sleep(400);
   assert.equal(detachCount, 1, "page close should emit detached exactly once");
   assert.equal(session.listTids().length, 0, "main thread removed from list");
+
+  session.close();
+  srv.close();
+});
+
+test("target-destroyed-form followed by a replacement top-level target does not emit 'detached'", async () => {
+  // Fission can destroy-and-recreate the top-level target as an internal
+  // process swap (e.g. the process reassignment that often follows the very
+  // first cross-origin navigation from about:blank), with the replacement's
+  // target-available-form arriving shortly after the destroy rather than
+  // before it. This must not be mistaken for the tab closing.
+  const srv = new FakeRdpServer();
+  await srv.listen();
+  const session = await srv.acceptSession();
+
+  srv.targetAvailable("mainThread", { isTopLevel: true, url: "http://example.com/" });
+  await sleep(200);
+
+  let detachCount = 0;
+  session.on("detached", () => detachCount++);
+
+  srv.targetDestroyed("mainThread");
+  await sleep(50);
+  srv.targetAvailable("mainThreadSwapped", { isTopLevel: true, url: "http://example.com/" });
+  await sleep(400);
+
+  assert.equal(detachCount, 0, "process-swap replacement must NOT emit detached");
+  assert.equal(session.listTids().length, 1, "swapped-in target present after swap");
+  assert.equal(session.topLevelUrl(), "http://example.com/");
 
   session.close();
   srv.close();
