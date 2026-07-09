@@ -31,4 +31,4 @@ jobs:
           sudo apt-get install -y firefox
 
       - name: Run Node e2e tests
-        run: npm run test:e2e-node
+        run: npm run test:e2e
