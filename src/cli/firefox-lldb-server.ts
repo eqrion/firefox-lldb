@@ -176,32 +176,6 @@ async function watchTabs(
   }
 }
 
-async function waitForWasm(session: RdpWasmSession, onWaiting?: () => void): Promise<void> {
-  // Abort early if the session closes so we don't poll for 30 s on a dead
-  // connection (wasmSources() catches errors and returns [], but sleep(100)
-  // still runs each iteration without this guard).
-  let sessionClosed = false;
-  const onClose = () => {
-    sessionClosed = true;
-  };
-  session.on("close", onClose);
-  try {
-    let wasm = (await session.wasmSources())[0];
-    let notified = false;
-    for (let i = 0; i < 300 && !wasm && !sessionClosed; i++) {
-      if (!notified && i === 20) {
-        notified = true;
-        onWaiting?.();
-      }
-      await sleep(100);
-      wasm = (await session.wasmSources())[0];
-    }
-    if (!wasm) throw new Error(sessionClosed ? "session closed" : "no wasm source appeared");
-  } finally {
-    session.off("close", onClose);
-  }
-}
-
 export interface StartOptions {
   /** Bridge the per-tab GDB server port (see PlatformServerDeps.wrapConnectPort). */
   wrapConnectPort?: (port: number) => Promise<number>;
@@ -287,8 +261,8 @@ export async function startPlatformServer(
       : await RdpWasmSession.start(args.rdpPort, "127.0.0.1", resolvedActor);
 
     // Close the session on any failure past this point; otherwise a launch that
-    // throws (e.g. waitForWasm times out) leaks the RDP watcher connection, and
-    // a retried qLaunchGDBServer accumulates dead sessions against Firefox.
+    // throws leaks the RDP watcher connection, and a retried qLaunchGDBServer
+    // accumulates dead sessions against Firefox.
     try {
       // Navigate to the target page when needed. The watcher connection runs
       // watchAndPrimeFirefoxTabs which sets observeWasm:true on the tab before
@@ -312,7 +286,12 @@ export async function startPlatformServer(
       if (navTo) {
         await session.navigate(navTo);
         logger.debug(`[rdp] navigated to ${navTo}`);
-        await waitForWasm(session, () => logger.info("waiting for wasm sources to appear..."));
+        // Attach as soon as the page has loaded — do not wait for wasm to
+        // compile. Some pages load wasm lazily or never; waiting here adds
+        // latency to every attach and can push a content-heavy page past
+        // LLDB's own attach timeout. #allModules() re-queries wasmSources()
+        // on every stop, so a module that compiles after attach is picked
+        // up automatically once the target stops again.
       } else if (!session.hasThreads()) {
         await sleep(500);
       }

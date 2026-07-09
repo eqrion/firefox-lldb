@@ -140,7 +140,7 @@ async function main(): Promise<void> {
 
   let intro = "firefox-lldb — `attach --pid N` to attach, `js p <expr>` to evaluate JS.";
   if (args.url) {
-    repl.print(intro + "\nattaching (waiting for wasm to load)...");
+    repl.print(intro + "\nattaching...");
     const res = await client.sessionCommand("process attach --plugin wasm --pid 1");
     intro = (res.output + res.error).trimEnd();
   } else {
