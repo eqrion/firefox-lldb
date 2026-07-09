@@ -42,6 +42,9 @@ Options:
   --firefox <path>    Firefox binary (default: auto-detected from standard locations).
   --beta              Auto-detect and launch the Beta channel instead of stable.
   --nightly           Auto-detect and launch the Nightly channel instead of stable.
+  --default-profile   Reuse the channel's real default profile (history, logins,
+                      extensions) instead of a throwaway one. Fails if that
+                      profile is already running elsewhere.
   --headless          Run Firefox headlessly.
   --fire <js>         Evaluate JS after the first breakpoint arms (test use).
   -v, --verbose       Log debug output.
@@ -63,6 +66,7 @@ export interface Args {
   url?: string;
   firefox?: string;
   channel: FirefoxChannel;
+  defaultProfile: boolean;
   fire?: string;
   verbose: boolean;
 }
@@ -84,6 +88,7 @@ export function parseCliArgs(argv: string[]): Args {
         firefox: { type: "string" },
         beta: { type: "boolean" },
         nightly: { type: "boolean" },
+        "default-profile": { type: "boolean" },
         fire: { type: "string" },
         verbose: { type: "boolean", short: "v" },
         help: { type: "boolean", short: "h" },
@@ -138,6 +143,7 @@ export function parseCliArgs(argv: string[]): Args {
     url: values.url,
     firefox: values.firefox,
     channel,
+    defaultProfile: !!values["default-profile"],
     fire: values.fire,
     verbose: !!values.verbose,
   };
@@ -220,6 +226,7 @@ export async function startPlatformServer(
       rdpPort: args.rdpPort,
       binary: args.firefox,
       channel: args.channel,
+      defaultProfile: args.defaultProfile,
       headless: args.headless,
       marionettePort: args.marionettePort,
       // NOTE: deliberately not passing url here. Firefox starts on about:blank;

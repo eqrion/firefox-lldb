@@ -7,11 +7,11 @@
 // debug real wasm in a real browser without touching the user's Firefox.
 
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
-import { accessSync } from "node:fs";
+import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
+import { accessSync, existsSync, readFileSync } from "node:fs";
 import { connect as netConnect } from "node:net";
 import { tmpdir, homedir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 
 /** True if something is already accepting connections on host:port. */
@@ -124,11 +124,110 @@ export function findFirefoxBinary(channel: FirefoxChannel = "release"): string |
   return undefined;
 }
 
-const PROFILE_PREFS = [
+function profilesIniPath(): string {
+  switch (process.platform) {
+    case "darwin":
+      return join(homedir(), "Library/Application Support/Firefox/profiles.ini");
+    case "win32":
+      return join(process.env["APPDATA"] ?? homedir(), "Mozilla/Firefox/profiles.ini");
+    default:
+      return join(homedir(), ".mozilla/firefox/profiles.ini");
+  }
+}
+
+function parseIni(text: string): Record<string, string>[] {
+  const sections: Record<string, string>[] = [];
+  let current: Record<string, string> | undefined;
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith(";") || line.startsWith("#")) continue;
+    if (/^\[.*\]$/.test(line)) {
+      current = {};
+      sections.push(current);
+      continue;
+    }
+    const eq = line.indexOf("=");
+    if (eq === -1 || !current) continue;
+    current[line.slice(0, eq)] = line.slice(eq + 1);
+  }
+  return sections;
+}
+
+/** Resolve the directory of the real, persistent default profile Firefox uses
+ * for `channel` when launched normally. Since Firefox 67, each install gets a
+ * dedicated profile named "<salt>.default-<updateChannel>" (see
+ * nsToolkitProfileService::CreateDefaultProfile); fall back to the legacy
+ * Default=1 profile if no dedicated one is found. */
+export function findDefaultProfileDir(channel: FirefoxChannel = "release"): string | undefined {
+  const iniPath = profilesIniPath();
+  let ini: string;
+  try {
+    ini = readFileSync(iniPath, "utf8");
+  } catch {
+    return undefined;
+  }
+  const sections = parseIni(ini);
+  const resolve = (path: string, isRelative: string | undefined) =>
+    isRelative !== "0" ? join(dirname(iniPath), path) : path;
+
+  const dedicated = sections.find((s) => s.Path?.endsWith(`.default-${channel}`));
+  if (dedicated) return resolve(dedicated.Path!, dedicated.IsRelative);
+
+  const legacyDefault = sections.find((s) => s.Default === "1" && s.Path);
+  return legacyDefault ? resolve(legacyDefault.Path!, legacyDefault.IsRelative) : undefined;
+}
+
+/** True if another Firefox process currently holds `profileDir` (best-effort:
+ * checks for the lock file/symlink Firefox creates while running). */
+function isProfileLocked(profileDir: string): boolean {
+  return existsSync(join(profileDir, ".parentlock")) || existsSync(join(profileDir, "parent.lock"));
+}
+
+const MARKER_START = "// >>> firefox-lldb (auto-generated; safe to delete) >>>";
+const MARKER_END = "// <<< firefox-lldb <<<";
+
+function stripMarkedBlock(content: string): string {
+  const start = content.indexOf(MARKER_START);
+  if (start === -1) return content;
+  const end = content.indexOf(MARKER_END, start);
+  return end === -1
+    ? content.slice(0, start)
+    : content.slice(0, start) + content.slice(end + MARKER_END.length);
+}
+
+/** Merge `prefsBlock` into profileDir/user.js inside a marker-delimited
+ * block, replacing any block a previous (e.g. crashed) run left behind. */
+async function writeUserJsBlock(profileDir: string, prefsBlock: string): Promise<void> {
+  const path = join(profileDir, "user.js");
+  const existing = await readFile(path, "utf8").catch(() => "");
+  const cleaned = stripMarkedBlock(existing);
+  await writeFile(path, `${cleaned}\n${MARKER_START}\n${prefsBlock}${MARKER_END}\n`);
+}
+
+/** Undo writeUserJsBlock: remove our block, deleting user.js if that leaves it empty. */
+async function removeUserJsBlock(profileDir: string): Promise<void> {
+  const path = join(profileDir, "user.js");
+  const existing = await readFile(path, "utf8").catch(() => undefined);
+  if (existing === undefined) return;
+  const cleaned = stripMarkedBlock(existing).trim();
+  if (cleaned === "") await rm(path, { force: true }).catch(() => {});
+  else await writeFile(path, cleaned + "\n");
+}
+
+// Prefs Firefox itself requires for --start-debugger-server to do anything
+// (DevToolsStartup.sys.mjs checks these before honoring the flag), plus the
+// port/token prefs identifying this launch. Always applied.
+const REQUIRED_DEBUG_PREFS = [
   ["devtools.debugger.remote-enabled", true],
   ["devtools.chrome.enabled", true],
   ["devtools.debugger.prompt-connection", false],
   ["devtools.debugger.force-local", true],
+] as const;
+
+// Convenience prefs that make an ephemeral profile pleasant to automate
+// against (skip telemetry prompts, welcome screens, etc). Only applied to a
+// throwaway profile — never to the user's real default profile.
+const CONVENIENCE_PREFS = [
   ["browser.shell.checkDefaultBrowser", false],
   ["datareporting.policy.dataSubmissionEnabled", false],
   ["datareporting.policy.dataSubmissionPolicyBypassNotification", true],
@@ -164,6 +263,10 @@ export async function launchFirefox(opts: {
   /** When set, also start Marionette on this port so a WebDriver-BiDi client
    * (e.g. firefox-devtools-mcp --connect-existing) can drive the same Firefox. */
   marionettePort?: number;
+  /** Reuse the channel's real default profile (history, logins, extensions)
+   * instead of a throwaway one. Firefox can't run two instances against the
+   * same profile, so this fails if that profile is already running. */
+  defaultProfile?: boolean;
 }): Promise<FirefoxHandle> {
   const binary = opts.binary ?? findFirefoxBinary(opts.channel);
   if (!binary) {
@@ -178,19 +281,48 @@ export async function launchFirefox(opts: {
         `This is likely a leftover Firefox from a previous run — kill it or pass a different --rdp-port.`
     );
   }
-  const profileDir = await mkdtemp(join(tmpdir(), "ff-rdp-"));
+
+  let profileDir: string;
+  if (opts.defaultProfile) {
+    const channel = opts.channel ?? "release";
+    const found = findDefaultProfileDir(channel);
+    if (!found) {
+      throw new Error(
+        `could not find a default profile for the ${channel} channel. ` +
+          "Run that Firefox once normally first, or drop --default-profile."
+      );
+    }
+    if (isProfileLocked(found)) {
+      throw new Error(
+        `Firefox is already running with its default profile (${found}). ` +
+          "Close it first, or drop --default-profile to use a throwaway one."
+      );
+    }
+    profileDir = found;
+    process.stderr.write(
+      `warning: --default-profile writes debug prefs into your real Firefox profile at ` +
+        `${profileDir} (removed again on clean exit).\n`
+    );
+  } else {
+    profileDir = await mkdtemp(join(tmpdir(), "ff-rdp-"));
+  }
   const launchToken = randomUUID();
 
+  const prefList = opts.defaultProfile
+    ? REQUIRED_DEBUG_PREFS
+    : [...REQUIRED_DEBUG_PREFS, ...CONVENIENCE_PREFS];
   let prefs =
-    PROFILE_PREFS.map(([k, v]) => `user_pref(${JSON.stringify(k)}, ${JSON.stringify(v)});`).join(
-      "\n"
-    ) +
+    prefList.map(([k, v]) => `user_pref(${JSON.stringify(k)}, ${JSON.stringify(v)});`).join("\n") +
     `\nuser_pref("devtools.debugger.remote-port", ${opts.rdpPort});\n` +
     `user_pref(${JSON.stringify(LAUNCH_TOKEN_PREF)}, ${JSON.stringify(launchToken)});\n`;
   if (opts.marionettePort !== undefined) {
     prefs += `user_pref("marionette.port", ${opts.marionettePort});\n`;
   }
-  await writeFile(join(profileDir, "user.js"), prefs);
+  if (opts.defaultProfile) {
+    await writeUserJsBlock(profileDir, prefs);
+  } else {
+    await writeFile(join(profileDir, "user.js"), prefs);
+  }
 
   const args = [
     "--no-remote",
@@ -232,7 +364,11 @@ export async function launchFirefox(opts: {
       // Wait for the process to actually die before returning, so a subsequent
       // launch in the same process doesn't race a still-alive Firefox.
       await exited;
-      await rm(profileDir, { recursive: true, force: true }).catch(() => {});
+      if (opts.defaultProfile) {
+        await removeUserJsBlock(profileDir);
+      } else {
+        await rm(profileDir, { recursive: true, force: true }).catch(() => {});
+      }
     },
   };
 }
