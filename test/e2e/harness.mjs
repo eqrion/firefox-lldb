@@ -295,6 +295,9 @@ export class Session {
   stepInstruction() {
     return this.command("thread step-inst");
   }
+  stepIn() {
+    return this.command("thread step-in");
+  }
   stepOver() {
     return this.command("thread step-over");
   }
