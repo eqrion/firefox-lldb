@@ -31,4 +31,6 @@ jobs:
           sudo apt-get install -y firefox
 
       - name: Run Node e2e tests
+        env:
+          E2E_CONCURRENCY: 2
         run: npm run test:e2e
