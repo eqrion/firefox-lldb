@@ -232,6 +232,7 @@ export interface PauseEvent {
 
 interface ThreadInfo {
   tid: number;
+  targetActor: string;
   threadActor: string;
   consoleActor: string;
   url: string;
@@ -374,21 +375,24 @@ export class RdpWasmSession extends EventEmitter {
     switch (p.type) {
       case "target-available-form": {
         const target = p.target as {
+          actor?: string;
           url?: string;
           threadActor?: string;
           consoleActor?: string;
           isTopLevelTarget?: boolean;
         };
+        const targetActor = target?.actor;
         const threadActor = target?.threadActor;
-        if (!threadActor) break;
+        if (!targetActor || !threadActor) break;
 
         // Check if this actor is already known (re-announce after navigation).
-        const existing = [...this.#threads.values()].find((t) => t.threadActor === threadActor);
+        const existing = [...this.#threads.values()].find((t) => t.targetActor === targetActor);
         if (existing) break;
 
         const tid = this.#nextTid++;
         const info: ThreadInfo = {
           tid,
+          targetActor,
           threadActor,
           consoleActor: target.consoleActor ?? "",
           url: target.url ?? "",
@@ -403,10 +407,15 @@ export class RdpWasmSession extends EventEmitter {
         break;
       }
       case "target-destroyed-form": {
-        const target = p.target as { threadActor?: string };
-        const threadActor = target?.threadActor;
-        if (!threadActor) break;
-        const entry = [...this.#threads.entries()].find(([, t]) => t.threadActor === threadActor);
+        // Unlike target-available-form, this payload carries the window/frame
+        // target actor but not the thread actor — match on that instead, or a
+        // destroyed process-swap target (e.g. Fission reloading the page into
+        // a new process right after the initial navigation) never gets pruned
+        // from #threads and a later all-stop interrupt hangs on the dead tid.
+        const target = p.target as { actor?: string };
+        const targetActor = target?.actor;
+        if (!targetActor) break;
+        const entry = [...this.#threads.entries()].find(([, t]) => t.targetActor === targetActor);
         if (entry) {
           const [tid, info] = entry;
           this.#threads.delete(tid);

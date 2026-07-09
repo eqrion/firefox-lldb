@@ -172,6 +172,9 @@ class FakeRdpServer {
       from: "watcher1",
       type: "target-available-form",
       target: {
+        // The window/frame target actor, distinct from the thread actor —
+        // target-destroyed-form only carries this one (see targetDestroyed).
+        actor: `${threadActor}:target`,
         threadActor,
         consoleActor: opts.consoleActor ?? `${threadActor}:console`,
         url: opts.url ?? "http://example.com/",
@@ -180,11 +183,13 @@ class FakeRdpServer {
     });
   }
 
+  /** Real Firefox's target-destroyed-form carries the window/frame target
+   * actor, not the thread actor — mirror that here rather than threadActor. */
   targetDestroyed(threadActor: string): void {
     this.send({
       from: "watcher1",
       type: "target-destroyed-form",
-      target: { threadActor },
+      target: { actor: `${threadActor}:target` },
     });
   }
 
@@ -257,6 +262,39 @@ test("target-destroyed-form removes thread from listTids", async () => {
   srv.targetDestroyed("threadA");
   await sleep(200);
   assert.equal(session.listTids().length, 1);
+
+  session.close();
+  srv.close();
+});
+
+test("target-destroyed-form with real Firefox payload shape (no threadActor) prunes the right thread", async () => {
+  // Real Firefox target-destroyed-form carries only the window/frame target
+  // actor plus innerWindowId/isTopLevelTarget — never threadActor. This
+  // happens on every Fission process swap (e.g. the extra reload right after
+  // the first cross-origin navigation from about:blank). Matching on
+  // threadActor here would silently no-op, leaving a dead thread in
+  // #threads that a later all-stop interrupt hangs on forever.
+  const srv = new FakeRdpServer();
+  await srv.listen();
+  const session = await srv.acceptSession();
+
+  srv.targetAvailable("threadA", { isTopLevel: true });
+  await sleep(200);
+  const tidA = session.listTids()[0];
+
+  srv.send({
+    from: "watcher1",
+    type: "target-destroyed-form",
+    target: { actor: "threadA:target", innerWindowId: 1, isTopLevelTarget: true },
+  });
+  await sleep(200);
+
+  assert.deepEqual(session.listTids(), [], "the destroyed thread must be pruned");
+
+  srv.targetAvailable("threadB", { isTopLevel: true });
+  await sleep(200);
+  const tidB = session.listTids()[0];
+  assert.notEqual(tidB, tidA, "the swapped-in thread gets a fresh tid");
 
   session.close();
   srv.close();
