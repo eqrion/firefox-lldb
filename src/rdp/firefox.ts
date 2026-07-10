@@ -6,9 +6,9 @@
 // debugger server enabled. Used by the live test bridge so an lldb test can
 // debug real wasm in a real browser without touching the user's Firefox.
 
-import { spawn, execFileSync, type ChildProcess } from "node:child_process";
+import { spawn, execFileSync, type ChildProcess, type StdioOptions } from "node:child_process";
 import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
-import { accessSync, existsSync, readFileSync } from "node:fs";
+import { accessSync, existsSync, readFileSync, createWriteStream } from "node:fs";
 import { connect as netConnect } from "node:net";
 import { tmpdir, homedir } from "node:os";
 import { join, dirname } from "node:path";
@@ -339,7 +339,14 @@ export async function launchFirefox(opts: {
 
   // detached: true makes the child a process group leader so we can kill
   // the whole group (Firefox + plugin-container children) with -pid on close.
-  const child: ChildProcess = spawn(binary, args, { stdio: "ignore", detached: true });
+  const logDir = process.env.FIREFOX_LLDB_LOG_DIR;
+  const stdio: StdioOptions = logDir ? ["ignore", "pipe", "pipe"] : "ignore";
+  const child: ChildProcess = spawn(binary, args, { stdio, detached: true });
+  if (logDir) {
+    const out = createWriteStream(join(logDir, `firefox-${launchToken}.log`));
+    child.stdout?.pipe(out);
+    child.stderr?.pipe(out);
+  }
   child.unref();
 
   if (!(opts.headless ?? false) && child.pid !== undefined) {
