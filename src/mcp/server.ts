@@ -174,6 +174,15 @@ async function main(): Promise<void> {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
+  // An MCP client that dies without cleanly closing stdio (e.g. killed via
+  // SIGKILL, which doesn't cascade to children) never signals us, orphaning
+  // this process and the Firefox it launched. Poll for reparenting to
+  // init/launchd (ppid 1) and shut down cleanly when it happens.
+  const orphanCheck = setInterval(() => {
+    if (process.ppid === 1) void shutdown();
+  }, 1000);
+  orphanCheck.unref();
+
   await server.connect(new StdioServerTransport());
 }
 

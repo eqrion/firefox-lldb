@@ -68,6 +68,15 @@ async function main(): Promise<void> {
   };
   process.on("SIGTERM", () => void cleanup(0));
 
+  // A dead parent (e.g. a pty master closing, or a controlling process being
+  // killed) doesn't always deliver a signal we handle -- SIGHUP's default
+  // disposition just kills us without running cleanup, orphaning Firefox.
+  // Poll for reparenting to init/launchd (ppid 1) and clean up when it happens.
+  const orphanCheck = setInterval(() => {
+    if (process.ppid === 1) void cleanup(0);
+  }, 1000);
+  orphanCheck.unref();
+
   // The REPL owns the terminal; `js` commands and console streaming need the
   // live RDP session, which the platform server hands us via onSession.
   let session: RdpWasmSession | undefined;
