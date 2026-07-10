@@ -70,6 +70,9 @@ async function withSession(fxName, fn) {
     // forceful client.close() below, which kills the process directly.
     await withDeadline(send(client, "lldb_shutdown"), 5_000).catch(() => {});
     await withDeadline(client.close(), 10_000).catch(() => {});
+    // close() alone waits for open connections to end naturally, which can
+    // hang forever on a lingering keep-alive socket; force them closed too.
+    staticServer.server.closeAllConnections();
     await new Promise((r) => staticServer.server.close(r));
   }
 }

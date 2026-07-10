@@ -386,6 +386,9 @@ export class Session {
     for (const s of this.#sockets) s.destroy();
     await this.#handle?.shutdown().catch(() => {});
     await this.#client.destroy(); // await full worker teardown before the next attach
+    // close() alone waits for open connections to end naturally, which can
+    // hang forever on a lingering keep-alive socket; force them closed too.
+    this.#staticServer?.server.closeAllConnections();
     await new Promise((resolve) => this.#staticServer?.server.close(resolve));
   }
 
