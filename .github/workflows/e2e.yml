@@ -34,9 +34,10 @@ jobs:
         env:
           E2E_CONCURRENCY: 1
           FIREFOX_LLDB_LOG_DIR: /tmp/firefox-logs
+          DEBUG: "1"
         run: |
           mkdir -p "$FIREFOX_LLDB_LOG_DIR"
-          npm run test:e2e
+          npm run test:e2e 2>/tmp/debug.log
 
       - name: Dump captured Firefox process output (diagnostic, on failure)
         if: failure()
@@ -45,3 +46,7 @@ jobs:
             echo "=== $f ==="
             cat "$f"
           done
+
+      - name: Dump tail of verbose RDP/session trace (diagnostic, on failure)
+        if: failure()
+        run: tail -c 500000 /tmp/debug.log
