@@ -268,7 +268,9 @@ impl<'a> Debugger<'a> {
                     .unwrap_or_else(|| WasmAddr::from_raw(0).unwrap());
 
                 // Firefox snaps breakpoints to the nearest valid wasm instruction
-                // boundary, so the stopped PC may be a few bytes after the DWARF
+                // boundary -- in either direction (see firefox-lldb's #snapOffset,
+                // which picks whichever valid position is numerically closest) --
+                // so the stopped PC may be a few bytes before *or* after the DWARF
                 // low_pc that LLDB used when it registered its BreakpointSite. Use
                 // the registered pre-snap address in the T05 stop reply so LLDB's
                 // BreakpointSite lookup matches and reports eStopReasonBreakpoint.
@@ -286,7 +288,7 @@ impl<'a> Debugger<'a> {
                             && bp.module_index() == stopped_pc.module_index()
                             && {
                                 let delta = (stopped_pc.offset() as i64) - (bp.offset() as i64);
-                                delta >= 0 && delta <= 8
+                                delta.abs() <= 8
                             }
                     });
                     (nearest.is_some(), nearest.unwrap_or(stopped_pc))
