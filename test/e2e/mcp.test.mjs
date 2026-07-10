@@ -35,18 +35,41 @@ const send = async (client, name, args = {}) => {
   return (res.content ?? []).map((c) => c.text ?? "").join("");
 };
 
+// Race `work` against a deadline. A hung MCP tool call (e.g. the launched
+// Firefox wedges) leaves node's own --test-timeout as the only thing that
+// eventually notices -- but that only abandons the promise, it doesn't kill
+// the spawned MCP server process, which isn't orphaned (its parent, this
+// test's own file-level worker, is still alive running other tests) and so
+// never gets reaped either. Losing this race still throws, which runs the
+// caller's normal try/finally cleanup instead of leaving it dangling forever.
+function withDeadline(work, ms) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
+}
+
 async function withSession(fxName, fn) {
   const fx = FIXTURES[fxName];
   const staticServer = await startStaticServer(fx.pageDir);
   const url = `http://127.0.0.1:${staticServer.port}/index.html`;
   const client = await connect();
   try {
-    const banner = await send(client, "lldb_launch", { url, headless: true, fire: fx.fire });
-    assert.match(banner, /marionette-port \d+/, `launch banner: ${banner}`);
-    await fn(client, fx);
+    await withDeadline(
+      (async () => {
+        const banner = await send(client, "lldb_launch", { url, headless: true, fire: fx.fire });
+        assert.match(banner, /marionette-port \d+/, `launch banner: ${banner}`);
+        await fn(client, fx);
+      })(),
+      90_000
+    );
   } finally {
-    await send(client, "lldb_shutdown").catch(() => {});
-    await client.close().catch(() => {});
+    // A graceful shutdown RPC depends on the (possibly wedged) server
+    // responding; bound it so a hang there can't stop us from reaching the
+    // forceful client.close() below, which kills the process directly.
+    await withDeadline(send(client, "lldb_shutdown"), 5_000).catch(() => {});
+    await withDeadline(client.close(), 10_000).catch(() => {});
     await new Promise((r) => staticServer.server.close(r));
   }
 }

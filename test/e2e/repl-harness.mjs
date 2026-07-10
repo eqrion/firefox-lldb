@@ -149,11 +149,14 @@ export class ReplSession {
   }
 
   // Type a command line into the REPL and resolve with the output it produced
-  // (ANSI stripped), once a fresh prompt returns.
+  // (ANSI stripped), once a fresh prompt returns. #settle() has no timeout of
+  // its own -- if the underlying process wedges mid-test, this would hang
+  // forever unprotected (see Session's #withCommandDeadline in harness.mjs
+  // for the same gap on the other harness).
   async type(line) {
     const mark = this.#out.length;
     this.#input.write(line + "\n");
-    await this.#settle();
+    await withDeadline(this, this.#settle(), 30_000);
     return stripAnsi(this.#out.slice(mark));
   }
 

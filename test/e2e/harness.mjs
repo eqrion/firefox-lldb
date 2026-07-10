@@ -310,17 +310,39 @@ export class Session {
     );
   }
 
+  // Every session round trip goes through here, not just attach() -- a test
+  // body calling continue()/stepInstruction()/etc. after a successful attach
+  // was previously unprotected: if the underlying RDP connection wedges
+  // mid-test, nothing catches it until node's own --test-timeout abandons
+  // the test, leaking Firefox (see project_ci_e2e_firefox_leak memory).
+  async #withCommandDeadline(promise, ms = 30_000) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`RDP command timed out after ${ms}ms`)), ms);
+    });
+    try {
+      const result = await Promise.race([promise, timeout]);
+      clearTimeout(timer);
+      return result;
+    } catch (err) {
+      clearTimeout(timer);
+      this.forceKillFirefox();
+      await Promise.race([this.shutdown(), sleep(10_000)]).catch(() => {});
+      throw err;
+    }
+  }
+
   command(cmd) {
-    return this.#client.sessionCommand(cmd);
+    return this.#withCommandDeadline(this.#client.sessionCommand(cmd));
   }
   state() {
-    return this.#client.sessionState();
+    return this.#withCommandDeadline(this.#client.sessionState());
   }
   frames() {
-    return this.#client.sessionFrames();
+    return this.#withCommandDeadline(this.#client.sessionFrames());
   }
   variable(frameIndex, name) {
-    return this.#client.sessionVariable(frameIndex, name);
+    return this.#withCommandDeadline(this.#client.sessionVariable(frameIndex, name));
   }
 
   breakpointByName(name) {
