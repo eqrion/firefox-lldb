@@ -143,6 +143,30 @@ export function startStaticServer(pageDir) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Race `work` against a deadline well short of node's own --test-timeout. If
+// a step inside `work` hangs (a slow/wedged Firefox launch, a stuck RDP round
+// trip), node kills the whole test process outright once its own timeout
+// fires -- with no chance for our code to run. Firefox is spawned detached so
+// it survives a normal CLI exit, which means it also survives that kill,
+// leaking for the rest of the CI job and starving every test that runs after
+// (see project_ci_e2e_firefox_leak memory). Losing this race still shuts the
+// session down before node has to intervene.
+async function withDeadline(session, work, ms) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms waiting for Firefox`)), ms);
+  });
+  try {
+    const result = await Promise.race([work, timeout]);
+    clearTimeout(timer);
+    return result;
+  } catch (err) {
+    clearTimeout(timer);
+    await session.shutdown().catch(() => {});
+    throw err;
+  }
+}
+
 // A live debug session against a fixture, driven through the session API.
 export class Session {
   #client;
@@ -188,45 +212,50 @@ export class Session {
     const client = await LLDBClient.create();
     const session = new Session(client, null, staticServer);
 
-    const rdpPort = await freePort();
-    const args = parseCliArgs([
-      "--launch",
-      ...(headless ? ["--headless"] : []),
-      "--port",
-      "0",
-      "--rdp-port",
-      String(rdpPort),
-      "--url",
-      url,
-      "--fire",
-      fire ?? fx.fire,
-    ]);
-    const handle = await startPlatformServer(args, {
-      wrapConnectPort: (port) => session.#bridgeTcp(port),
-    });
-    session.#handle = handle;
+    return withDeadline(
+      session,
+      (async () => {
+        const rdpPort = await freePort();
+        const args = parseCliArgs([
+          "--launch",
+          ...(headless ? ["--headless"] : []),
+          "--port",
+          "0",
+          "--rdp-port",
+          String(rdpPort),
+          "--url",
+          url,
+          "--fire",
+          fire ?? fx.fire,
+        ]);
+        const handle = await startPlatformServer(args, {
+          wrapConnectPort: (port) => session.#bridgeTcp(port),
+        });
+        session.#handle = handle;
 
-    const c0 = await session.#bridgeTcp(handle.port);
-    await client.sessionCommand("platform select remote-gdb-server");
-    const conn = await client.sessionCommand(`platform connect inprocess://${c0}`);
-    if (conn.status >= 6) throw new Error(`platform connect failed: ${conn.error}`);
+        const c0 = await session.#bridgeTcp(handle.port);
+        await client.sessionCommand("platform select remote-gdb-server");
+        const conn = await client.sessionCommand(`platform connect inprocess://${c0}`);
+        if (conn.status >= 6) throw new Error(`platform connect failed: ${conn.error}`);
 
-    // Cold launch + wasm load can exceed the attach timeout; retry like the
-    // Python harness.
-    let lastErr = "";
-    for (let attempt = 0; attempt < 4; attempt++) {
-      const res = await client.sessionCommand("process attach --plugin wasm --pid 1");
-      if (res.status < 6) {
-        const st = await client.sessionState();
-        if (st.reason !== "none" && st.reason !== "exited") return session;
-        lastErr = `attach left process in state ${st.reason}`;
-      } else {
-        lastErr = res.error;
-      }
-      await sleep(1000);
-    }
-    await session.shutdown();
-    throw new Error(`process attach failed after retries: ${lastErr}`);
+        // Cold launch + wasm load can exceed the attach timeout; retry like
+        // the Python harness.
+        let lastErr = "";
+        for (let attempt = 0; attempt < 4; attempt++) {
+          const res = await client.sessionCommand("process attach --plugin wasm --pid 1");
+          if (res.status < 6) {
+            const st = await client.sessionState();
+            if (st.reason !== "none" && st.reason !== "exited") return session;
+            lastErr = `attach left process in state ${st.reason}`;
+          } else {
+            lastErr = res.error;
+          }
+          await sleep(1000);
+        }
+        throw new Error(`process attach failed after retries: ${lastErr}`);
+      })(),
+      60_000
+    );
   }
 
   // Start the platform server (no Firefox) and connect the session's platform
@@ -255,19 +284,23 @@ export class Session {
   static async stoppedAtBreakpoint(fxName) {
     const session = await Session.attach(fxName);
     const fx = FIXTURES[fxName];
-    await session.breakpointByName(fx.breakFunc);
-    for (let i = 0; i < 20; i++) {
-      await session.continue();
-      const st = await session.state();
-      if (st.reason === "none" || st.reason === "exited") {
-        await session.shutdown();
-        throw new Error(`did not stop at ${fx.breakFunc}: state ${st.reason}`);
-      }
-      if (st.reason === "breakpoint") return session;
-      // signal (e.g. SIGSEGV from C++ throw via -fwasm-exceptions): continue past it
-    }
-    await session.shutdown();
-    throw new Error(`did not reach breakpoint at ${fx.breakFunc} after 20 continues`);
+    return withDeadline(
+      session,
+      (async () => {
+        await session.breakpointByName(fx.breakFunc);
+        for (let i = 0; i < 20; i++) {
+          await session.continue();
+          const st = await session.state();
+          if (st.reason === "none" || st.reason === "exited") {
+            throw new Error(`did not stop at ${fx.breakFunc}: state ${st.reason}`);
+          }
+          if (st.reason === "breakpoint") return session;
+          // signal (e.g. SIGSEGV from C++ throw via -fwasm-exceptions): continue past it
+        }
+        throw new Error(`did not reach breakpoint at ${fx.breakFunc} after 20 continues`);
+      })(),
+      30_000
+    );
   }
 
   command(cmd) {

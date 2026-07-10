@@ -33,7 +33,6 @@ jobs:
       - name: Run Node e2e tests
         env:
           E2E_CONCURRENCY: 2
-          DEBUG: "1"
           FIREFOX_LLDB_LOG_DIR: /tmp/firefox-logs
         run: |
           mkdir -p "$FIREFOX_LLDB_LOG_DIR"
