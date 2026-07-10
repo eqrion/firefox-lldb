@@ -8,7 +8,7 @@ on:
 jobs:
   e2e:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -32,7 +32,7 @@ jobs:
 
       - name: Run Node e2e tests
         env:
-          E2E_CONCURRENCY: 2
+          E2E_CONCURRENCY: 1
           FIREFOX_LLDB_LOG_DIR: /tmp/firefox-logs
         run: |
           mkdir -p "$FIREFOX_LLDB_LOG_DIR"

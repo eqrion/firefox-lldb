@@ -14,7 +14,7 @@ import { LLDBClient } from "lldb-wasm";
 import { parseCliArgs, startPlatformServer } from "../../src/cli/firefox-lldb-server.ts";
 import { freePort } from "../../src/platform/gdb-server-spawner.ts";
 import { runRepl } from "../../src/cli/repl.ts";
-import { FIXTURES, startStaticServer } from "./harness.mjs";
+import { FIXTURES, startStaticServer, withDeadline } from "./harness.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const stripAnsi = (s) => s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
@@ -90,63 +90,62 @@ export class ReplSession {
       onTargetInterrupt: () => rs.#triggerInterrupt?.(),
     });
 
-    const rdpPort = await freePort();
-    const args = parseCliArgs([
-      "--launch",
-      ...(headless ? ["--headless"] : []),
-      "--port",
-      "0",
-      "--rdp-port",
-      String(rdpPort),
-      "--url",
-      url,
-      "--fire",
-      fire ?? fx.fire,
-    ]);
-    const handle = await startPlatformServer(args, {
-      wrapConnectPort: (port) => rs.#bridgeTcp(port),
-      onSession: (s, interrupt) => {
-        rs.session = s;
-        rs.#triggerInterrupt = interrupt;
-        void s.streamConsole((m) => rs.#repl.printConsole(m));
-      },
-    });
-    rs.#handle = handle;
+    return withDeadline(
+      rs,
+      (async () => {
+        const rdpPort = await freePort();
+        const args = parseCliArgs([
+          "--launch",
+          ...(headless ? ["--headless"] : []),
+          "--port",
+          "0",
+          "--rdp-port",
+          String(rdpPort),
+          "--url",
+          url,
+          "--fire",
+          fire ?? fx.fire,
+        ]);
+        const handle = await startPlatformServer(args, {
+          wrapConnectPort: (port) => rs.#bridgeTcp(port),
+          onSession: (s, interrupt) => {
+            rs.session = s;
+            rs.#triggerInterrupt = interrupt;
+            void s.streamConsole((m) => rs.#repl.printConsole(m));
+          },
+        });
+        rs.#handle = handle;
 
-    const c0 = await rs.#bridgeTcp(handle.port);
-    await client.sessionCommand("platform select remote-gdb-server");
-    const conn = await client.sessionCommand(`platform connect inprocess://${c0}`);
-    if (conn.status >= 6) throw new Error(`platform connect failed: ${conn.error}`);
-    await client.sessionCommand("command alias attach process attach --plugin wasm");
+        const c0 = await rs.#bridgeTcp(handle.port);
+        await client.sessionCommand("platform select remote-gdb-server");
+        const conn = await client.sessionCommand(`platform connect inprocess://${c0}`);
+        if (conn.status >= 6) throw new Error(`platform connect failed: ${conn.error}`);
+        await client.sessionCommand("command alias attach process attach --plugin wasm");
 
-    // Cold launch + wasm load can exceed the attach timeout; retry like the
-    // Session harness. Attach is driven directly (not through the REPL) so the
-    // retry policy is in one place; REPL command routing is what the tests
-    // exercise afterwards.
-    let lastErr = "";
-    let ok = false;
-    for (let attempt = 0; attempt < 4; attempt++) {
-      const res = await client.sessionCommand("process attach --plugin wasm --pid 1");
-      if (res.status < 6) {
-        const st = await client.sessionState();
-        if (st.reason !== "none" && st.reason !== "exited") {
-          ok = true;
-          break;
+        // Cold launch + wasm load can exceed the attach timeout; retry like
+        // the Session harness. Attach is driven directly (not through the
+        // REPL) so the retry policy is in one place; REPL command routing is
+        // what the tests exercise afterwards.
+        let lastErr = "";
+        for (let attempt = 0; attempt < 4; attempt++) {
+          const res = await client.sessionCommand("process attach --plugin wasm --pid 1");
+          if (res.status < 6) {
+            const st = await client.sessionState();
+            if (st.reason !== "none" && st.reason !== "exited") {
+              rs.#repl.start();
+              await rs.#settle();
+              return rs;
+            }
+            lastErr = `attach left process in state ${st.reason}`;
+          } else {
+            lastErr = res.error;
+          }
+          await sleep(1000);
         }
-        lastErr = `attach left process in state ${st.reason}`;
-      } else {
-        lastErr = res.error;
-      }
-      await sleep(1000);
-    }
-    if (!ok) {
-      await rs.shutdown();
-      throw new Error(`process attach failed after retries: ${lastErr}`);
-    }
-
-    rs.#repl.start();
-    await rs.#settle();
-    return rs;
+        throw new Error(`process attach failed after retries: ${lastErr}`);
+      })(),
+      60_000
+    );
   }
 
   // Type a command line into the REPL and resolve with the output it produced
@@ -188,5 +187,16 @@ export class ReplSession {
     await this.#handle?.shutdown().catch(() => {});
     await this.#client.destroy();
     await new Promise((resolve) => this.#staticServer?.server.close(resolve));
+  }
+
+  // See Session.forceKillFirefox in harness.mjs.
+  forceKillFirefox() {
+    const pid = this.#handle?.firefoxPid;
+    if (pid === undefined) return;
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {
+      // already dead
+    }
   }
 }
