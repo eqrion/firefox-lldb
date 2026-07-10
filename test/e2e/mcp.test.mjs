@@ -23,10 +23,15 @@ async function connect() {
     args: ["--import", "tsx", "src/mcp/server.ts"],
     cwd: REPO,
     env: process.env,
-    stderr: "ignore",
+    // "ignore" previously meant a hung MCP server left zero diagnostic trail --
+    // pipe it through so DEBUG=1 (forwarded by the custom reporter) can show it.
+    stderr: "pipe",
   });
   const client = new Client({ name: "mcp-e2e", version: "0.0.0" }, { capabilities: {} });
   await client.connect(transport);
+  if (process.env.DEBUG === "1") {
+    transport.stderr?.on("data", (d) => console.error(`[mcp-server] ${d}`.trimEnd()));
+  }
   return client;
 }
 
