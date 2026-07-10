@@ -67,7 +67,10 @@ export function startAttachShim(opts: {
   const host = opts.host ?? "127.0.0.1";
   const trace = opts.trace;
 
+  const sockets = new Set<net.Socket>();
   const server = net.createServer((client) => {
+    sockets.add(client);
+    client.on("close", () => sockets.delete(client));
     const upstream = net.connect(opts.componentPort, host);
     let attached = false;
     let noAck = false;
@@ -155,7 +158,12 @@ export function startAttachShim(opts: {
       const port = (server.address() as net.AddressInfo).port;
       resolve({
         port,
-        close: () => new Promise<void>((res) => server.close(() => res())),
+        close: () => {
+          // Without this, server.close() would wait indefinitely for LLDB
+          // (or the upstream component connection) to disconnect voluntarily.
+          for (const s of sockets) s.destroy();
+          return new Promise<void>((res) => server.close(() => res()));
+        },
       });
     });
   });
