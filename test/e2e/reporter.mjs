@@ -13,6 +13,12 @@ const RED = "\x1b[31m";
 const RESET = "\x1b[0m";
 const DIM = "\x1b[2m";
 
+// A custom reporter replaces node:test's own output entirely -- console.log/
+// error calls inside a test file arrive here as test:stdout/test:stderr
+// events, not on the real stdout/stderr fds, so a switch that doesn't handle
+// them silently drops everything a test (or DEBUG=1 verbose logging) prints.
+const VERBOSE = process.env.DEBUG === "1";
+
 export default async function* reporter(source) {
   let pass = 0;
   let fail = 0;
@@ -26,6 +32,11 @@ export default async function* reporter(source) {
       case "test:start": {
         const file = data.file ? ` [${path.basename(data.file)}]` : "";
         yield `${indent}▶ ${data.name}${file}\n`;
+        break;
+      }
+      case "test:stdout":
+      case "test:stderr": {
+        if (VERBOSE) yield `${DIM}${data.message}${RESET}`;
         break;
       }
       case "test:pass": {
