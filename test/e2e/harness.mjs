@@ -151,7 +151,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // leaking for the rest of the CI job and starving every test that runs after
 // (see project_ci_e2e_firefox_leak memory). Losing this race still shuts the
 // session down before node has to intervene.
-async function withDeadline(session, work, ms) {
+//
+// The graceful session.shutdown() chain itself waits on the RSP server
+// closing its sockets, which can hang if the far end (Firefox) is the thing
+// that's wedged in the first place. forceKillFirefox() is called first as an
+// unconditional, direct SIGKILL that doesn't depend on that chain completing;
+// the graceful shutdown is still attempted afterward, bounded, best-effort.
+export async function withDeadline(session, work, ms) {
   let timer;
   const timeout = new Promise((_, reject) => {
     timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms waiting for Firefox`)), ms);
@@ -162,7 +168,8 @@ async function withDeadline(session, work, ms) {
     return result;
   } catch (err) {
     clearTimeout(timer);
-    await session.shutdown().catch(() => {});
+    session.forceKillFirefox();
+    await Promise.race([session.shutdown(), sleep(10_000)]).catch(() => {});
     throw err;
   }
 }
@@ -358,5 +365,18 @@ export class Session {
     await this.#handle?.shutdown().catch(() => {});
     await this.#client.destroy(); // await full worker teardown before the next attach
     await new Promise((resolve) => this.#staticServer?.server.close(resolve));
+  }
+
+  // Unconditional, direct SIGKILL of the Firefox process group, independent
+  // of shutdown()'s graceful chain (which can itself hang waiting on a
+  // socket to a Firefox that's already wedged). Safe to call redundantly.
+  forceKillFirefox() {
+    const pid = this.#handle?.firefoxPid;
+    if (pid === undefined) return;
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {
+      // already dead
+    }
   }
 }

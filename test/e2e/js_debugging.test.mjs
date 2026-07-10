@@ -9,7 +9,7 @@
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { Session } from "./harness.mjs";
+import { Session, withDeadline } from "./harness.mjs";
 
 // math.js line 725 is the `assert(args.length <= nargs, ...)` inside the export
 // wrapper closure, which runs on every wasm export call.
@@ -21,12 +21,18 @@ before(async () => {
   s = await Session.attach("factorial", {
     fire: "runFactorial(); setTimeout(runFactorial, 800)",
   });
-  const bpRes = await s.breakpointByName("compute_factorial");
-  await s.continue(); // stop at wasm bp (first runFactorial call)
-  await s.breakpointByLocation(JS_BP_FILE, JS_BP_LINE);
-  const bpId = Session.parseBreakpointId(bpRes);
-  if (bpId != null) await s.deleteBreakpoint(bpId);
-  await s.continue(); // proceed to JS bp on the second runFactorial call
+  await withDeadline(
+    s,
+    (async () => {
+      const bpRes = await s.breakpointByName("compute_factorial");
+      await s.continue(); // stop at wasm bp (first runFactorial call)
+      await s.breakpointByLocation(JS_BP_FILE, JS_BP_LINE);
+      const bpId = Session.parseBreakpointId(bpRes);
+      if (bpId != null) await s.deleteBreakpoint(bpId);
+      await s.continue(); // proceed to JS bp on the second runFactorial call
+    })(),
+    30_000
+  );
 });
 after(async () => {
   await s?.shutdown();
