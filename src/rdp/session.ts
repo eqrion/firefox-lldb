@@ -49,6 +49,11 @@ const THREAD_CONFIG = {
 // a top-level target-destroyed-form as a genuine close.
 const DETACH_GRACE_MS = 250;
 
+// A minimal valid wasm binary (magic + version only, no sections). Used as a
+// placeholder module body when the real bytecode can't be fetched, so callers
+// get no DWARF/debug info for that module instead of a hard failure.
+const EMPTY_WASM_MODULE = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+
 export interface TabInfo {
   actor: string;
   url: string;
@@ -576,7 +581,17 @@ export class RdpWasmSession extends EventEmitter {
 
   async fetchModuleBytes(url: string): Promise<Uint8Array> {
     if (url.startsWith("http://") || url.startsWith("https://")) {
-      return new Uint8Array(await (await fetch(url)).arrayBuffer());
+      try {
+        return new Uint8Array(await (await fetch(url)).arrayBuffer());
+      } catch (e) {
+        // A network failure here (e.g. a self-signed dev cert Node's fetch
+        // doesn't trust) must not propagate: Module.bytecode's WIT signature
+        // has no error case, so an uncaught throw traps the whole gdbstub
+        // component instead of just this one module. Degrade the same way
+        // the non-HTTP fallback below does.
+        console.error(`[rdp] failed to fetch module bytes from ${url}: ${(e as Error).message}`);
+        return EMPTY_WASM_MODULE;
+      }
     }
     // Non-HTTP URL (e.g. "wasm:" for JSPI synthetic wrapper modules): try the
     // RDP source actor. If that also fails, return a minimal valid wasm binary
@@ -587,7 +602,7 @@ export class RdpWasmSession extends EventEmitter {
       const bytes = await this.#fetchWasmBytesFromActor(actor);
       if (bytes) return bytes;
     }
-    return new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+    return EMPTY_WASM_MODULE;
   }
 
   /** Try to fetch raw wasm bytes from a source actor via RDP. */
