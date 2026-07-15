@@ -304,6 +304,18 @@ export class RdpWasmSession extends EventEmitter {
   // Pending "is this top-level destroy a real close?" checks (see DETACH_GRACE_MS).
   #pendingDetachChecks = new Set<ReturnType<typeof setTimeout>>();
 
+  // Source actors are scoped to an RDP connection and become invalid whenever
+  // the top-level target goes away — whether that's a navigate() we drove or
+  // one the page triggered on its own (reload, self-redirect, Fission
+  // process-swap). Stale entries here cause breakpoint-position queries to
+  // hit dead actors (session.ts's #snapOffset) instead of just falling back
+  // gracefully.
+  #invalidateActorCaches(): void {
+    this.#jsActorByUrl.clear();
+    this.#wasmActorByUrl.clear();
+    this.#breakpointPositionCache.clear();
+  }
+
   private constructor(client: RdpClient) {
     super();
     this.#client = client;
@@ -442,6 +454,10 @@ export class RdpWasmSession extends EventEmitter {
           // process-swap replacement (see DETACH_GRACE_MS) a chance to arrive
           // first, so a swap isn't mistaken for a real close.
           if (info.isTopLevel) {
+            // Whether this was a navigate() we drove or the page navigating
+            // on its own, every source actor scoped to the old top-level
+            // target is now dead.
+            this.#invalidateActorCaches();
             const timer = setTimeout(() => {
               this.#pendingDetachChecks.delete(timer);
               const hasTopLevel = [...this.#threads.values()].some((t) => t.isTopLevel);
@@ -492,8 +508,7 @@ export class RdpWasmSession extends EventEmitter {
     // become invalid after navigation. Stale actors cause breakpoint-position
     // queries (#snapJsLocation, wasmBreakpointOffsets) to fail silently and
     // fall back to un-snapped positions, which Firefox may ignore.
-    this.#jsActorByUrl.clear();
-    this.#wasmActorByUrl.clear();
+    this.#invalidateActorCaches();
 
     // Keep a reference to the cleanup function so we can call it if navigateTo
     // throws before we reach `await target` (otherwise the listeners leak).
@@ -821,7 +836,7 @@ export class RdpWasmSession extends EventEmitter {
   async #snapOffset(sourceUrl: string, offset: number): Promise<number> {
     const actor = this.#wasmActorByUrl.get(sourceUrl);
     if (!actor) return offset;
-    const positions = await this.wasmBreakpointOffsets(actor);
+    const positions = await this.wasmBreakpointOffsets(actor).catch((): number[] => []);
     if (!positions.length || positions.includes(offset)) return offset;
     return positions.reduce(
       (best, p) => (Math.abs(p - offset) < Math.abs(best - offset) ? p : best),
