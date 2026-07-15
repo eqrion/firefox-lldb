@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Self-Redirect Wasm Debugger Test — page 1</title>
+</head>
+<body>
+  <h1>page 1</h1>
+
+  <script src="math.js"></script>
+  <script>
+    let factorial;
+
+    MathModule().then(mod => {
+      factorial = mod.cwrap('compute_factorial', 'number', ['number']);
+    });
+
+    function runFactorial() {
+      return factorial(10);
+    }
+
+    // Uncontrolled navigation: the page moves itself to a fresh document
+    // (not driven by the test harness's own navigate()), exercising a
+    // browser-triggered target destroy/recreate rather than one we control.
+    function redirectToPage2() {
+      location.href = 'page2.html';
+    }
+  </script>
+</body>
+</html>

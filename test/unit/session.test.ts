@@ -1087,6 +1087,94 @@ test("navigate() clears stale source-actor caches so post-navigation breakpoints
   srv.close();
 });
 
+test("uncontrolled top-level target swap (no navigate()) invalidates stale wasm actor caches", async () => {
+  const srv = new FakeRdpServer();
+  await srv.listen();
+  const session = await srv.acceptSession();
+
+  const WASM_URL = "http://example.com/mod.wasm";
+
+  srv.targetAvailable("thread1", { isTopLevel: true, url: "http://example.com/v1.html" });
+  await sleep(200);
+
+  // Simulate #allModules() refreshing wasm sources on a stop, the same way
+  // it does on every real debuggee pause — thread1's module reports
+  // breakpoint positions [10, 20, 30].
+  srv.onNext(
+    (r) => r.type === "sources",
+    () => ({
+      from: "thread1",
+      sources: [{ actor: "wasmActorOld", url: WASM_URL, introductionType: "wasm" }],
+    })
+  );
+  await session.wasmSources();
+
+  srv.onNext(
+    (r) => r.type === "getBreakpointPositionsCompressed",
+    () => ({ from: "wasmActorOld", positions: { 10: [], 20: [], 30: [] } })
+  );
+  let firstSetLine: number | undefined;
+  srv.onNext(
+    (r) => r.type === "setBreakpoint",
+    (r) => {
+      firstSetLine = (r.location as { line: number }).line;
+      return { from: "thread1" };
+    }
+  );
+
+  await session.setWasmBreakpoint(WASM_URL, 12);
+  assert.equal(
+    firstSetLine,
+    10,
+    "sanity check: initial breakpoint snaps against thread1's own positions"
+  );
+
+  // Simulate an uncontrolled destroy+recreate of the top-level target — no
+  // session.navigate() call, e.g. a page self-redirect or a Fission swap.
+  // wasmActorOld is now dead; nothing must reuse it.
+  srv.targetDestroyed("thread1");
+  await sleep(50);
+
+  let secondSetLine: number | undefined;
+  srv.onNext(
+    (r) => r.type === "setBreakpoint",
+    (r) => {
+      secondSetLine = (r.location as { line: number }).line;
+      return { from: "thread2" };
+    }
+  );
+  srv.targetAvailable("thread2", { isTopLevel: true, url: "http://example.com/v1.html" });
+  await sleep(200);
+
+  // thread2's source actors haven't been queried yet (that only happens on
+  // the next debuggee stop, same as in production) — the re-applied
+  // breakpoint must fall back to the unsnapped offset rather than hang or
+  // crash trying to reach the now-dead wasmActorOld.
+  assert.equal(
+    secondSetLine,
+    12,
+    "breakpoint re-applied right away (before the next stop's sources refresh) must degrade to unsnapped, not touch the dead actor"
+  );
+
+  // Once something does refresh sources for the new target (e.g. the next
+  // stop's #allModules()), the stale actor must be gone and the new one used.
+  srv.onNext(
+    (r) => r.type === "sources",
+    () => ({
+      from: "thread2",
+      sources: [{ actor: "wasmActorNew", url: WASM_URL, introductionType: "wasm" }],
+    })
+  );
+  const sources = await session.wasmSources();
+  assert.ok(
+    sources.some((s) => s.actor === "wasmActorNew"),
+    "new actor should be registered after the uncontrolled swap"
+  );
+
+  session.close();
+  srv.close();
+});
+
 test("evalJS rejects immediately when session closes while waiting for evaluationResult", async () => {
   const srv = new FakeRdpServer();
   await srv.listen();

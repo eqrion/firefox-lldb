@@ -33,6 +33,12 @@ export const FIXTURES = {
     breakFunc: "sum_range",
     file: "math.cpp",
   },
+  self_redirect: {
+    pageDir: "test/fixtures/self_redirect",
+    fire: "runFactorial()",
+    breakFunc: "compute_factorial",
+    file: "math.cpp",
+  },
   oop: { pageDir: "test/fixtures/oop", fire: "run()", breakFunc: "area", file: "oop.cpp" },
   parser: {
     pageDir: "test/fixtures/parser",
@@ -180,11 +186,24 @@ export class Session {
   #handle;
   #staticServer;
   #sockets = new Set();
+  #rdpSession;
 
   constructor(client, handle, staticServer) {
     this.#client = client;
     this.#handle = handle;
     this.#staticServer = staticServer;
+  }
+
+  // Fire-and-forget JS evaluation on the page, for use *after* attach (the
+  // `--fire` CLI flag only covers the one-shot "first breakpoint arms" case).
+  // Mirrors firefox-lldb-server.ts's own --fire wiring: don't await the
+  // evaluate() call itself, since the expression may call into wasm and hit
+  // an armed breakpoint, in which case evaluate() never resolves — awaiting
+  // it here would just reproduce that hang one level up.
+  evaluate(js) {
+    if (!this.#rdpSession) throw new Error("evaluate() requires onSession wiring — not available");
+    const wrapped = `(function poll(){try{${js}}catch(e){setTimeout(poll,20);}})()`;
+    this.#rdpSession.evaluate(wrapped).catch(() => {});
   }
 
   async #bridgeTcp(port) {
@@ -237,6 +256,9 @@ export class Session {
         ]);
         const handle = await startPlatformServer(args, {
           wrapConnectPort: (port) => session.#bridgeTcp(port),
+          onSession: (rdpSession) => {
+            session.#rdpSession = rdpSession;
+          },
         });
         session.#handle = handle;
 
