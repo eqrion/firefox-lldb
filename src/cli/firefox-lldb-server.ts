@@ -335,6 +335,7 @@ export async function startPlatformServer(
         dispatch: (req: unknown) => debuggee.dispatch(req as never),
         port: 0,
         onInfo: (m: string) => logger.debug(`[component] ${m}`),
+        onTrace: (m: string) => logger.debug(`[gdbstub] ${m}`),
         verbose,
       });
       await gdbServer.ready;

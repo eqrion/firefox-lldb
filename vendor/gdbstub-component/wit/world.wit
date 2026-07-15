@@ -8,6 +8,11 @@ world debug-main {
   /// on port 1234") to the user. The host decides how to display this.
   import print-debugger-info: func(message: string);
 
+  /// Emit one already-formatted verbose/trace log line. The host decides
+  /// how to display this; it is expected to be interleaved live with the
+  /// host's own logging, so implementations should not buffer this.
+  import log-line: func(message: string);
+
   export debugger;
 }
 

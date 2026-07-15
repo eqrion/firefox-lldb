@@ -219,6 +219,7 @@ const CLASSES = {
 const imports = {
   ...new WASIShim().getImportObject(),
   "print-debugger-info": { default: (m) => parentPort.postMessage({ info: m }) },
+  "log-line": { default: (m) => parentPort.postMessage({ trace: m }) },
   "bytecodealliance:wasmtime/debuggee": CLASSES,
 };
 

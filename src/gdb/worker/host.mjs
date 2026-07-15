@@ -23,9 +23,10 @@ import {
  * @param {(req: {type:string,id:number,method:string,args:any[]}) => Promise<any>} opts.dispatch
  * @param {number} opts.port  TCP port the component listens on for LLDB.
  * @param {(msg: string) => void} [opts.onInfo]
+ * @param {(msg: string) => void} [opts.onTrace]
  * @param {boolean} [opts.verbose]
  */
-export function startGdbServer({ dispatch, port, onInfo, verbose }) {
+export function startGdbServer({ dispatch, port, onInfo, onTrace, verbose }) {
   const sab = new SharedArrayBuffer(16 + DATA_BYTES);
   const ctrl = new Int32Array(sab, 0, CTRL_WORDS);
   const data = new Uint8Array(sab, 16);
@@ -75,6 +76,8 @@ export function startGdbServer({ dispatch, port, onInfo, verbose }) {
         resolveReady();
         rejectReady = null; // prevent spurious rejection on normal worker exit
       }
+    } else if (m && m.trace) {
+      onTrace?.(m.trace);
     }
   });
   worker.on("error", (e) => {

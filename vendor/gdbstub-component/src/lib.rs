@@ -27,6 +27,29 @@ use wstd::{
     net::{TcpListener, TcpStream},
 };
 
+/// Forwards `log` records to the host via `log-line`, one call per record,
+/// so verbose output interleaves live with the host's own logging instead of
+/// going through WASI stderr (which Node's worker-thread stdio plumbing only
+/// flushes on exit, batching everything into one late burst).
+struct HostLogger;
+
+impl log::Log for HostLogger {
+    fn enabled(&self, _metadata: &log::Metadata) -> bool {
+        true
+    }
+
+    fn log(&self, record: &log::Record) {
+        api::log_line(&format!(
+            "{} {}: {}",
+            record.level(),
+            record.target(),
+            record.args()
+        ));
+    }
+
+    fn flush(&self) {}
+}
+
 /// Command-line options.
 #[derive(Parser)]
 struct Options {
@@ -44,9 +67,8 @@ impl api::exports::bytecodealliance::wasmtime::debugger::Guest for Component {
     fn debug(d: &api::Debuggee, args: Vec<String>) {
         let options = Options::parse_from(args);
         if options.verbose {
-            env_logger::Builder::new()
-                .filter_level(log::LevelFilter::Trace)
-                .init();
+            log::set_logger(&HostLogger).ok();
+            log::set_max_level(log::LevelFilter::Trace);
         }
         let mut debugger = Debugger {
             debuggee: d,
@@ -97,10 +119,7 @@ impl<'a> Debugger<'a> {
 
         let bound_addr = listener.local_addr().expect("Could not get local address");
 
-        api::print_debugger_info(&format!(
-            "Debugger listening on {}",
-            bound_addr,
-        ));
+        api::print_debugger_info(&format!("Debugger listening on {}", bound_addr,));
         api::print_debugger_info(&format!(
             "In LLDB, attach with: process connect --plugin wasm connect://{}",
             bound_addr,
@@ -255,10 +274,7 @@ impl<'a> Debugger<'a> {
                 )?)
             }
             api::Event::Breakpoint => {
-                trace!(
-                    "Event::Breakpoint; stepping_tid = {:?}",
-                    self.stepping_tid
-                );
+                trace!("Event::Breakpoint; stepping_tid = {:?}", self.stepping_tid);
                 let new_modules = self.update_on_stop();
                 // stopped_pc is the snapped address Firefox actually fired at.
                 let stopped_pc = self
@@ -394,7 +410,11 @@ struct Conn {
 
 impl Conn {
     fn new(conn: TcpStream) -> Self {
-        Conn { buf: vec![], conn, trace_in: vec![] }
+        Conn {
+            buf: vec![],
+            conn,
+            trace_in: vec![],
+        }
     }
 
     async fn flush(&mut self) -> anyhow::Result<()> {
@@ -422,9 +442,18 @@ impl Conn {
     fn log_inbound(&mut self, b: u8) {
         if self.trace_in.is_empty() {
             match b {
-                b'+' => { log::trace!("<< +"); return; }
-                b'-' => { log::trace!("<< -"); return; }
-                0x03 => { log::trace!("<< interrupt"); return; }
+                b'+' => {
+                    log::trace!("<< +");
+                    return;
+                }
+                b'-' => {
+                    log::trace!("<< -");
+                    return;
+                }
+                0x03 => {
+                    log::trace!("<< interrupt");
+                    return;
+                }
                 _ => {}
             }
         }

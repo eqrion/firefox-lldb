@@ -11,7 +11,6 @@ import type * as WasiCliTerminalStderr from './interfaces/wasi-cli-terminal-stde
 import type * as WasiCliTerminalStdin from './interfaces/wasi-cli-terminal-stdin.js'; // wasi:cli/terminal-stdin@0.2.12
 import type * as WasiCliTerminalStdout from './interfaces/wasi-cli-terminal-stdout.js'; // wasi:cli/terminal-stdout@0.2.12
 import type * as WasiClocksMonotonicClock from './interfaces/wasi-clocks-monotonic-clock.js'; // wasi:clocks/monotonic-clock@0.2.12
-import type * as WasiClocksWallClock from './interfaces/wasi-clocks-wall-clock.js'; // wasi:clocks/wall-clock@0.2.12
 import type * as WasiIoError from './interfaces/wasi-io-error.js'; // wasi:io/error@0.2.12
 import type * as WasiIoPoll from './interfaces/wasi-io-poll.js'; // wasi:io/poll@0.2.12
 import type * as WasiIoStreams from './interfaces/wasi-io-streams.js'; // wasi:io/streams@0.2.12
@@ -23,6 +22,9 @@ import type * as WasiSocketsTcp from './interfaces/wasi-sockets-tcp.js'; // wasi
 import type * as BytecodeallianceWasmtimeDebugger from './interfaces/bytecodealliance-wasmtime-debugger.js'; // bytecodealliance:wasmtime/debugger@44.0.0
 export interface ImportObject {
   'print-debugger-info': {
+    'default'(message: string): void,
+  },
+  'log-line': {
     'default'(message: string): void,
   },
   'bytecodealliance:wasmtime/debuggee@44.0.0': typeof BytecodeallianceWasmtimeDebuggee,
@@ -37,7 +39,6 @@ export interface ImportObject {
   'wasi:cli/terminal-stdin@0.2.12': typeof WasiCliTerminalStdin,
   'wasi:cli/terminal-stdout@0.2.12': typeof WasiCliTerminalStdout,
   'wasi:clocks/monotonic-clock@0.2.12': typeof WasiClocksMonotonicClock,
-  'wasi:clocks/wall-clock@0.2.12': typeof WasiClocksWallClock,
   'wasi:io/error@0.2.12': typeof WasiIoError,
   'wasi:io/poll@0.2.12': typeof WasiIoPoll,
   'wasi:io/streams@0.2.12': typeof WasiIoStreams,
