@@ -27,14 +27,43 @@
 
 import { RdpClient } from "./client.js";
 import type { RdpPacket } from "./transport.js";
+import {
+  REQUESTS,
+  EVENTS,
+  ROOT_ACTOR,
+  grip,
+  type ThreadConfig,
+  type TabInfo,
+  type RdpTabForm,
+  type ListTabsResponse,
+  type GetRootResponse,
+  type GetCharPrefResponse,
+  type GetWatcherResponse,
+  type GetThreadConfigurationActorResponse,
+  type SourceForm,
+  type SourcesResponse,
+  type SourceResponse,
+  type LongStringGrip,
+  type SubstringResponse,
+  type GetBreakpointPositionsResponse,
+  type FrameForm,
+  type FramesResponse,
+  type PauseEvent,
+  type StoppedEvent,
+  type EvaluateJSAsyncAck,
+  type ConsoleApiCallEvent,
+  type PageErrorEvent,
+} from "./protocol.js";
 import { EventEmitter } from "node:events";
 import { LAUNCH_TOKEN_PREF } from "./firefox.js";
+
+export { grip, type TabInfo, type SourceForm, type FrameForm, type PauseEvent, type StoppedEvent };
 
 // Thread configuration applied before navigation. observeWasm/observeAsmJS so the
 // page's wasm compiles with debug support; pauseOnExceptions with
 // ignoreCaughtExceptions so we break on uncaught wasm traps (surfacing as a
 // stop) without pausing on routine caught JS exceptions.
-const THREAD_CONFIG = {
+const THREAD_CONFIG: ThreadConfig = {
   observeWasm: true,
   observeAsmJS: true,
   pauseOnExceptions: true,
@@ -53,12 +82,6 @@ const DETACH_GRACE_MS = 250;
 // placeholder module body when the real bytecode can't be fetched, so callers
 // get no DWARF/debug info for that module instead of a hard failure.
 const EMPTY_WASM_MODULE = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
-
-export interface TabInfo {
-  actor: string;
-  url: string;
-  title: string;
-}
 
 /**
  * Confirm the Firefox listening on port:host is the one that produced
@@ -84,13 +107,15 @@ export async function verifyFirefoxLaunchToken(
       continue;
     }
     try {
-      const root = await client.request("root", { type: "getRoot" });
-      const actor = root.preferenceActor as string | undefined;
+      const root = (await client.request(ROOT_ACTOR, {
+        type: REQUESTS.getRoot,
+      })) as GetRootResponse;
+      const actor = root.preferenceActor;
       if (!actor) throw new Error("Firefox RDP root actor has no preferenceActor");
-      const { value } = await client.request(actor, {
-        type: "getCharPref",
+      const { value } = (await client.request(actor, {
+        type: REQUESTS.getCharPref,
         value: LAUNCH_TOKEN_PREF,
-      });
+      })) as GetCharPrefResponse;
       if (value !== expectedToken) {
         throw new Error(
           `RDP port ${port} is answering, but not from the Firefox instance this process just ` +
@@ -110,13 +135,17 @@ export async function verifyFirefoxLaunchToken(
 export async function listFirefoxTabs(port = 6080, host = "127.0.0.1"): Promise<TabInfo[]> {
   const client = await RdpClient.connect(port, host);
   try {
-    const { tabs } = (await client.request("root", { type: "listTabs" })) as {
-      tabs: { actor: string; url?: string; title?: string }[];
-    };
-    return (tabs ?? []).map((t) => ({ actor: t.actor, url: t.url ?? "", title: t.title ?? "" }));
+    const { tabs } = (await client.request(ROOT_ACTOR, {
+      type: REQUESTS.listTabs,
+    })) as ListTabsResponse;
+    return toTabInfos(tabs);
   } finally {
     client.close();
   }
+}
+
+function toTabInfos(tabs: RdpTabForm[] | undefined): TabInfo[] {
+  return (tabs ?? []).map((t) => ({ actor: t.actor, url: t.url ?? "", title: t.title ?? "" }));
 }
 
 /** Watch tab list changes, calling onTabs on every change. Resolves when the connection closes. */
@@ -127,17 +156,16 @@ export async function watchFirefoxTabs(
 ): Promise<void> {
   const client = await RdpClient.connect(port, host);
   client.on("error", () => {}); // prevent unhandled-error crashes on malformed data
-  client.registerEventType("tabListChanged");
 
   const query = async () => {
-    const { tabs } = (await client.request("root", { type: "listTabs" })) as {
-      tabs?: { actor: string; url?: string; title?: string }[];
-    };
-    onTabs((tabs ?? []).map((t) => ({ actor: t.actor, url: t.url ?? "", title: t.title ?? "" })));
+    const { tabs } = (await client.request(ROOT_ACTOR, {
+      type: REQUESTS.listTabs,
+    })) as ListTabsResponse;
+    onTabs(toTabInfos(tabs));
   };
 
   client.on("event", (p) => {
-    if (p.type === "tabListChanged" || p.type === "tabNavigated") void query();
+    if (p.type === EVENTS.tabListChanged || p.type === EVENTS.tabNavigated) void query();
   });
 
   await query();
@@ -166,7 +194,6 @@ export async function watchAndPrimeFirefoxTabs(
 ): Promise<void> {
   const client = await RdpClient.connect(port, host);
   client.on("error", () => {}); // prevent unhandled-error crashes on malformed data
-  client.registerEventType("tabListChanged");
 
   const primedActors = new Set<string>();
 
@@ -174,18 +201,20 @@ export async function watchAndPrimeFirefoxTabs(
     if (primedActors.has(tabActor)) return;
     primedActors.add(tabActor);
     try {
-      const watcherR = await client.request(tabActor, {
-        type: "getWatcher",
+      const watcherR = (await client.request(tabActor, {
+        type: REQUESTS.getWatcher,
         isServerTargetSwitchingEnabled: true,
-      });
-      const watcher = watcherR.actor as string | undefined;
+      })) as GetWatcherResponse;
+      const watcher = watcherR.actor;
       if (!watcher) throw new Error("no watcher actor");
-      const cfg = await client.request(watcher, { type: "getThreadConfigurationActor" });
-      const configActor = ((cfg.configuration as { actor?: string })?.actor ??
-        cfg.configuration) as string | undefined;
+      const cfg = (await client.request(watcher, {
+        type: REQUESTS.getThreadConfigurationActor,
+      })) as GetThreadConfigurationActorResponse;
+      const configActor =
+        typeof cfg.configuration === "string" ? cfg.configuration : cfg.configuration?.actor;
       if (!configActor) throw new Error("no thread config actor");
       await client.request(configActor, {
-        type: "updateConfiguration",
+        type: REQUESTS.updateConfiguration,
         configuration: THREAD_CONFIG,
       });
       // Do NOT call watchTargets here. With two connections both subscribed via
@@ -201,16 +230,17 @@ export async function watchAndPrimeFirefoxTabs(
   };
 
   const query = async () => {
-    const { tabs } = (await client.request("root", { type: "listTabs" })) as {
-      tabs?: { actor: string; url?: string; title?: string }[];
-    };
+    const { tabs } = (await client.request(ROOT_ACTOR, {
+      type: REQUESTS.listTabs,
+    })) as ListTabsResponse;
     const tabList = tabs ?? [];
-    onTabs(tabList.map((t) => ({ actor: t.actor, url: t.url ?? "", title: t.title ?? "" })));
+    onTabs(toTabInfos(tabList));
     for (const t of tabList) void primeTab(t.actor);
   };
 
   client.on("event", (p) => {
-    if (p.type === "tabListChanged" || p.type === "tabNavigated") void query().catch(() => {});
+    if (p.type === EVENTS.tabListChanged || p.type === EVENTS.tabNavigated)
+      void query().catch(() => {});
   });
 
   await query();
@@ -224,25 +254,6 @@ export async function watchAndPrimeFirefoxTabs(
   );
 }
 
-export interface SourceForm {
-  actor: string;
-  url: string;
-  introductionType?: string;
-}
-
-export interface FrameForm {
-  actor: string;
-  type: string; // "wasmcall" | "call" | "global" | ...
-  where?: { actor: string; line: number; column: number };
-  callee?: { name?: string; displayName?: string };
-  arguments?: unknown[];
-}
-
-export interface PauseEvent {
-  why?: { type?: string };
-  frame?: FrameForm;
-}
-
 interface ThreadInfo {
   tid: number;
   targetActor: string;
@@ -250,31 +261,6 @@ interface ThreadInfo {
   consoleActor: string;
   url: string;
   isTopLevel: boolean;
-}
-
-// All-stop event: one thread paused and all others have been interrupted.
-export interface StoppedEvent {
-  tid: number;
-  pausePacket: PauseEvent;
-}
-
-/** Render an RDP grip (console argument or binding value) as a display string. */
-export function grip(a: unknown): string {
-  if (a === null) return "null";
-  if (typeof a !== "object") return String(a);
-  const g = a as { type?: string; class?: string; initial?: string };
-  switch (g.type) {
-    case "undefined":
-    case "null":
-    case "Infinity":
-    case "-Infinity":
-    case "NaN":
-      return g.type;
-    case "longString":
-      return g.initial ?? "[longString]";
-    default:
-      return g.class ?? g.type ?? "[object]";
-  }
 }
 
 export class RdpWasmSession extends EventEmitter {
@@ -360,48 +346,53 @@ export class RdpWasmSession extends EventEmitter {
   }
 
   async #init(tabActor?: string): Promise<void> {
-    const { tabs } = (await this.#client.request("root", { type: "listTabs" })) as {
-      tabs: { actor: string; selected: boolean }[];
-    };
+    const { tabs } = (await this.#client.request(ROOT_ACTOR, {
+      type: REQUESTS.listTabs,
+    })) as ListTabsResponse & { tabs?: (RdpTabForm & { selected?: boolean })[] };
     const tab =
-      (tabActor ? tabs.find((t) => t.actor === tabActor) : undefined) ??
-      tabs.find((t) => t.selected) ??
-      tabs[0];
+      (tabActor ? tabs?.find((t) => t.actor === tabActor) : undefined) ??
+      tabs?.find((t) => t.selected) ??
+      tabs?.[0];
     if (!tab) throw new Error("no Firefox tab found (Firefox may still be starting)");
     this.#tabActor = tab.actor;
 
-    const watcherResp = await this.#client.request(this.#tabActor, {
-      type: "getWatcher",
+    const watcherResp = (await this.#client.request(this.#tabActor, {
+      type: REQUESTS.getWatcher,
       isServerTargetSwitchingEnabled: true,
-    });
-    const watcher = watcherResp.actor as string | undefined;
+    })) as GetWatcherResponse;
+    const watcher = watcherResp.actor;
     if (!watcher) throw new Error("Firefox did not return a watcher actor");
     this.#watcher = watcher;
 
-    const cfg = await this.#client.request(this.#watcher, {
-      type: "getThreadConfigurationActor",
-    });
-    const configActor = ((cfg.configuration as { actor?: string })?.actor ?? cfg.configuration) as
-      | string
-      | undefined;
+    const cfg = (await this.#client.request(this.#watcher, {
+      type: REQUESTS.getThreadConfigurationActor,
+    })) as GetThreadConfigurationActorResponse;
+    const configActor =
+      typeof cfg.configuration === "string" ? cfg.configuration : cfg.configuration?.actor;
     if (!configActor) throw new Error("Firefox did not return a thread config actor");
     await this.#client.request(configActor, {
-      type: "updateConfiguration",
+      type: REQUESTS.updateConfiguration,
       configuration: THREAD_CONFIG,
     });
 
     this.#client.on("event", (p) => this.#onEvent(p));
-    await this.#client.request(this.#watcher, { type: "watchTargets", targetType: "frame" });
-    await this.#client.request(this.#watcher, { type: "watchTargets", targetType: "worker" });
     await this.#client.request(this.#watcher, {
-      type: "watchResources",
+      type: REQUESTS.watchTargets,
+      targetType: "frame",
+    });
+    await this.#client.request(this.#watcher, {
+      type: REQUESTS.watchTargets,
+      targetType: "worker",
+    });
+    await this.#client.request(this.#watcher, {
+      type: REQUESTS.watchResources,
       resourceTypes: ["source"],
     });
   }
 
   #onEvent(p: RdpPacket): void {
     switch (p.type) {
-      case "target-available-form": {
+      case EVENTS.targetAvailableForm: {
         const target = p.target as {
           actor?: string;
           url?: string;
@@ -434,7 +425,7 @@ export class RdpWasmSession extends EventEmitter {
         this.emit("target", info);
         break;
       }
-      case "target-destroyed-form": {
+      case EVENTS.targetDestroyedForm: {
         // Unlike target-available-form, this payload carries the window/frame
         // target actor but not the thread actor — match on that instead, or a
         // destroyed process-swap target (e.g. Fission reloading the page into
@@ -468,7 +459,7 @@ export class RdpWasmSession extends EventEmitter {
         }
         break;
       }
-      case "paused": {
+      case EVENTS.paused: {
         const fromActor = p.from as string;
         const entry = [...this.#threads.entries()].find(([, t]) => t.threadActor === fromActor);
         if (!entry) break;
@@ -477,7 +468,7 @@ export class RdpWasmSession extends EventEmitter {
         this.emit(`paused:${tid}`, p as PauseEvent);
         break;
       }
-      case "resumed": {
+      case EVENTS.resumed: {
         const fromActor = p.from as string;
         const entry = [...this.#threads.entries()].find(([, t]) => t.threadActor === fromActor);
         if (entry) {
@@ -540,7 +531,11 @@ export class RdpWasmSession extends EventEmitter {
       this.on("close", onClose);
     });
     try {
-      await this.#client.request(this.#tabActor, { type: "navigateTo", url, waitForLoad: true });
+      await this.#client.request(this.#tabActor, {
+        type: REQUESTS.navigateTo,
+        url,
+        waitForLoad: true,
+      });
       await target;
     } catch (err) {
       cleanupRef.fn?.();
@@ -565,9 +560,9 @@ export class RdpWasmSession extends EventEmitter {
   /** Wasm sources from the given thread. */
   async wasmSourcesForTid(tid: number): Promise<SourceForm[]> {
     const { sources } = (await this.#client.request(this.#info(tid).threadActor, {
-      type: "sources",
-    })) as { sources?: unknown[] };
-    const wasm = ((sources ?? []) as SourceForm[]).filter((s) => s.introductionType === "wasm");
+      type: REQUESTS.sources,
+    })) as SourcesResponse;
+    const wasm = (sources ?? []).filter((s) => s.introductionType === "wasm");
     for (const s of wasm) this.#wasmActorByUrl.set(s.url, s.actor);
     return wasm;
   }
@@ -623,9 +618,9 @@ export class RdpWasmSession extends EventEmitter {
   /** Try to fetch raw wasm bytes from a source actor via RDP. */
   async #fetchWasmBytesFromActor(sourceActor: string): Promise<Uint8Array | null> {
     try {
-      const resp = (await this.#client.request(sourceActor, { type: "source" })) as {
-        source?: unknown;
-      };
+      const resp = (await this.#client.request(sourceActor, {
+        type: REQUESTS.source,
+      })) as SourceResponse;
       const src = resp.source;
       if (src instanceof Uint8Array) return src;
       if (ArrayBuffer.isView(src)) return new Uint8Array((src as ArrayBufferView).buffer);
@@ -643,20 +638,22 @@ export class RdpWasmSession extends EventEmitter {
   }
 
   async fetchSourceText(sourceActor: string): Promise<string> {
-    const resp = (await this.#client.request(sourceActor, { type: "source" })) as {
-      source?: unknown;
-    };
+    const resp = (await this.#client.request(sourceActor, {
+      type: REQUESTS.source,
+    })) as SourceResponse;
     const src = resp.source;
     if (typeof src === "string") return src;
     if (src && typeof src === "object") {
-      const grip = src as { type?: string; actor?: string; length?: number; initial?: string };
-      if (grip.type === "longString" && grip.actor && grip.length !== undefined) {
-        if (grip.initial !== undefined && grip.initial.length === grip.length) return grip.initial;
-        const sub = (await this.#client.request(grip.actor, {
-          type: "substring",
+      const longString = src as LongStringGrip;
+      if (longString.type === "longString" && longString.actor && longString.length !== undefined) {
+        if (longString.initial !== undefined && longString.initial.length === longString.length) {
+          return longString.initial;
+        }
+        const sub = (await this.#client.request(longString.actor, {
+          type: REQUESTS.substring,
           start: 0,
-          end: grip.length,
-        })) as { substring?: string };
+          end: longString.length,
+        })) as SubstringResponse;
         return sub.substring ?? "";
       }
     }
@@ -669,7 +666,7 @@ export class RdpWasmSession extends EventEmitter {
       [...this.#threads.values()].map((t) =>
         this.#client
           .request(t.threadActor, {
-            type: "setBreakpoint",
+            type: REQUESTS.setBreakpoint,
             location: { sourceUrl, line: loc.line, column: loc.column },
             options: {},
           })
@@ -684,7 +681,7 @@ export class RdpWasmSession extends EventEmitter {
       [...this.#threads.values()].map((t) =>
         this.#client
           .request(t.threadActor, {
-            type: "removeBreakpoint",
+            type: REQUESTS.removeBreakpoint,
             location: { sourceUrl, line: loc.line, column: loc.column },
           })
           .catch(() => {})
@@ -707,11 +704,11 @@ export class RdpWasmSession extends EventEmitter {
     if (!actor) return { line };
     let positions: Record<string, number[]>;
     try {
-      const resp = await this.#client.request(actor, {
-        type: "getBreakpointPositionsCompressed",
+      const resp = (await this.#client.request(actor, {
+        type: REQUESTS.getBreakpointPositionsCompressed,
         query: { start: { line: 0 }, end: { line: 1e7 } },
-      });
-      positions = (resp.positions ?? {}) as Record<string, number[]>;
+      })) as GetBreakpointPositionsResponse;
+      positions = resp.positions ?? {};
     } catch {
       return { line };
     }
@@ -731,11 +728,9 @@ export class RdpWasmSession extends EventEmitter {
     try {
       const info = this.#threads.get(tids[0])!;
       const { sources } = (await this.#client.request(info.threadActor, {
-        type: "sources",
-      })) as { sources?: unknown[] };
-      const js = ((sources ?? []) as SourceForm[]).filter(
-        (s) => s.url && s.introductionType !== "wasm"
-      );
+        type: REQUESTS.sources,
+      })) as SourcesResponse;
+      const js = (sources ?? []).filter((s) => s.url && s.introductionType !== "wasm");
       for (const s of js) this.#jsActorByUrl.set(s.url, s.actor);
       return js;
     } catch {
@@ -760,14 +755,12 @@ export class RdpWasmSession extends EventEmitter {
     });
     try {
       const req = this.#client.request(this.#info(tid).threadActor, {
-        type: "frames",
+        type: REQUESTS.frames,
         start,
         count,
       });
-      const { frames } = (await Promise.race([req, timeout, closeP])) as {
-        frames?: unknown;
-      };
-      return (frames ?? []) as FrameForm[];
+      const { frames } = (await Promise.race([req, timeout, closeP])) as FramesResponse;
+      return frames ?? [];
     } finally {
       clearTimeout(timer);
       if (onClose) this.off("close", onClose);
@@ -787,7 +780,7 @@ export class RdpWasmSession extends EventEmitter {
         (t) =>
           this.#client
             .request(t.threadActor, {
-              type: "setBreakpoint",
+              type: REQUESTS.setBreakpoint,
               location: { sourceUrl, line: snappedOffset, column: 1 },
               options: {},
             })
@@ -805,7 +798,7 @@ export class RdpWasmSession extends EventEmitter {
       [...this.#threads.values()].map((t) =>
         this.#client
           .request(t.threadActor, {
-            type: "removeBreakpoint",
+            type: REQUESTS.removeBreakpoint,
             location: { sourceUrl, line: snappedOffset, column: 1 },
           })
           .catch(() => {})
@@ -819,11 +812,11 @@ export class RdpWasmSession extends EventEmitter {
     let p = this.#breakpointPositionCache.get(sourceActor);
     if (!p) {
       p = (async () => {
-        const { positions } = await this.#client.request(sourceActor, {
-          type: "getBreakpointPositionsCompressed",
+        const { positions } = (await this.#client.request(sourceActor, {
+          type: REQUESTS.getBreakpointPositionsCompressed,
           query: { start: { line: 0 }, end: { line: 1e7 } },
-        });
-        return Object.keys((positions ?? {}) as Record<string, number[]>)
+        })) as GetBreakpointPositionsResponse;
+        return Object.keys(positions ?? {})
           .map(Number)
           .filter((n) => !Number.isNaN(n))
           .sort((a, b) => a - b);
@@ -851,7 +844,7 @@ export class RdpWasmSession extends EventEmitter {
         const snapped = await this.#snapOffset(sourceUrl, offset);
         await this.#client
           .request(info.threadActor, {
-            type: "setBreakpoint",
+            type: REQUESTS.setBreakpoint,
             location: { sourceUrl, line: snapped, column: 1 },
             options: {},
           })
@@ -872,7 +865,7 @@ export class RdpWasmSession extends EventEmitter {
     for (const tid of toResume) {
       const info = this.#threads.get(tid);
       if (!info) continue;
-      this.#client.send(info.threadActor, { type: "resume" });
+      this.#client.send(info.threadActor, { type: REQUESTS.resume });
     }
   }
 
@@ -887,7 +880,7 @@ export class RdpWasmSession extends EventEmitter {
    */
   stepOne(tid: number, limit: "step" | "next" = "step"): void {
     const info = this.#info(tid);
-    this.#client.send(info.threadActor, { type: "resume", resumeLimit: { type: limit } });
+    this.#client.send(info.threadActor, { type: REQUESTS.resume, resumeLimit: { type: limit } });
   }
 
   /**
@@ -968,7 +961,7 @@ export class RdpWasmSession extends EventEmitter {
           this.once(`paused:${tid}`, onPaused);
           this.once("close", onClose);
         });
-        this.#client.send(info.threadActor, { type: "interrupt", when: {} });
+        this.#client.send(info.threadActor, { type: REQUESTS.interrupt, when: {} });
         await paused;
         if (this.#pausedTids.has(tid)) this.#interruptedTids.add(tid);
       })
@@ -978,7 +971,7 @@ export class RdpWasmSession extends EventEmitter {
   }
 
   interrupt(tid: number): void {
-    this.#client.send(this.#info(tid).threadActor, { type: "interrupt", when: {} });
+    this.#client.send(this.#info(tid).threadActor, { type: REQUESTS.interrupt, when: {} });
   }
 
   /**
@@ -1006,7 +999,7 @@ export class RdpWasmSession extends EventEmitter {
     // Use the first thread with a console actor.
     const info = [...this.#threads.values()].find((t) => t.consoleActor);
     if (!info) throw new Error("no console actor");
-    await this.#client.request(info.consoleActor, { type: "evaluateJSAsync", text });
+    await this.#client.request(info.consoleActor, { type: REQUESTS.evaluateJSAsync, text });
   }
 
   get consoleActor(): string | null {
@@ -1017,14 +1010,12 @@ export class RdpWasmSession extends EventEmitter {
    * `onMessage`. Listeners are started on every current and future target's
    * console actor, so worker output is included too. */
   async streamConsole(onMessage: (text: string) => void): Promise<void> {
-    this.#client.registerEventType("consoleAPICall");
-    this.#client.registerEventType("pageError");
     this.#client.on("event", (p) => {
-      if (p.type === "consoleAPICall") {
-        const m = (p as { message?: { level?: string; arguments?: unknown[] } }).message;
+      if (p.type === EVENTS.consoleAPICall) {
+        const m = (p as ConsoleApiCallEvent).message;
         if (m) onMessage(`console.${m.level ?? "log"}: ${(m.arguments ?? []).map(grip).join(" ")}`);
-      } else if (p.type === "pageError") {
-        const e = (p as { pageError?: { errorMessage?: string; warning?: boolean } }).pageError;
+      } else if (p.type === EVENTS.pageError) {
+        const e = (p as PageErrorEvent).pageError;
         if (e && !e.warning) onMessage(`error: ${e.errorMessage ?? ""}`);
       }
     });
@@ -1033,7 +1024,7 @@ export class RdpWasmSession extends EventEmitter {
       if (!actor || started.has(actor)) return;
       started.add(actor);
       void this.#client
-        .request(actor, { type: "startListeners", listeners: ["ConsoleAPI", "PageError"] })
+        .request(actor, { type: REQUESTS.startListeners, listeners: ["ConsoleAPI", "PageError"] })
         .catch(() => {});
     };
     for (const t of this.#threads.values()) startFor(t.consoleActor);
@@ -1051,7 +1042,7 @@ export class RdpWasmSession extends EventEmitter {
 
   /** Fetch a frame's environment form (with the parent scope chain). */
   frameEnvironment(frameActor: string): Promise<RdpPacket> {
-    return this.#client.request(frameActor, { type: "getEnvironment" });
+    return this.#client.request(frameActor, { type: REQUESTS.getEnvironment });
   }
 
   /** Evaluate JS in a frame's scope and resolve with the result packet.
@@ -1077,13 +1068,12 @@ export class RdpWasmSession extends EventEmitter {
     const consoleActor =
       consoleActorOverride ?? [...this.#threads.values()].find((t) => t.consoleActor)?.consoleActor;
     if (!consoleActor) throw new Error("no console actor");
-    this.#client.registerEventType("evaluationResult");
-    const ack = await this.#client.request(consoleActor, {
-      type: "evaluateJSAsync",
+    const ack = (await this.#client.request(consoleActor, {
+      type: REQUESTS.evaluateJSAsync,
       text,
       ...(frameActor ? { frameActor } : {}),
-    });
-    const resultID = (ack as { resultID?: string }).resultID;
+    })) as EvaluateJSAsyncAck;
+    const resultID = ack.resultID;
     return new Promise<RdpPacket>((resolve, reject) => {
       let done = false;
       const cleanup = () => {
@@ -1098,7 +1088,10 @@ export class RdpWasmSession extends EventEmitter {
         reject(new Error("evaluateInFrame timeout"));
       }, 500);
       const onEvent = (p: RdpPacket) => {
-        if (p.type === "evaluationResult" && (p as { resultID?: string }).resultID === resultID) {
+        if (
+          p.type === EVENTS.evaluationResult &&
+          (p as { resultID?: string }).resultID === resultID
+        ) {
           cleanup();
           resolve(p);
         }

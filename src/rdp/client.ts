@@ -8,38 +8,24 @@
 // RDP rule: each actor processes requests serially, so a non-event packet from
 // an actor is the reply to that actor's oldest outstanding request. Events are
 // packets whose `type` is a known unsolicited notification (e.g. the watcher's
-// "target-available-form", the thread's "paused"). Callers register event types
-// they care about; everything else from an actor is treated as a reply.
+// "target-available-form", the thread's "paused") — see EVENTS in protocol.ts
+// for the full catalog. Everything else from an actor is treated as a reply.
 //
 // Important: resume and interrupt are sent as fire-and-forget (send(), not
-// request()) because Firefox responds to them with "resumed"/"paused" events
-// (in EVENT_TYPES), not with a pending-queue reply. Using request() for these
-// would leave stale entries in the pending queue that corrupt subsequent replies.
+// request()) because Firefox responds to them with "resumed"/"paused" events,
+// not with a pending-queue reply. Using request() for these would leave stale
+// entries in the pending queue that corrupt subsequent replies.
 
 import { RdpTransport, type RdpPacket } from "./transport.js";
+import { EVENTS, ROOT_ACTOR } from "./protocol.js";
 import { EventEmitter } from "node:events";
 
-// Unsolicited notification types (never treated as request replies).
-const EVENT_TYPES = new Set([
-  "target-available-form",
-  "target-destroyed-form",
-  "resource-available-form",
-  "resource-updated-form",
-  "resource-destroyed-form",
-  "tabNavigated",
-  "tabDetached",
-  "frameUpdate",
-  "paused",
-  "resumed",
-  "newSource",
-  "willNavigate",
-  "networkEvent",
-  // Firefox sends {type:"interrupt"} as an ACK when a thread receives interrupt
-  // while already paused or in a transition. Without this entry the packet is
-  // routed to the per-actor FIFO pending queue, corrupting the next in-flight
-  // request (e.g. wasmSources / frames) with garbage data and causing hangs.
-  "interrupt",
-]);
+// Unsolicited notification types (never treated as request replies). Firefox
+// sends {type:"interrupt"} as an ACK when a thread receives interrupt while
+// already paused or in a transition; without it in this set the packet is
+// routed to the per-actor FIFO pending queue, corrupting the next in-flight
+// request (e.g. wasmSources / frames) with garbage data and causing hangs.
+const EVENT_TYPES = new Set<string>(Object.values(EVENTS));
 
 interface Pending {
   resolve: (p: RdpPacket) => void;
@@ -65,7 +51,7 @@ export class RdpClient extends EventEmitter {
     transport.on("packet", (packet: RdpPacket) => {
       const from = packet.from;
       if (!from) return;
-      if (from === "root" && !gotRoot) {
+      if (from === ROOT_ACTOR && !gotRoot) {
         gotRoot = true;
         resolveReady(packet);
         return;
@@ -123,10 +109,6 @@ export class RdpClient extends EventEmitter {
    */
   send(to: string, packet: Record<string, unknown>): void {
     this.#transport.send({ to, ...packet });
-  }
-
-  registerEventType(type: string): void {
-    EVENT_TYPES.add(type);
   }
 
   close(): void {
