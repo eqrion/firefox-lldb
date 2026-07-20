@@ -2,7 +2,8 @@
 
 Bridge that lets upstream LLDB debug WebAssembly running inside Firefox, via Firefox's Remote Debugging Protocol (RDP). Speaks RSP (GDB remote serial protocol) to LLDB on one side and RDP to Firefox on the other.
 
-Read INTERNALS.md for a summary of the architecture.
+Read INTERNALS.md for a summary of the architecture, and docs/RDP-USAGE.md for
+the full Firefox RDP surface this tool depends on.
 
 ## Layout
 

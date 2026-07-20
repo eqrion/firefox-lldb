@@ -192,6 +192,11 @@ section is mapped at `(module_id << 32)`.
 
 ### Firefox-side RDP surface
 
+See [`docs/RDP-USAGE.md`](docs/RDP-USAGE.md) for the full RDP surface (actors,
+requests, events) generated from [`src/rdp/protocol.ts`](src/rdp/protocol.ts),
+the single source of truth. The table below maps each debugger need to the
+part of that surface serving it.
+
 | Need               | RDP source                                                                                                                                                                                                                                |
 | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | wasm module list   | `thread.sources` (filter `introductionType === "wasm"`)                                                                                                                                                                                   |
