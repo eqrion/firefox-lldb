@@ -343,6 +343,14 @@ export async function launchFirefox(opts: {
   const logDir = firefoxLogDir();
   const stdio: StdioOptions = logDir ? ["ignore", "pipe", "pipe"] : "ignore";
   const child: ChildProcess = spawn(binary, args, { stdio, detached: true });
+  // Some Firefox launchers (notably macOS Nightly) hand off to the browser
+  // process and exit almost immediately. Subscribe before doing any other
+  // work with the child: otherwise it can exit between spawn() and the
+  // listener below, leaving close() waiting forever for an event it missed.
+  const exited = new Promise<void>((resolve) => {
+    if (child.exitCode !== null) resolve();
+    else child.once("exit", () => resolve());
+  });
   if (logDir) {
     const out = createWriteStream(join(logDir, `firefox-${launchToken}.log`));
     child.stdout?.pipe(out);
@@ -353,8 +361,6 @@ export async function launchFirefox(opts: {
   if (!(opts.headless ?? false) && child.pid !== undefined) {
     bringToForeground(child.pid);
   }
-
-  const exited = new Promise<void>((resolve) => child.on("exit", () => resolve()));
 
   return {
     profileDir,

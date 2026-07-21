@@ -37,6 +37,10 @@ Requires Firefox installed in a standard location (see `findFirefoxBinary` in
 
 - `launch_port_conflict.test.mjs` — launch refuses when another process already holds the RDP port.
 
+### Channel launch
+
+- `launch_nightly.test.mjs` — when Firefox Nightly is installed, `--nightly` launches it, verifies its RDP endpoint, and cleans it up without hanging.
+
 ### Core (call stack, locals, control flow)
 
 - `attach.test.mjs` — attach, breakpoint, DWARF symbols, call stack with JS frames, locals (factorial).
