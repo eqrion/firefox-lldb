@@ -254,7 +254,7 @@ export async function watchAndPrimeFirefoxTabs(
   );
 }
 
-interface ThreadInfo {
+export interface ThreadInfo {
   tid: number;
   targetActor: string;
   threadActor: string;
@@ -279,6 +279,10 @@ export class RdpWasmSession extends EventEmitter {
   #interruptedTids = new Set<number>();
   // tids that are currently paused (breakpoint, step, or interrupt)
   #pausedTids = new Set<number>();
+  // Subset of #pausedTids that paused with no armAllStop listener catching
+  // it (see the EVENTS.paused case). Cleared once #allStop reports a stop
+  // that accounts for them, or the tid resumes.
+  #unwitnessedPausedTids = new Set<number>();
 
   // breakpoints buffered so new workers inherit them
   #breakpoints = new Map<string, Set<number>>(); // sourceUrl -> set of offsets
@@ -290,6 +294,17 @@ export class RdpWasmSession extends EventEmitter {
   // Pending "is this top-level destroy a real close?" checks (see DETACH_GRACE_MS).
   #pendingDetachChecks = new Set<ReturnType<typeof setTimeout>>();
 
+  // tid to hand to the next top-level target, reused from the one a
+  // navigation just destroyed rather than minted fresh. LLDB has no RSP
+  // mechanism to learn "tid N is gone, thread state referencing it is
+  // stale" (gdbstub has no thread-exited/exec stop reason) — its own
+  // breakpoint step-off dance (remove bp, single-step the thread it
+  // believes is current, re-add) keeps addressing the old tid regardless of
+  // what we tell it. Keeping the number stable across the swap means that
+  // stale-looking reference is actually still valid, pointed at the new
+  // page's thread.
+  #pendingTopLevelTid: number | undefined;
+
   // Source actors are scoped to an RDP connection and become invalid whenever
   // the top-level target goes away — whether that's a navigate() we drove or
   // one the page triggered on its own (reload, self-redirect, Fission
@@ -300,6 +315,17 @@ export class RdpWasmSession extends EventEmitter {
     this.#jsActorByUrl.clear();
     this.#wasmActorByUrl.clear();
     this.#breakpointPositionCache.clear();
+  }
+
+  // Fires whenever the top-level target is gone — a navigate() we drove, or
+  // the page navigating on its own (reload, link click, location assignment).
+  // Distinct from "detached": that one is grace-gated and means the tab is
+  // really closed, while this fires unconditionally so a live LLDB
+  // attachment (RdpDebuggee) can re-sync (refetch bytecode, force a re-sync
+  // stop) even when a Fission process-swap replacement is on its way.
+  #onTopLevelGone(info?: ThreadInfo): void {
+    this.#invalidateActorCaches();
+    this.emit("navigated", info);
   }
 
   private constructor(client: RdpClient) {
@@ -326,6 +352,19 @@ export class RdpWasmSession extends EventEmitter {
   /** True when at least one thread is paused (breakpoint, step, or interrupt). */
   paused(): boolean {
     return this.#pausedTids.size > 0;
+  }
+
+  /**
+   * True when a thread paused with no armAllStop listener catching it — e.g.
+   * a newly-navigated page's buffered breakpoint fires before the next
+   * Debuggee.continue arms the all-stop machinery. Resuming it blindly
+   * (resumeAll()) would run straight past that pause instead of reporting
+   * it. Distinct from paused(): a tid left in #pausedTids by a normal,
+   * already-witnessed stop (e.g. primeStop's initial interrupt) is not one
+   * of these, and remains safe to resume.
+   */
+  hasUnwitnessedPause(): boolean {
+    return this.#unwitnessedPausedTids.size > 0;
   }
 
   listTids(): number[] {
@@ -408,14 +447,21 @@ export class RdpWasmSession extends EventEmitter {
         const existing = [...this.#threads.values()].find((t) => t.targetActor === targetActor);
         if (existing) break;
 
-        const tid = this.#nextTid++;
+        const isTopLevel = target.isTopLevelTarget ?? false;
+        let tid: number;
+        if (isTopLevel && this.#pendingTopLevelTid !== undefined) {
+          tid = this.#pendingTopLevelTid;
+          this.#pendingTopLevelTid = undefined;
+        } else {
+          tid = this.#nextTid++;
+        }
         const info: ThreadInfo = {
           tid,
           targetActor,
           threadActor,
           consoleActor: target.consoleActor ?? "",
           url: target.url ?? "",
-          isTopLevel: target.isTopLevelTarget ?? false,
+          isTopLevel,
         };
         this.#threads.set(tid, info);
 
@@ -448,11 +494,18 @@ export class RdpWasmSession extends EventEmitter {
             // Whether this was a navigate() we drove or the page navigating
             // on its own, every source actor scoped to the old top-level
             // target is now dead.
-            this.#invalidateActorCaches();
+            this.#onTopLevelGone(info);
+            // Offer this tid to whatever top-level target replaces this one
+            // (see #pendingTopLevelTid). If nothing does — a genuine close —
+            // the timeout below clears it; nothing will ever ask for it again.
+            this.#pendingTopLevelTid = tid;
             const timer = setTimeout(() => {
               this.#pendingDetachChecks.delete(timer);
               const hasTopLevel = [...this.#threads.values()].some((t) => t.isTopLevel);
-              if (!hasTopLevel) this.emit("detached", info);
+              if (!hasTopLevel) {
+                this.#pendingTopLevelTid = undefined;
+                this.emit("detached", info);
+              }
             }, DETACH_GRACE_MS);
             this.#pendingDetachChecks.add(timer);
           }
@@ -465,6 +518,13 @@ export class RdpWasmSession extends EventEmitter {
         if (!entry) break;
         const [tid] = entry;
         this.#pausedTids.add(tid);
+        // No one is listening for this specific pause right now (armAllStop
+        // isn't currently coordinating it) — e.g. a newly-navigated page's
+        // buffered breakpoint fires before the next Debuggee.continue arms
+        // the all-stop machinery. Remember it as unwitnessed so the next
+        // continue adopts it instead of blindly resuming past it (see
+        // hasUnwitnessedPause() and its caller in rdp-debuggee.ts).
+        if (this.listenerCount(`paused:${tid}`) === 0) this.#unwitnessedPausedTids.add(tid);
         this.emit(`paused:${tid}`, p as PauseEvent);
         break;
       }
@@ -474,6 +534,7 @@ export class RdpWasmSession extends EventEmitter {
         if (entry) {
           const [tid] = entry;
           this.#pausedTids.delete(tid);
+          this.#unwitnessedPausedTids.delete(tid);
         }
         break;
       }
@@ -488,18 +549,25 @@ export class RdpWasmSession extends EventEmitter {
     // targets with a different URL, a same-URL reload leaves the old target
     // in #threads, so target-destroyed-form for it would emit "detached" and
     // incorrectly trigger a process-detach in the consumer.
+    let removed: ThreadInfo | undefined;
     for (const [tid, t] of this.#threads) {
       if (t.isTopLevel) {
         this.#threads.delete(tid);
         this.#pausedTids.delete(tid);
         this.#interruptedTids.delete(tid);
+        removed = t;
+        // Firefox's own target-destroyed-form for this target won't find it
+        // in #threads anymore (we just removed it above) to offer this tid
+        // to its replacement itself — do it here instead.
+        this.#pendingTopLevelTid = tid;
       }
     }
     // Clear source-actor caches — actors are scoped to an RDP connection and
     // become invalid after navigation. Stale actors cause breakpoint-position
     // queries (#snapJsLocation, wasmBreakpointOffsets) to fail silently and
-    // fall back to un-snapped positions, which Firefox may ignore.
-    this.#invalidateActorCaches();
+    // fall back to un-snapped positions, which Firefox may ignore. Also lets
+    // a live LLDB attachment know to re-sync.
+    this.#onTopLevelGone(removed);
 
     // Keep a reference to the cleanup function so we can call it if navigateTo
     // throws before we reach `await target` (otherwise the listeners leak).
@@ -592,7 +660,11 @@ export class RdpWasmSession extends EventEmitter {
   async fetchModuleBytes(url: string): Promise<Uint8Array> {
     if (url.startsWith("http://") || url.startsWith("https://")) {
       try {
-        return new Uint8Array(await (await fetch(url)).arrayBuffer());
+        // Marks this as the debugger's own out-of-band fetch (distinct from
+        // the browser's page-load request for the same URL) — lets a server
+        // log, or a test harness, tell the two apart.
+        const resp = await fetch(url, { headers: { "X-Firefox-Lldb": "module-fetch" } });
+        return new Uint8Array(await resp.arrayBuffer());
       } catch (e) {
         // A network failure here (e.g. a self-signed dev cert Node's fetch
         // doesn't trust) must not propagate: Module.bytecode's WIT signature
@@ -839,6 +911,27 @@ export class RdpWasmSession extends EventEmitter {
 
   /** Apply all buffered breakpoints to a newly-arrived thread. */
   async #applyBreakpoints(info: ThreadInfo): Promise<void> {
+    // A brand new target (post-navigation, or a fresh worker) hasn't
+    // necessarily discovered its wasm sources yet — the page's script needs
+    // a moment to load and instantiate the module. #wasmActorByUrl starts
+    // out empty for it, and #snapOffset falls back to the un-snapped offset
+    // when it can't find an actor; Firefox silently never fires a wasm
+    // breakpoint set at a position that isn't a valid instruction boundary,
+    // so every buffered breakpoint would silently stop working on the new
+    // target. Poll briefly for the sources to appear before snapping.
+    if (this.#breakpoints.size > 0) {
+      for (let i = 0; i < 10; i++) {
+        // Cap each attempt: if the actor never replies (a stale/dead thread,
+        // or simply no wasm on this target), this poll must still progress
+        // and eventually give up rather than hang on the very first await.
+        const sources = await Promise.race([
+          this.wasmSourcesForTid(info.tid).catch((): SourceForm[] => []),
+          new Promise<SourceForm[]>((resolve) => setTimeout(() => resolve([]), 200)),
+        ]);
+        if (sources.length > 0) break;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    }
     for (const [sourceUrl, offsets] of this.#breakpoints) {
       for (const offset of offsets) {
         const snapped = await this.#snapOffset(sourceUrl, offset);
@@ -967,6 +1060,11 @@ export class RdpWasmSession extends EventEmitter {
       })
     );
 
+    // Every currently-paused tid is now accounted for by this reported stop
+    // (the stoppedTid, plus whichever others we just interrupted), whether
+    // this ran via armAllStop's normal flow or adoptPausedState() surfacing
+    // one that was left unwitnessed.
+    this.#unwitnessedPausedTids.clear();
     this.emit("stopped", { tid: stoppedTid, pausePacket: packet } as StoppedEvent);
   }
 

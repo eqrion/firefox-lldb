@@ -33,9 +33,30 @@
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
 import { tmpdir } from "node:os";
-import type { RdpWasmSession, FrameForm, StoppedEvent, PauseEvent } from "../rdp/session.js";
+import type {
+  RdpWasmSession,
+  FrameForm,
+  StoppedEvent,
+  PauseEvent,
+  ThreadInfo,
+} from "../rdp/session.js";
 import { buildSyntheticModule } from "./synthetic-module.js";
 import { inspect as inspectWasm, convert as convertSourceMap } from "../sourcemap/converter.js";
+
+// After a navigation swaps in a new top-level target while LLDB is waiting on
+// a stop (a Debuggee.continue is armed), give a buffered breakpoint on the
+// new page this long to fire naturally through the normal all-stop path
+// before forcing a re-sync stop. Same order of magnitude as session.ts's
+// DETACH_GRACE_MS, but this is a distinct concern: that one decides whether a
+// target swap was a real close, this one decides whether to force a stop so
+// the gdbstub component's update_on_stop -> all_modules re-sync ever runs.
+const RESYNC_GRACE_MS = 250;
+
+// A minimal valid wasm binary (magic + version only, no sections). Served for
+// a Module ref whose #moduleById entry a navigation already cleared — no
+// DWARF for it, but a valid module body instead of an uncaught throw across
+// a WIT call with no error case (mirrors session.ts's EMPTY_WASM_MODULE).
+const EMPTY_WASM_MODULE = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
 
 function urlBasename(url: string): string {
   try {
@@ -124,25 +145,57 @@ export class RdpDebuggee {
   // after a breakpoint is armed, so the engine pauses inside wasm).
   #onFirstContinue: (() => void) | null = null;
 
+  // Pending "force a re-sync stop if nothing paused naturally" check, armed
+  // when a new top-level target arrives while a continue is outstanding (see
+  // #scheduleResyncCheck).
+  #resyncTimer: ReturnType<typeof setTimeout> | null = null;
+  // Set just before #scheduleResyncCheck forces a fresh RDP interrupt to
+  // manufacture a stop. Firefox reports that pause's why.type as
+  // "interrupted", which the component's Event::Interrupted arm treats as
+  // spurious and just resumes from (it's meant for a real client Ctrl-C,
+  // which this isn't). Override the tag to "breakpoint" for this one stop so
+  // it lands in the arm that actually consults update_on_stop()'s changed
+  // modules and reports MultiThreadStopReason::Library.
+  #forcingResyncStop = false;
+
   constructor(session: RdpWasmSession, opts?: { onFirstContinue?: () => void }) {
     this.#session = session;
     this.#onFirstContinue = opts?.onFirstContinue ?? null;
 
     session.on("stopped", (e: StoppedEvent) => {
+      this.#clearResyncTimer();
       if (!this.#resolveStopped) return;
-      this.#lastPauseReason =
-        (e.pausePacket as { why?: { type?: string } })?.why?.type ?? "breakpoint";
+      this.#lastPauseReason = this.#forcingResyncStop
+        ? "breakpoint"
+        : ((e.pausePacket as { why?: { type?: string } })?.why?.type ?? "breakpoint");
+      this.#forcingResyncStop = false;
       this.#resolveStopped(e);
       this.#resolveStopped = null;
       this.#rejectStopped = null;
     });
 
     session.on("close", () => {
+      this.#clearResyncTimer();
       // Unblock any pending EventFuture.finish / primeStop so the gdbstub
       // worker thread doesn't hang when the RDP connection drops mid-session.
       this.#rejectStopped?.(new Error("session closed"));
       this.#resolveStopped = null;
       this.#rejectStopped = null;
+    });
+
+    // A navigation (driven or page-triggered) invalidates every per-URL cache
+    // below — the actors/bodies they hold belonged to the destroyed target.
+    session.on("navigated", () => this.#onNavigated());
+
+    // Give the new page a chance to pause on its own (a buffered breakpoint
+    // firing), then force it paused if it doesn't — see #scheduleResyncCheck.
+    // This must not happen synchronously/immediately: a driven navigate()
+    // is still awaiting Firefox's own navigateTo{waitForLoad:true} reply at
+    // this point, which only arrives once the new page's `load` event fires
+    // — interrupting the thread right now would freeze it before `load` can
+    // ever fire, deadlocking that await forever.
+    session.on("target", (info: ThreadInfo) => {
+      if (info.isTopLevel) this.#scheduleResyncCheck(info.tid);
     });
 
     const tmpDir = this.#tmpDir;
@@ -176,17 +229,41 @@ export class RdpDebuggee {
         // #resolveStopped is null when a pending interrupt was already consumed.
         // In that case the stop is immediate — skip the resume so Firefox stays paused.
         if (this.#resolveStopped !== null) {
-          this.#session.armAllStop();
-          this.#session.resumeAll().catch(() => {});
-          const cb = this.#onFirstContinue;
-          this.#onFirstContinue = null;
-          cb?.();
+          if (this.#session.hasUnwitnessedPause()) {
+            // A pause already happened with nothing listening for it — e.g. a
+            // buffered breakpoint fired on a newly-navigated page before this
+            // continue armed the all-stop machinery (armAllStop's paused:<tid>
+            // listeners weren't registered yet). resumeAll() would resume
+            // straight past that paused thread and nothing would stop again.
+            // Surface the pause we already have instead of losing it. A tid
+            // merely left over from an already-reported stop (e.g. primeStop's
+            // initial interrupt) isn't one of these and takes the normal path.
+            void this.#session.adoptPausedState();
+          } else {
+            this.#session.armAllStop();
+            this.#session.resumeAll().catch(() => {});
+            const cb = this.#onFirstContinue;
+            this.#onFirstContinue = null;
+            cb?.();
+          }
         }
         return this.#eventFutureRef();
       }
       case "Debuggee.singleStep": {
         const tid = args[0] as number;
         this.#armStopped();
+        // LLDB's own "step off a stale breakpoint before resuming" dance —
+        // triggered by its cached, pre-navigation view of where a
+        // breakpoint site is — runs as a singleStep BEFORE it ever issues a
+        // real continue. If a pause already happened with nothing
+        // listening (e.g. a buffered breakpoint refiring on a
+        // newly-navigated page, won before this step-off dance even
+        // started), stepping now would silently resume straight past it.
+        // Surface it instead, same as the Debuggee.continue check.
+        if (this.#session.hasUnwitnessedPause()) {
+          void this.#session.adoptPausedState();
+          return this.#eventFutureRef();
+        }
         this.#session.armAllStop();
         // A JS (`call`) innermost frame is JIT-compiled: RDP "step" advances one
         // wasm instruction, which jumps an arbitrary number of JS source lines.
@@ -212,33 +289,53 @@ export class RdpDebuggee {
       case "Module.uniqueId":
         return BigInt(id);
       case "Module.name": {
-        const { url } = this.#moduleById.get(id)!;
-        return urlBasename(url);
+        // Defensive: a navigation can clear #moduleById out from under a
+        // Module ref the component is still holding (its own addr_space
+        // hasn't pruned it yet — that only happens on the next stop's
+        // update_on_stop). Name is display-only; degrade rather than crash
+        // the whole gdbstub worker on a WIT call with no error case.
+        const entry = this.#moduleById.get(id);
+        if (!entry) return "<stale module>";
+        // Suffix with the module id so a same-URL reload or a navigation
+        // back to a previously-seen URL gets a name LLDB has never seen
+        // before. LLDB's own library-list diff appears to key off this
+        // name string, not the reported address: reusing a bare basename
+        // ("math.wasm") across two different module incarnations reads to
+        // it as "the same library, still loaded, nothing to do", so it
+        // never re-resolves breakpoints bound to the one it already knew
+        // about — confirmed by tracing real RSP traffic (its own Z0
+        // rebind-attempt only ever retried the stale, pre-navigation
+        // address once the name repeated, but correctly picked the new
+        // one once the name differed).
+        return `${urlBasename(entry.url)}#${id}`;
       }
       case "Module.bytecode": {
-        const { url } = this.#moduleById.get(id)!;
-        const syn = this.#syntheticByUrl.get(url);
-        return syn ? syn.bytecode : this.#wasmBytecode(url);
+        const entry = this.#moduleById.get(id);
+        if (!entry) return EMPTY_WASM_MODULE;
+        const syn = this.#syntheticByUrl.get(entry.url);
+        return syn ? syn.bytecode : this.#wasmBytecode(entry.url);
       }
       case "Module.addBreakpoint": {
-        const { url } = this.#moduleById.get(id)!;
-        const syn = this.#syntheticByUrl.get(url);
+        const entry = this.#moduleById.get(id);
+        if (!entry) return null;
+        const syn = this.#syntheticByUrl.get(entry.url);
         const pc = args[0] as number;
         if (syn) {
-          await this.#session.setJsBreakpoint(url, pc - syn.codeOffset);
+          await this.#session.setJsBreakpoint(entry.url, pc - syn.codeOffset);
         } else {
-          await this.#session.setWasmBreakpoint(url, pc);
+          await this.#session.setWasmBreakpoint(entry.url, pc);
         }
         return null;
       }
       case "Module.removeBreakpoint": {
-        const { url } = this.#moduleById.get(id)!;
-        const syn = this.#syntheticByUrl.get(url);
+        const entry = this.#moduleById.get(id);
+        if (!entry) return null;
+        const syn = this.#syntheticByUrl.get(entry.url);
         const pc = args[0] as number;
         if (syn) {
-          await this.#session.removeJsBreakpoint(url, pc - syn.codeOffset);
+          await this.#session.removeJsBreakpoint(entry.url, pc - syn.codeOffset);
         } else {
-          await this.#session.removeWasmBreakpoint(url, pc);
+          await this.#session.removeWasmBreakpoint(entry.url, pc);
         }
         return null;
       }
@@ -699,6 +796,79 @@ export class RdpDebuggee {
       this.#resolveStopped = resolve;
       this.#rejectStopped = reject;
     });
+  }
+
+  #clearResyncTimer(): void {
+    if (this.#resyncTimer) {
+      clearTimeout(this.#resyncTimer);
+      this.#resyncTimer = null;
+    }
+  }
+
+  /**
+   * Called whenever a new top-level target arrives while a continue is
+   * outstanding (#resolveStopped set — the process was running, or
+   * continue() raced the navigation). LLDB is blocked in EventFuture.finish
+   * waiting for a "stopped" that only a real RDP pause produces — which is
+   * also the only point update_on_stop() -> all_modules() runs on the
+   * component side: without one, a navigation to a page whose buffered
+   * breakpoint never fires leaves LLDB attached to a stale module/thread
+   * model with no way to learn otherwise.
+   *
+   * Give the new page a grace period to pause on its own — a buffered
+   * breakpoint firing through the normal all-stop path (armAllStop's
+   * onNewTarget listener) — before forcing it paused.
+   *
+   * Deliberately does NOT also force a pause when nothing is outstanding
+   * (LLDB believes the debuggee is already stopped from before the swap,
+   * gdbstub having no way to tell it otherwise): interrupting at an
+   * arbitrary point can catch the new page between JS frames entirely
+   * (idle, mid-microtask-checkpoint), and Firefox's own thread.js resume()
+   * throws a bare TypeError ("frame is null") trying to single-step a
+   * thread paused with no current frame — which is exactly what LLDB's own
+   * step-off-a-stale-breakpoint dance tries to do on its next continue.
+   * Left running instead, that dance's resume attempt fails with a
+   * harmless, recoverable "wrongState" (thread not paused) and LLDB just
+   * issues a normal continue afterward — worse information, but a thread
+   * that's actually running, with an actual frame once it does hit
+   * something, beats a "paused" thread Firefox can't safely single-step.
+   */
+  #scheduleResyncCheck(tid: number): void {
+    this.#clearResyncTimer();
+    this.#resyncTimer = setTimeout(() => {
+      this.#resyncTimer = null;
+      if (this.#resolveStopped === null) return; // LLDB isn't waiting on anything
+      const live = this.#session.listTids();
+      if (live.length === 0) return; // nothing left to interrupt — a genuine close, not a swap
+      if (this.#session.hasUnwitnessedPause()) {
+        // Adopts a pause that already happened (e.g. the new page's
+        // breakpoint fired but nothing was listening yet) — its pausePacket
+        // is synthetic and empty, so the "stopped" listener already
+        // defaults its tag to "breakpoint"; no override needed. If instead
+        // something IS paused but was properly witnessed (armAllStop's
+        // onNewTarget already has a listener on it, #allStop is just still
+        // running its interrupt-others phase), leave it alone rather than
+        // racing a second #allStop against the one already in flight.
+        void this.#session.adoptPausedState();
+        return;
+      }
+      this.#forcingResyncStop = true;
+      this.#session.interrupt(live.includes(tid) ? tid : live[0]);
+    }, RESYNC_GRACE_MS);
+  }
+
+  // A navigation invalidates every actor/body these caches hold — they were
+  // scoped to the destroyed top-level target. Clearing #moduleByUrl too (not
+  // just the bytecode) means a same-URL reload gets a fresh module id: the
+  // component treats it as a library unload+reload rather than serving the
+  // old module's cached content, which is what makes a changed-body reload
+  // (and, via the same path, a plain cross-page navigation) pick up correctly.
+  #onNavigated(): void {
+    this.#bytecodeByUrl.clear();
+    this.#syntheticByUrl.clear();
+    this.#sourceActorToUrl.clear();
+    this.#moduleByUrl.clear();
+    this.#moduleById.clear();
   }
 
   #eventFutureRef(): Ref {
