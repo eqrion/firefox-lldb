@@ -9,6 +9,13 @@ jobs:
   e2e:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
+    env:
+      # Firefox 153 deadlocks Emscripten pthread workers after an RDP
+      # interrupt/resume cycle. Keep the bridge's full threaded coverage on
+      # the latest known-compatible release until that engine regression is
+      # resolved, rather than silently changing browser behavior on every
+      # Mozilla repository update.
+      FIREFOX_VERSION: 152.0.6~build1
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -28,7 +35,7 @@ jobs:
           printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' \
             | sudo tee /etc/apt/preferences.d/mozilla > /dev/null
           sudo apt-get update
-          sudo apt-get install -y firefox
+          sudo apt-get install -y "firefox=$FIREFOX_VERSION"
 
       - name: Run Node e2e tests
         env:
