@@ -742,6 +742,38 @@ test("resumeAll sends resume to all paused threads", async () => {
   srv.close();
 });
 
+test("resumeAll releases interrupted workers before the thread that triggered all-stop", async () => {
+  const srv = new FakeRdpServer();
+  await srv.listen();
+  const session = await srv.acceptSession();
+
+  srv.targetAvailable("mainThread", { isTopLevel: true });
+  srv.targetAvailable("workerThread");
+  await sleep(200);
+
+  // Let all-stop's interrupt of the worker complete with a real paused event.
+  srv.onAll(
+    (r) => r.type === "interrupt",
+    (r) => ({ from: r.to as string, type: "paused", why: { type: "interrupted" } })
+  );
+  session.armAllStop();
+  srv.paused("mainThread", "breakpoint");
+  await sleep(200);
+
+  const before = srv.received.length;
+  await session.resumeAll();
+  await sleep(50);
+
+  const resumeActors = srv.received
+    .slice(before)
+    .filter((r) => r.type === "resume")
+    .map((r) => r.to);
+  assert.deepEqual(resumeActors, ["workerThread", "mainThread"]);
+
+  session.close();
+  srv.close();
+});
+
 test("resumeAll does nothing when no threads are paused", async () => {
   const srv = new FakeRdpServer();
   await srv.listen();

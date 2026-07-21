@@ -1020,7 +1020,17 @@ export class RdpWasmSession extends EventEmitter {
    * The top-level continue call — resumes every thread we own.
    */
   async resumeAll(): Promise<void> {
-    const toResume = [...this.#pausedTids];
+    // Release the threads interrupted by #allStop before the thread that
+    // originally stopped. In a pthread program the stopped main thread can
+    // enter pthread_join as soon as it resumes; Firefox may then stop
+    // servicing worker-thread resume packets that were queued behind it.
+    // Sending the triggering thread last ensures every worker is runnable
+    // before the main thread can wait for it.
+    const toResume = [...this.#pausedTids].sort((a, b) => {
+      if (a === this.#stoppedTid) return 1;
+      if (b === this.#stoppedTid) return -1;
+      return 0;
+    });
     for (const tid of toResume) {
       const info = this.#threads.get(tid);
       if (!info) continue;
