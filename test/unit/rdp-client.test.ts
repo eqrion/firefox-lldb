@@ -8,6 +8,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import net from "node:net";
 import { RdpClient } from "../../src/rdp/client.js";
+import { encodeRdpFrame } from "../../src/rdp/transport.js";
 
 function startFakeRdpServer(
   handler?: (data: Buffer, socket: net.Socket) => void
@@ -17,8 +18,7 @@ function startFakeRdpServer(
     const srv = net.createServer((sock) => {
       connSocket = sock;
       // Send the root greeting to unblock RdpClient.connect().
-      const greeting = JSON.stringify({ from: "root" });
-      sock.write(`${greeting.length}:${greeting}`);
+      sock.write(encodeRdpFrame({ from: "root" }));
       if (handler) sock.on("data", (d) => handler(d, sock));
     });
     srv.listen(0, "127.0.0.1", () => {

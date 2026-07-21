@@ -31,6 +31,32 @@ function trace(dir: ">>" | "<<", json: string): void {
   rdpLogger.debug(`[rdp] ${dir} ${text}`);
 }
 
+/** Encode one packet as a `<utf8-byte-length>:<json>` frame. */
+export function encodeRdpFrame(packet: object): Buffer {
+  const json = Buffer.from(JSON.stringify(packet), "utf8");
+  return Buffer.concat([Buffer.from(`${json.length}:`, "utf8"), json]);
+}
+
+/**
+ * Slice one complete `<utf8-byte-length>:<body>` frame off the front of buf.
+ * Returns null if buf doesn't yet hold a full frame (wait for more data);
+ * throws on a malformed length prefix or size. Does not parse the body —
+ * callers decide how (and whether) to JSON.parse it.
+ */
+export function sliceRdpFrame(buf: Buffer): { body: string; rest: Buffer } | null {
+  const colon = buf.indexOf(0x3a); // ':'
+  if (colon === -1) {
+    if (buf.length > 20) throw new Error("malformed length prefix");
+    return null;
+  }
+  const len = parseInt(buf.subarray(0, colon).toString("latin1"), 10);
+  if (Number.isNaN(len) || len < 0) throw new Error("invalid packet length");
+  const start = colon + 1;
+  if (buf.length < start + len) return null; // wait for the full body
+  const body = buf.subarray(start, start + len).toString("utf8");
+  return { body, rest: buf.subarray(start + len) };
+}
+
 export class RdpTransport extends EventEmitter {
   #socket: net.Socket;
   #buffer: Buffer = Buffer.alloc(0);
@@ -54,33 +80,25 @@ export class RdpTransport extends EventEmitter {
   }
 
   send(packet: RdpPacket): void {
-    const body = JSON.stringify(packet);
-    trace(">>", body);
-    const json = Buffer.from(body, "utf8");
-    this.#socket.write(`${json.length}:`);
-    this.#socket.write(json);
+    trace(">>", JSON.stringify(packet));
+    this.#socket.write(encodeRdpFrame(packet));
   }
 
   #onData(chunk: Buffer): void {
     this.#buffer = this.#buffer.length ? Buffer.concat([this.#buffer, chunk]) : chunk;
     for (;;) {
-      const colon = this.#buffer.indexOf(0x3a); // ':'
-      if (colon === -1) {
-        if (this.#buffer.length > 20) this.emit("error", new Error("malformed length prefix"));
-        return;
-      }
-      const len = parseInt(this.#buffer.subarray(0, colon).toString("latin1"), 10);
-      if (Number.isNaN(len) || len < 0) {
-        this.emit("error", new Error("invalid packet length"));
-        return;
-      }
-      const start = colon + 1;
-      if (this.#buffer.length < start + len) return; // wait for the full body
-      const body = this.#buffer.subarray(start, start + len).toString("utf8");
-      this.#buffer = this.#buffer.subarray(start + len);
-      trace("<<", body);
+      let sliced;
       try {
-        this.emit("packet", JSON.parse(body) as RdpPacket);
+        sliced = sliceRdpFrame(this.#buffer);
+      } catch (err) {
+        this.emit("error", err as Error);
+        return;
+      }
+      if (!sliced) return;
+      this.#buffer = sliced.rest;
+      trace("<<", sliced.body);
+      try {
+        this.emit("packet", JSON.parse(sliced.body) as RdpPacket);
       } catch (err) {
         this.emit("error", err as Error);
       }

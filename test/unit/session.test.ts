@@ -10,27 +10,19 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import net from "node:net";
 import { RdpWasmSession, type StoppedEvent, type PauseEvent } from "../../src/rdp/session.js";
+import { encodeRdpFrame, sliceRdpFrame } from "../../src/rdp/transport.js";
 
 // ---------------------------------------------------------------------------
 // Fake RDP server
 // ---------------------------------------------------------------------------
 
-function encode(packet: object): Buffer {
-  const json = Buffer.from(JSON.stringify(packet), "utf8");
-  return Buffer.concat([Buffer.from(`${json.length}:`, "utf8"), json]);
-}
-
 function decodeAll(buf: Buffer): { packets: Record<string, unknown>[]; rest: Buffer } {
   const packets: Record<string, unknown>[] = [];
   for (;;) {
-    const colon = buf.indexOf(0x3a);
-    if (colon === -1) break;
-    const len = parseInt(buf.subarray(0, colon).toString(), 10);
-    if (isNaN(len) || len < 0) break;
-    const start = colon + 1;
-    if (buf.length < start + len) break;
-    packets.push(JSON.parse(buf.subarray(start, start + len).toString("utf8")));
-    buf = buf.subarray(start + len);
+    const sliced = sliceRdpFrame(buf);
+    if (!sliced) break;
+    packets.push(JSON.parse(sliced.body));
+    buf = sliced.rest;
   }
   return { packets, rest: buf };
 }
@@ -157,7 +149,7 @@ class FakeRdpServer {
 
   /** Push an unsolicited event packet into the session. */
   send(packet: object): void {
-    this.sock?.write(encode(packet));
+    this.sock?.write(encodeRdpFrame(packet));
   }
 
   // Helpers to push specific event types ---------------------------------
