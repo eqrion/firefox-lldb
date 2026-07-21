@@ -74,6 +74,39 @@ function outOfBounds(): Error {
 
 type Ref = { $res: string; id: number };
 
+// Stop-coordination state for RdpDebuggee. Grouped under one field so a
+// reader sees the whole cluster at once, but each property still has an
+// independent lifetime managed at its own call sites — this is NOT a
+// discriminated union with enforced transitions (see the fields' comments
+// for cases where one property intentionally outlives another).
+interface StopState {
+  // Resolves on the next all-stop "stopped" event; rejects if the session
+  // closes first. Awaited by #finishEvent/primeStop. Starts pre-resolved so
+  // an early #finishEvent before any resume never hangs.
+  promise: Promise<StoppedEvent>;
+  // resolve/reject of `promise` while a stop is outstanding; null once it
+  // has settled. Non-null iff we are actively waiting for a stop.
+  pending: { resolve: (e: StoppedEvent) => void; reject: (e: Error) => void } | null;
+  // RDP why.type (or a synthetic override) of the most-recently-delivered
+  // stop; read only by #eventTag(). Only meaningful right after `promise`
+  // settles.
+  reason: string;
+  // Set when triggerInterrupt() fires before Debuggee.continue has armed
+  // `promise` (the SIGINT handler runs synchronously but dispatch runs on
+  // the drain timer). #armStopped() checks this and resolves immediately.
+  pendingInterrupt: boolean;
+  // Set just before #scheduleResyncCheck forces a fresh RDP interrupt to
+  // manufacture a stop. Firefox reports that pause's why.type as
+  // "interrupted", which the component's Event::Interrupted arm treats as
+  // spurious and just resumes from (it's meant for a real client Ctrl-C,
+  // which this isn't). Override the tag to "breakpoint" for this one stop so
+  // it lands in the arm that actually consults update_on_stop()'s changed
+  // modules and reports MultiThreadStopReason::Library. Intentionally NOT
+  // cleared when the "stopped" listener drops an unwaited-for stop, when the
+  // session closes, or in #armStopped's pending-interrupt branch.
+  forcingResync: boolean;
+}
+
 // One handler per WIT method, keyed "Interface.method" (matches dispatch()'s
 // req.type + "." + req.method). A handler may take fewer params than this
 // signature declares if it doesn't need id/args.
@@ -120,16 +153,13 @@ export class RdpDebuggee {
   // each qWasmLocal packet would trigger a separate getEnvironment call.
   #envCacheByActor = new Map<string, Record<string, { value?: unknown }>>();
 
-  // Resolves on the next all-stop "stopped" event (armed before resume/step).
-  // Rejects if the session closes before a stop arrives (see constructor).
-  #stopped: Promise<StoppedEvent> = Promise.resolve({ tid: 1, pausePacket: {} });
-  #resolveStopped: ((e: StoppedEvent) => void) | null = null;
-  #rejectStopped: ((e: Error) => void) | null = null;
-  #lastPauseReason = "breakpoint";
-  // Set when triggerInterrupt() fires before Debuggee.continue has armed #stopped
-  // (the SIGINT handler runs synchronously but dispatch runs on the drain timer).
-  // #armStopped() checks this and resolves immediately.
-  #pendingInterrupt = false;
+  #stop: StopState = {
+    promise: Promise.resolve({ tid: 1, pausePacket: {} as PauseEvent }),
+    pending: null,
+    reason: "breakpoint",
+    pendingInterrupt: false,
+    forcingResync: false,
+  };
 
   // Fired once on LLDB's first continue (drives the page's wasm export
   // after a breakpoint is armed, so the engine pauses inside wasm).
@@ -139,14 +169,6 @@ export class RdpDebuggee {
   // when a new top-level target arrives while a continue is outstanding (see
   // #scheduleResyncCheck).
   #resyncTimer: ReturnType<typeof setTimeout> | null = null;
-  // Set just before #scheduleResyncCheck forces a fresh RDP interrupt to
-  // manufacture a stop. Firefox reports that pause's why.type as
-  // "interrupted", which the component's Event::Interrupted arm treats as
-  // spurious and just resumes from (it's meant for a real client Ctrl-C,
-  // which this isn't). Override the tag to "breakpoint" for this one stop so
-  // it lands in the arm that actually consults update_on_stop()'s changed
-  // modules and reports MultiThreadStopReason::Library.
-  #forcingResyncStop = false;
 
   constructor(session: RdpWasmSession, opts?: { onFirstContinue?: () => void }) {
     this.#session = session;
@@ -154,23 +176,22 @@ export class RdpDebuggee {
 
     session.on("stopped", (e: StoppedEvent) => {
       this.#clearResyncTimer();
-      if (!this.#resolveStopped) return;
-      this.#lastPauseReason = this.#forcingResyncStop
+      const pending = this.#stop.pending;
+      if (!pending) return;
+      this.#stop.reason = this.#stop.forcingResync
         ? "breakpoint"
         : ((e.pausePacket as { why?: { type?: string } })?.why?.type ?? "breakpoint");
-      this.#forcingResyncStop = false;
-      this.#resolveStopped(e);
-      this.#resolveStopped = null;
-      this.#rejectStopped = null;
+      this.#stop.forcingResync = false;
+      pending.resolve(e);
+      this.#stop.pending = null;
     });
 
     session.on("close", () => {
       this.#clearResyncTimer();
       // Unblock any pending EventFuture.finish / primeStop so the gdbstub
       // worker thread doesn't hang when the RDP connection drops mid-session.
-      this.#rejectStopped?.(new Error("session closed"));
-      this.#resolveStopped = null;
-      this.#rejectStopped = null;
+      this.#stop.pending?.reject(new Error("session closed"));
+      this.#stop.pending = null;
     });
 
     // A navigation (driven or page-triggered) invalidates every per-URL cache
@@ -672,9 +693,9 @@ export class RdpDebuggee {
   // --- resumption ----------------------------------------------------------
   #doContinue(): Ref {
     this.#armStopped();
-    // #resolveStopped is null when a pending interrupt was already consumed.
+    // #stop.pending is null when a pending interrupt was already consumed.
     // In that case the stop is immediate — skip the resume so Firefox stays paused.
-    if (this.#resolveStopped !== null) {
+    if (this.#stop.pending !== null) {
       if (this.#session.hasUnwitnessedPause()) {
         // A pause already happened with nothing listening for it — e.g. a
         // buffered breakpoint fired on a newly-navigated page before this
@@ -728,7 +749,7 @@ export class RdpDebuggee {
   }
 
   async #finishEvent(): Promise<{ tag: string }> {
-    await this.#stopped;
+    await this.#stop.promise;
     await this.#snapshotAll();
     return { tag: this.#eventTag() };
   }
@@ -750,14 +771,14 @@ export class RdpDebuggee {
     this.#armStopped();
     this.#session.armAllStop();
     this.#session.interrupt(tid);
-    await this.#stopped;
+    await this.#stop.promise;
     await this.#snapshotAll();
   }
 
   /**
    * Send an RDP interrupt to all running threads, then force-resolve the
-   * pending #stopped promise so EventFuture.finish unblocks immediately.
-   * Called when the user presses Ctrl-C while the target is running.
+   * pending stop so EventFuture.finish unblocks immediately. Called when the
+   * user presses Ctrl-C while the target is running.
    *
    * The RDP interrupt and the "frames" request (from #snapshotAll) both go
    * into the same socket queue, so Firefox processes them in order: pause
@@ -771,31 +792,29 @@ export class RdpDebuggee {
         /* ignore unknown-tid errors */
       }
     }
-    if (this.#resolveStopped) {
-      this.#lastPauseReason = "signal";
-      this.#resolveStopped({ tid: this.#session.stoppedTid, pausePacket: {} as PauseEvent });
-      this.#resolveStopped = null;
-      this.#rejectStopped = null;
+    const pending = this.#stop.pending;
+    if (pending) {
+      this.#stop.reason = "signal";
+      pending.resolve({ tid: this.#session.stoppedTid, pausePacket: {} as PauseEvent });
+      this.#stop.pending = null;
     } else {
-      this.#pendingInterrupt = true;
+      this.#stop.pendingInterrupt = true;
     }
   }
 
   #armStopped(): void {
-    if (this.#pendingInterrupt) {
-      this.#pendingInterrupt = false;
-      this.#lastPauseReason = "signal";
-      this.#stopped = Promise.resolve({
+    if (this.#stop.pendingInterrupt) {
+      this.#stop.pendingInterrupt = false;
+      this.#stop.reason = "signal";
+      this.#stop.promise = Promise.resolve({
         tid: this.#session.stoppedTid,
         pausePacket: {} as PauseEvent,
       });
-      this.#resolveStopped = null;
-      this.#rejectStopped = null;
+      this.#stop.pending = null;
       return;
     }
-    this.#stopped = new Promise((resolve, reject) => {
-      this.#resolveStopped = resolve;
-      this.#rejectStopped = reject;
+    this.#stop.promise = new Promise((resolve, reject) => {
+      this.#stop.pending = { resolve, reject };
     });
   }
 
@@ -808,7 +827,7 @@ export class RdpDebuggee {
 
   /**
    * Called whenever a new top-level target arrives while a continue is
-   * outstanding (#resolveStopped set — the process was running, or
+   * outstanding (#stop.pending set — the process was running, or
    * continue() raced the navigation). LLDB is blocked in EventFuture.finish
    * waiting for a "stopped" that only a real RDP pause produces — which is
    * also the only point update_on_stop() -> all_modules() runs on the
@@ -838,7 +857,7 @@ export class RdpDebuggee {
     this.#clearResyncTimer();
     this.#resyncTimer = setTimeout(() => {
       this.#resyncTimer = null;
-      if (this.#resolveStopped === null) return; // LLDB isn't waiting on anything
+      if (this.#stop.pending === null) return; // LLDB isn't waiting on anything
       const live = this.#session.listTids();
       if (live.length === 0) return; // nothing left to interrupt — a genuine close, not a swap
       if (this.#session.hasUnwitnessedPause()) {
@@ -853,7 +872,7 @@ export class RdpDebuggee {
         void this.#session.adoptPausedState();
         return;
       }
-      this.#forcingResyncStop = true;
+      this.#stop.forcingResync = true;
       this.#session.interrupt(live.includes(tid) ? tid : live[0]);
     }, RESYNC_GRACE_MS);
   }
@@ -878,7 +897,7 @@ export class RdpDebuggee {
   }
 
   #eventTag(): string {
-    switch (this.#lastPauseReason) {
+    switch (this.#stop.reason) {
       case "exception":
         return "trap";
       case "interrupted":
