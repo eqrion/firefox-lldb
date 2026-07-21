@@ -172,6 +172,75 @@ export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // and above are Failed/Quit. sessionCommand()'s `status` is that raw enum.
 export const LLDB_FAILED_STATUS = 6;
 
+// Bridge a localhost TCP port to an in-process wasm-LLDB channel, tracking
+// the socket in `sockets` so callers can force-close it on shutdown. Shared
+// by both harnesses' platform/per-tab connections.
+export async function bridgeTcp(client, sockets, port) {
+  const channelId = await client.createChannel();
+  const socket = net.connect(port, "127.0.0.1");
+  sockets.add(socket);
+  socket.setNoDelay(true);
+  socket.on("data", (d) => void client.channelServerWrite(channelId, new Uint8Array(d)));
+  socket.on("error", () => {});
+  // Register before bridgeChannel: on loopback the TCP handshake completes
+  // while bridgeChannel awaits, and a post-await socket.once("connect") misses
+  // the already-fired event, leaving the promise permanently unresolved.
+  const connected = new Promise((resolve, reject) => {
+    socket.once("connect", resolve);
+    socket.once("error", reject);
+  });
+  await client.bridgeChannel(channelId, (data) => void socket.write(Buffer.from(data)));
+  await connected;
+  return channelId;
+}
+
+// Select the gdb-remote platform and connect it to a bridged channel.
+export async function platformConnect(client, channelId) {
+  await client.sessionCommand("platform select remote-gdb-server");
+  const conn = await client.sessionCommand(`platform connect inprocess://${channelId}`);
+  if (conn.status >= LLDB_FAILED_STATUS) throw new Error(`platform connect failed: ${conn.error}`);
+}
+
+// Cold launch + wasm load can exceed the attach timeout; retry a few times.
+export async function attachWithRetry(client, maxAttempts = 4) {
+  let lastErr = "";
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const res = await client.sessionCommand("process attach --plugin wasm --pid 1");
+    if (res.status < LLDB_FAILED_STATUS) {
+      const st = await client.sessionState();
+      if (st.reason !== "none" && st.reason !== "exited") return;
+      lastErr = `attach left process in state ${st.reason}`;
+    } else {
+      lastErr = res.error;
+    }
+    await sleep(1000);
+  }
+  throw new Error(`process attach failed after retries: ${lastErr}`);
+}
+
+// Shared shutdown sequence for both harnesses' session classes.
+export async function shutdownSession({ sockets, handle, client, staticServer }) {
+  for (const s of sockets) s.destroy();
+  await handle?.shutdown().catch(() => {});
+  await client.destroy(); // await full worker teardown before the next attach
+  // close() alone waits for open connections to end naturally, which can
+  // hang forever on a lingering keep-alive socket; force them closed too.
+  staticServer?.server.closeAllConnections();
+  await new Promise((resolve) => staticServer?.server.close(resolve));
+}
+
+// Unconditional, direct SIGKILL of the Firefox process group, independent of
+// shutdownSession()'s graceful chain (which can itself hang waiting on a
+// socket to a Firefox that's already wedged). Safe to call redundantly.
+export function forceKillFirefoxPid(pid) {
+  if (pid === undefined) return;
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+    // already dead
+  }
+}
+
 // Race `work` against a deadline well short of node's own --test-timeout. If
 // a step inside `work` hangs (a slow/wedged Firefox launch, a stuck RDP round
 // trip), node kills the whole test process outright once its own timeout
@@ -268,23 +337,8 @@ export class Session {
     return `http://127.0.0.1:${this.#staticServer.port}/${rel}`;
   }
 
-  async #bridgeTcp(port) {
-    const channelId = await this.#client.createChannel();
-    const socket = net.connect(port, "127.0.0.1");
-    this.#sockets.add(socket);
-    socket.setNoDelay(true);
-    socket.on("data", (d) => void this.#client.channelServerWrite(channelId, new Uint8Array(d)));
-    socket.on("error", () => {});
-    // Register before bridgeChannel: on loopback the TCP handshake completes
-    // while bridgeChannel awaits, and a post-await socket.once("connect") misses
-    // the already-fired event, leaving the promise permanently unresolved.
-    const connected = new Promise((resolve, reject) => {
-      socket.once("connect", resolve);
-      socket.once("error", reject);
-    });
-    await this.#client.bridgeChannel(channelId, (data) => void socket.write(Buffer.from(data)));
-    await connected;
-    return channelId;
+  #bridgeTcp(port) {
+    return bridgeTcp(this.#client, this.#sockets, port);
   }
 
   // Launch headless Firefox at the fixture, attach via the platform, and return
@@ -325,26 +379,9 @@ export class Session {
         session.#handle = handle;
 
         const c0 = await session.#bridgeTcp(handle.port);
-        await client.sessionCommand("platform select remote-gdb-server");
-        const conn = await client.sessionCommand(`platform connect inprocess://${c0}`);
-        if (conn.status >= LLDB_FAILED_STATUS)
-          throw new Error(`platform connect failed: ${conn.error}`);
-
-        // Cold launch + wasm load can exceed the attach timeout; retry like
-        // the Python harness.
-        let lastErr = "";
-        for (let attempt = 0; attempt < 4; attempt++) {
-          const res = await client.sessionCommand("process attach --plugin wasm --pid 1");
-          if (res.status < LLDB_FAILED_STATUS) {
-            const st = await client.sessionState();
-            if (st.reason !== "none" && st.reason !== "exited") return session;
-            lastErr = `attach left process in state ${st.reason}`;
-          } else {
-            lastErr = res.error;
-          }
-          await sleep(1000);
-        }
-        throw new Error(`process attach failed after retries: ${lastErr}`);
+        await platformConnect(client, c0);
+        await attachWithRetry(client);
+        return session;
       })(),
       60_000
     );
@@ -363,10 +400,7 @@ export class Session {
     });
     session.#handle = handle;
     const c0 = await session.#bridgeTcp(handle.port);
-    await client.sessionCommand("platform select remote-gdb-server");
-    const conn = await client.sessionCommand(`platform connect inprocess://${c0}`);
-    if (conn.status >= LLDB_FAILED_STATUS)
-      throw new Error(`platform connect failed: ${conn.error}`);
+    await platformConnect(client, c0);
     return session;
   }
 
@@ -468,26 +502,16 @@ export class Session {
     return this.command(`breakpoint delete ${id}`);
   }
 
-  async shutdown() {
-    for (const s of this.#sockets) s.destroy();
-    await this.#handle?.shutdown().catch(() => {});
-    await this.#client.destroy(); // await full worker teardown before the next attach
-    // close() alone waits for open connections to end naturally, which can
-    // hang forever on a lingering keep-alive socket; force them closed too.
-    this.#staticServer?.server.closeAllConnections();
-    await new Promise((resolve) => this.#staticServer?.server.close(resolve));
+  shutdown() {
+    return shutdownSession({
+      sockets: this.#sockets,
+      handle: this.#handle,
+      client: this.#client,
+      staticServer: this.#staticServer,
+    });
   }
 
-  // Unconditional, direct SIGKILL of the Firefox process group, independent
-  // of shutdown()'s graceful chain (which can itself hang waiting on a
-  // socket to a Firefox that's already wedged). Safe to call redundantly.
   forceKillFirefox() {
-    const pid = this.#handle?.firefoxPid;
-    if (pid === undefined) return;
-    try {
-      process.kill(-pid, "SIGKILL");
-    } catch {
-      // already dead
-    }
+    forceKillFirefoxPid(this.#handle?.firefoxPid);
   }
 }

@@ -8,15 +8,22 @@
 // readline routing, js subcommands, console streaming — rather than the
 // lower-level session API the Session harness drives directly.
 
-import net from "node:net";
 import { PassThrough, Writable } from "node:stream";
 import { LLDBClient } from "lldb-wasm";
 import { parseCliArgs, startPlatformServer } from "../../src/core/platform-session.ts";
 import { freePort } from "../../src/platform/gdb-server-spawner.ts";
 import { runRepl } from "../../src/cli/repl.ts";
-import { FIXTURES, startStaticServer, withDeadline, LLDB_FAILED_STATUS } from "./harness.mjs";
+import {
+  FIXTURES,
+  startStaticServer,
+  withDeadline,
+  bridgeTcp,
+  platformConnect,
+  attachWithRetry,
+  shutdownSession,
+  forceKillFirefoxPid,
+} from "./harness.mjs";
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const stripAnsi = (s) => s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
 
 export class ReplSession {
@@ -31,23 +38,8 @@ export class ReplSession {
   #triggerInterrupt;
   session;
 
-  async #bridgeTcp(port) {
-    const channelId = await this.#client.createChannel();
-    const socket = net.connect(port, "127.0.0.1");
-    this.#sockets.add(socket);
-    socket.setNoDelay(true);
-    socket.on("data", (d) => void this.#client.channelServerWrite(channelId, new Uint8Array(d)));
-    socket.on("error", () => {});
-    // Register before bridgeChannel: on loopback the TCP handshake completes
-    // while bridgeChannel awaits, and a post-await socket.once("connect") misses
-    // the already-fired event, leaving the promise permanently unresolved.
-    const connected = new Promise((resolve, reject) => {
-      socket.once("connect", resolve);
-      socket.once("error", reject);
-    });
-    await this.#client.bridgeChannel(channelId, (data) => void socket.write(Buffer.from(data)));
-    await connected;
-    return channelId;
+  #bridgeTcp(port) {
+    return bridgeTcp(this.#client, this.#sockets, port);
   }
 
   #settle() {
@@ -117,33 +109,16 @@ export class ReplSession {
         rs.#handle = handle;
 
         const c0 = await rs.#bridgeTcp(handle.port);
-        await client.sessionCommand("platform select remote-gdb-server");
-        const conn = await client.sessionCommand(`platform connect inprocess://${c0}`);
-        if (conn.status >= LLDB_FAILED_STATUS)
-          throw new Error(`platform connect failed: ${conn.error}`);
+        await platformConnect(client, c0);
         await client.sessionCommand("command alias attach process attach --plugin wasm");
 
-        // Cold launch + wasm load can exceed the attach timeout; retry like
-        // the Session harness. Attach is driven directly (not through the
-        // REPL) so the retry policy is in one place; REPL command routing is
-        // what the tests exercise afterwards.
-        let lastErr = "";
-        for (let attempt = 0; attempt < 4; attempt++) {
-          const res = await client.sessionCommand("process attach --plugin wasm --pid 1");
-          if (res.status < LLDB_FAILED_STATUS) {
-            const st = await client.sessionState();
-            if (st.reason !== "none" && st.reason !== "exited") {
-              rs.#repl.start();
-              await rs.#settle();
-              return rs;
-            }
-            lastErr = `attach left process in state ${st.reason}`;
-          } else {
-            lastErr = res.error;
-          }
-          await sleep(1000);
-        }
-        throw new Error(`process attach failed after retries: ${lastErr}`);
+        // Attach is driven directly (not through the REPL) so the retry
+        // policy is in one place; REPL command routing is what the tests
+        // exercise afterwards.
+        await attachWithRetry(client);
+        rs.#repl.start();
+        await rs.#settle();
+        return rs;
       })(),
       60_000
     );
@@ -186,24 +161,16 @@ export class ReplSession {
     return stripAnsi(this.#out);
   }
 
-  async shutdown() {
-    for (const s of this.#sockets) s.destroy();
-    await this.#handle?.shutdown().catch(() => {});
-    await this.#client.destroy();
-    // close() alone waits for open connections to end naturally, which can
-    // hang forever on a lingering keep-alive socket; force them closed too.
-    this.#staticServer?.server.closeAllConnections();
-    await new Promise((resolve) => this.#staticServer?.server.close(resolve));
+  shutdown() {
+    return shutdownSession({
+      sockets: this.#sockets,
+      handle: this.#handle,
+      client: this.#client,
+      staticServer: this.#staticServer,
+    });
   }
 
-  // See Session.forceKillFirefox in harness.mjs.
   forceKillFirefox() {
-    const pid = this.#handle?.firefoxPid;
-    if (pid === undefined) return;
-    try {
-      process.kill(-pid, "SIGKILL");
-    } catch {
-      // already dead
-    }
+    forceKillFirefoxPid(this.#handle?.firefoxPid);
   }
 }
