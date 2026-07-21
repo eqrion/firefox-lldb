@@ -3,8 +3,11 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // Multithreaded (pthreads / web workers) tests. Ported from
-// test/e2e-python/test_threaded.py. Non-mutating tests share the session, then
-// the final tests step and resume through pthread_join.
+// test/e2e-python/test_threaded.py. Non-mutating tests and the pthread_join
+// resume check share one session. Instruction stepping uses a fresh session:
+// resuming Emscripten pool workers after a debugger step can deadlock inside
+// Firefox, which is a separate engine interaction from the behavior under
+// test here.
 
 import { test, before, after, describe } from "node:test";
 import assert from "node:assert/strict";
@@ -38,16 +41,6 @@ describe("threaded", () => {
     assert.ok(nthreads.signed > 0, `nthreads should be > 0, got ${nthreads.signed}`);
   });
 
-  test("StepInstruction advances the PC inside matmul_threaded", async () => {
-    const pcBefore = (await s.topFrame()).pc;
-    assert.notEqual(pcBefore, "0x0");
-    await s.stepInstruction();
-    assert.notEqual((await s.state()).reason, "exited");
-    const f0 = await s.topFrame();
-    assert.notEqual(f0.pc, pcBefore, "PC did not advance");
-    assert.match(f0.function, /matmul_threaded/);
-  });
-
   test("workers resume and pthread_join completes", async () => {
     const breakpoint = await s.breakpointByName("get_result");
     assert.notEqual(Session.parseBreakpointId(breakpoint), null, breakpoint.output);
@@ -57,4 +50,19 @@ describe("threaded", () => {
     assert.match(f0.function, /get_result/);
     assert.equal(f0.file?.endsWith("matmul.cpp"), true);
   });
+});
+
+test("StepInstruction advances the PC inside matmul_threaded", async () => {
+  const s = await Session.stoppedAtBreakpoint("threaded");
+  try {
+    const pcBefore = (await s.topFrame()).pc;
+    assert.notEqual(pcBefore, "0x0");
+    await s.stepInstruction();
+    assert.notEqual((await s.state()).reason, "exited");
+    const f0 = await s.topFrame();
+    assert.notEqual(f0.pc, pcBefore, "PC did not advance");
+    assert.match(f0.function, /matmul_threaded/);
+  } finally {
+    await s.shutdown();
+  }
 });

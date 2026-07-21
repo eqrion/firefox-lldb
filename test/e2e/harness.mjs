@@ -185,6 +185,24 @@ export function startStaticServer(pageDir, { requireAuth = false } = {}) {
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// A Firefox launch can occasionally wedge without returning an RDP error. A
+// deadline cleans that attempt up, but retrying only `process attach` cannot
+// recover because the browser and LLDB worker from that attempt are already
+// unusable. Retry the factory so every attempt gets a fresh browser, worker,
+// client, and set of transport sockets.
+export async function retrySessionSetup(factory, maxAttempts = 3) {
+  const errors = [];
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await factory();
+    } catch (err) {
+      errors.push(err);
+      if (attempt < maxAttempts) await sleep(250);
+    }
+  }
+  throw new AggregateError(errors, `session setup failed after ${maxAttempts} attempts`);
+}
+
 // lldb::ReturnStatus: values below this are Invalid/Started/Success*; this
 // and above are Failed/Quit. sessionCommand()'s `status` is that raw enum.
 export const LLDB_FAILED_STATUS = 6;
@@ -365,6 +383,10 @@ export class Session {
   static async attach(fxName, { headless = true, fire } = {}) {
     const fx = FIXTURES[fxName];
     if (!fx) throw new Error(`unknown fixture: ${fxName}`);
+    return retrySessionSetup(() => Session.#attachOnce(fx, { headless, fire }));
+  }
+
+  static async #attachOnce(fx, { headless, fire }) {
     const staticServer = await startStaticServer(fx.pageDir, { requireAuth: fx.requireAuth });
     const url = `http://127.0.0.1:${staticServer.port}/index.html`;
 
@@ -401,7 +423,7 @@ export class Session {
         await attachWithRetry(client);
         return session;
       })(),
-      60_000
+      30_000
     );
   }
 

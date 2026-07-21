@@ -22,6 +22,7 @@ import {
   attachWithRetry,
   shutdownSession,
   forceKillFirefoxPid,
+  retrySessionSetup,
 } from "./harness.mjs";
 
 const stripAnsi = (s) => s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
@@ -57,6 +58,10 @@ export class ReplSession {
   static async attach(fxName, { headless = true, fire } = {}) {
     const fx = FIXTURES[fxName];
     if (!fx) throw new Error(`unknown fixture: ${fxName}`);
+    return retrySessionSetup(() => ReplSession.#attachOnce(fx, { headless, fire }));
+  }
+
+  static async #attachOnce(fx, { headless, fire }) {
     const staticServer = await startStaticServer(fx.pageDir);
     const url = `http://127.0.0.1:${staticServer.port}/index.html`;
 
@@ -120,7 +125,7 @@ export class ReplSession {
         await rs.#settle();
         return rs;
       })(),
-      60_000
+      30_000
     );
   }
 
