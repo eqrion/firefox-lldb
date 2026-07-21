@@ -42,21 +42,7 @@ import type {
 } from "../rdp/session.js";
 import { buildSyntheticModule } from "./synthetic-module.js";
 import { inspect as inspectWasm, convert as convertSourceMap } from "../sourcemap/converter.js";
-
-// After a navigation swaps in a new top-level target while LLDB is waiting on
-// a stop (a Debuggee.continue is armed), give a buffered breakpoint on the
-// new page this long to fire naturally through the normal all-stop path
-// before forcing a re-sync stop. Same order of magnitude as session.ts's
-// DETACH_GRACE_MS, but this is a distinct concern: that one decides whether a
-// target swap was a real close, this one decides whether to force a stop so
-// the gdbstub component's update_on_stop -> all_modules re-sync ever runs.
-const RESYNC_GRACE_MS = 250;
-
-// A minimal valid wasm binary (magic + version only, no sections). Served for
-// a Module ref whose #moduleById entry a navigation already cleared — no
-// DWARF for it, but a valid module body instead of an uncaught throw across
-// a WIT call with no error case (mirrors session.ts's EMPTY_WASM_MODULE).
-const EMPTY_WASM_MODULE = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+import { EMPTY_WASM_MODULE, RESYNC_GRACE_MS } from "../rdp/constants.js";
 
 function urlBasename(url: string): string {
   try {
@@ -95,7 +81,6 @@ export class RdpDebuggee {
   // Stable module identity per source URL.
   #moduleByUrl = new Map<string, { id: number; url: string }>();
   #moduleById = new Map<number, { id: number; url: string }>();
-  #sourceActorToUrl = new Map<string, string>();
 
   // Synthetic modules for JS sources: url -> {bytecode, codeOffset}.
   #syntheticByUrl = new Map<string, { bytecode: Uint8Array; codeOffset: number }>();
@@ -385,7 +370,7 @@ export class RdpDebuggee {
         const frame = fi ? this.#framesByTid.get(fi.tid)?.[fi.index] : undefined;
         const line = frame?.where?.line ?? 0;
         if (frame?.type === "call") {
-          const url = this.#sourceActorToUrl.get(frame.where!.actor) ?? frame.where!.actor;
+          const url = this.#session.urlForSourceActor(frame.where!.actor) ?? frame.where!.actor;
           return line + (this.#syntheticByUrl.get(url)?.codeOffset ?? 0);
         }
         return line;
@@ -431,10 +416,9 @@ export class RdpDebuggee {
 
   // --- modules -------------------------------------------------------------
   async #allModules(): Promise<Ref[]> {
-    // Register wasm modules (keeps actor->url mapping current).
+    // wasmSources() also keeps the session's actor->url mapping current.
     const wasmSources = await this.#session.wasmSources();
     for (const s of wasmSources) {
-      this.#sourceActorToUrl.set(s.actor, s.url);
       this.#moduleRef(s.url);
     }
     // Return refs for all registered modules — wasm plus any synthetic JS
@@ -532,10 +516,12 @@ export class RdpDebuggee {
           for (const f of rawFrames) {
             if (f.type === "call") {
               const actor = f.where!.actor;
-              if (!this.#sourceActorToUrl.has(actor)) {
-                await this.#refreshJsSources();
+              if (this.#session.urlForSourceActor(actor) === undefined) {
+                // Not yet known — jsSources() populates the session's
+                // actor->url mapping as a side effect.
+                await this.#session.jsSources();
               }
-              const url = this.#sourceActorToUrl.get(actor) ?? actor;
+              const url = this.#session.urlForSourceActor(actor) ?? actor;
               const calleeName = f.callee?.displayName || f.callee?.name;
               await this.#ensureSynthetic(url, actor, calleeName);
             }
@@ -550,15 +536,8 @@ export class RdpDebuggee {
     }
   }
 
-  async #refreshJsSources(): Promise<void> {
-    for (const s of await this.#session.jsSources()) {
-      this.#sourceActorToUrl.set(s.actor, s.url || s.actor);
-    }
-  }
-
   async #ensureSynthetic(url: string, actor: string, calleeName?: string): Promise<void> {
     if (this.#syntheticByUrl.has(url)) return;
-    this.#sourceActorToUrl.set(actor, url);
     let text = "";
     try {
       text = await this.#session.fetchSourceText(actor);
@@ -608,7 +587,8 @@ export class RdpDebuggee {
     const fi = this.#frameInfoById.get(frameId);
     const frames = fi ? (this.#framesByTid.get(fi.tid) ?? []) : [];
     const frame = fi ? frames[fi.index] : undefined;
-    const url = this.#sourceActorToUrl.get(frame?.where?.actor ?? "") ?? frame?.where?.actor ?? "";
+    const actor = frame?.where?.actor ?? "";
+    const url = this.#session.urlForSourceActor(actor) ?? actor;
     return this.#instanceRef(url);
   }
 
@@ -858,15 +838,16 @@ export class RdpDebuggee {
   }
 
   // A navigation invalidates every actor/body these caches hold — they were
-  // scoped to the destroyed top-level target. Clearing #moduleByUrl too (not
-  // just the bytecode) means a same-URL reload gets a fresh module id: the
-  // component treats it as a library unload+reload rather than serving the
-  // old module's cached content, which is what makes a changed-body reload
-  // (and, via the same path, a plain cross-page navigation) pick up correctly.
+  // scoped to the destroyed top-level target. (The session's own actor->url
+  // map is cleared by session.ts itself, synchronously before this fires.)
+  // Clearing #moduleByUrl too (not just the bytecode) means a same-URL reload
+  // gets a fresh module id: the component treats it as a library unload+reload
+  // rather than serving the old module's cached content, which is what makes a
+  // changed-body reload (and, via the same path, a plain cross-page
+  // navigation) pick up correctly.
   #onNavigated(): void {
     this.#bytecodeByUrl.clear();
     this.#syntheticByUrl.clear();
-    this.#sourceActorToUrl.clear();
     this.#moduleByUrl.clear();
     this.#moduleById.clear();
   }

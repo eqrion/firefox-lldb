@@ -56,6 +56,7 @@ import {
 } from "./protocol.js";
 import { EventEmitter } from "node:events";
 import { LAUNCH_TOKEN_PREF } from "./firefox.js";
+import { EMPTY_WASM_MODULE, DETACH_GRACE_MS } from "./constants.js";
 
 export { grip, type TabInfo, type SourceForm, type FrameForm, type PauseEvent, type StoppedEvent };
 
@@ -69,19 +70,6 @@ const THREAD_CONFIG: ThreadConfig = {
   pauseOnExceptions: true,
   ignoreCaughtExceptions: true,
 };
-
-// Fission can destroy-and-recreate the top-level target as an internal process
-// swap (e.g. the process reassignment that often follows the very first
-// cross-origin navigation from about:blank) with no signal distinguishing it
-// from a real tab close, and the replacement's target-available-form can
-// arrive after the destroy. Wait this long for a replacement before treating
-// a top-level target-destroyed-form as a genuine close.
-const DETACH_GRACE_MS = 250;
-
-// A minimal valid wasm binary (magic + version only, no sections). Used as a
-// placeholder module body when the real bytecode can't be fetched, so callers
-// get no DWARF/debug info for that module instead of a hard failure.
-const EMPTY_WASM_MODULE = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
 
 /**
  * Confirm the Firefox listening on port:host is the one that produced
@@ -290,6 +278,10 @@ export class RdpWasmSession extends EventEmitter {
   #wasmActorByUrl = new Map<string, string>(); // url -> source actor (any thread)
   #breakpointPositionCache = new Map<string, Promise<number[]>>(); // actor -> positions
   #jsActorByUrl = new Map<string, string>(); // url -> JS source actor (any thread)
+  // Reverse of the two maps above (wasm + JS actors share one namespace).
+  // The single owner of actor->url lookups — RdpDebuggee reads it via
+  // urlForSourceActor() instead of keeping its own copy.
+  #sourceUrlByActor = new Map<string, string>();
 
   // Pending "is this top-level destroy a real close?" checks (see DETACH_GRACE_MS).
   #pendingDetachChecks = new Set<ReturnType<typeof setTimeout>>();
@@ -315,6 +307,7 @@ export class RdpWasmSession extends EventEmitter {
     this.#jsActorByUrl.clear();
     this.#wasmActorByUrl.clear();
     this.#breakpointPositionCache.clear();
+    this.#sourceUrlByActor.clear();
   }
 
   // Fires whenever the top-level target is gone — a navigate() we drove, or
@@ -631,7 +624,10 @@ export class RdpWasmSession extends EventEmitter {
       type: REQUESTS.sources,
     })) as SourcesResponse;
     const wasm = (sources ?? []).filter((s) => s.introductionType === "wasm");
-    for (const s of wasm) this.#wasmActorByUrl.set(s.url, s.actor);
+    for (const s of wasm) {
+      this.#wasmActorByUrl.set(s.url, s.actor);
+      this.#sourceUrlByActor.set(s.actor, s.url);
+    }
     return wasm;
   }
 
@@ -655,6 +651,11 @@ export class RdpWasmSession extends EventEmitter {
 
   wasmActorForUrl(url: string): string | undefined {
     return this.#wasmActorByUrl.get(url);
+  }
+
+  /** URL for a wasm or JS source actor, if known (populated by wasmSourcesForTid/jsSources). */
+  urlForSourceActor(actor: string): string | undefined {
+    return this.#sourceUrlByActor.get(actor);
   }
 
   async fetchModuleBytes(url: string): Promise<Uint8Array> {
@@ -803,7 +804,10 @@ export class RdpWasmSession extends EventEmitter {
         type: REQUESTS.sources,
       })) as SourcesResponse;
       const js = (sources ?? []).filter((s) => s.url && s.introductionType !== "wasm");
-      for (const s of js) this.#jsActorByUrl.set(s.url, s.actor);
+      for (const s of js) {
+        this.#jsActorByUrl.set(s.url, s.actor);
+        this.#sourceUrlByActor.set(s.actor, s.url);
+      }
       return js;
     } catch {
       return [];
