@@ -102,6 +102,20 @@ async function main(): Promise<void> {
       session = s;
       triggerInterrupt = interrupt;
       void s.streamConsole((m) => repl.printConsole(m));
+      // "navigated" fires as soon as the old top-level target is gone, before
+      // the new one (if any) arrives — too early to know the destination URL.
+      // Wait for the next top-level "target" to report where the page landed;
+      // if none ever arrives, "detached" below reports the tab closed instead.
+      let awaitingNavigationTarget = false;
+      s.on("navigated", () => {
+        repl.print("page navigating; re-syncing debug session...");
+        awaitingNavigationTarget = true;
+      });
+      s.on("target", (info) => {
+        if (!info.isTopLevel || !awaitingNavigationTarget) return;
+        awaitingNavigationTarget = false;
+        repl.print(`page navigated to ${info.url}`);
+      });
       s.on("detached", () => {
         repl.print("the attached tab was closed; detaching.");
         session = undefined;
