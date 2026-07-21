@@ -68,6 +68,22 @@ Requires Firefox installed in a standard location (see `findFirefoxBinary` in
 - `threaded.test.mjs` — multithreaded fixture: thread list, matmul_threaded frame, step.
 - `wasm_trap.test.mjs` — wasm traps (divide-by-zero, unreachable, out-of-bounds, call_indirect mismatch) pause as a signal stop; trapping frame is inspectable.
 
+### Navigation (survival, re-sync, and ergonomics across a top-level target swap)
+
+- `self_redirect.test.mjs` — uncontrolled self-redirect while paused doesn't crash the session (survival only).
+- `nav_driven.test.mjs` — our own `session.navigate()`; buffered breakpoint refires on the new page.
+- `nav_link_click.test.mjs` — navigation via a user gesture (`<a href>` click).
+- `nav_location_assign.test.mjs` — navigation via the page's own `location.href = ...`.
+- `nav_reload.test.mjs` — same-URL `location.reload()`; module bytecode is re-fetched, not served stale.
+- `nav_module_unload.test.mjs` — navigating to a different wasm URL unloads the old module from `image list`.
+
+A genuine tab close (as opposed to a navigation) still correctly emits
+`detached` — covered at the unit level in `test/unit/session.test.ts`
+("target-destroyed-form for top-level target emits 'detached'" and the
+process-swap-suppression test next to it), not here: `window.close()` is a
+no-op on a tab that wasn't opened by script (Firefox blocks it), and there's
+no RDP request to close a tab outright.
+
 ## Why one attach per file
 
 Each attach spins up a wasm LLDB worker, an in-wasm gdbstub component, and a
