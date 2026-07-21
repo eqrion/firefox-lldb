@@ -1103,7 +1103,7 @@ __asyncjs__js_delay.sig = 'vi';
         }
       },
   instrumentWasmExports(exports) {
-        var exportPattern = /^(main|__main_argc_argv)$/;
+        var exportPattern = /^(main|__main_argc_argv|run_async)$/;
         Asyncify.asyncExports = new Set();
         var ret = {};
         for (let [x, original] of Object.entries(exports)) {

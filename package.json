@@ -60,7 +60,7 @@
     "build:fixture-heap": "cd test/fixtures/heap && ${EMSDK:+$EMSDK/upstream/emscripten/}emcc heap.cpp -o heap.js -gdwarf-5 -gembed-source -O0 -s EXPORTED_RUNTIME_METHODS='[\"cwrap\"]' -s MODULARIZE=1 -s EXPORT_NAME=HeapModule",
     "build:fixture-trap": "cd test/fixtures/trap && ${EMSDK:+$EMSDK/upstream/emscripten/}emcc trap.cpp -o trap.js -gdwarf-5 -gembed-source -O0 -s EXPORTED_RUNTIME_METHODS='[\"cwrap\"]' -s MODULARIZE=1 -s EXPORT_NAME=TrapModule",
     "build:fixture-eh": "cd test/fixtures/eh && ${EMSDK:+$EMSDK/upstream/emscripten/}emcc eh.cpp -o eh.js -fwasm-exceptions -gdwarf-5 -gembed-source -O0 -s EXPORTED_RUNTIME_METHODS='[\"cwrap\"]' -s MODULARIZE=1 -s EXPORT_NAME=EhModule",
-    "build:fixture-jspi": "cd test/fixtures/jspi && ${EMSDK:+$EMSDK/upstream/emscripten/}emcc jspi.c -o jspi.js -sJSPI -gdwarf-5 -gembed-source -O0 -s EXPORTED_RUNTIME_METHODS='[\"cwrap\",\"ccall\"]' -s MODULARIZE=1 -s EXPORT_NAME=JspiModule",
+    "build:fixture-jspi": "cd test/fixtures/jspi && ${EMSDK:+$EMSDK/upstream/emscripten/}emcc jspi.c -o jspi.js -sJSPI -s JSPI_EXPORTS='[\"run_async\"]' -gdwarf-5 -gembed-source -O0 -s EXPORTED_RUNTIME_METHODS='[\"cwrap\",\"ccall\"]' -s MODULARIZE=1 -s EXPORT_NAME=JspiModule",
     "build:fixture-large": "bash scripts/build-fixture-large.sh"
   },
   "dependencies": {

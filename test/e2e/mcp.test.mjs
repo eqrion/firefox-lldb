@@ -104,24 +104,14 @@ test("MCP: launch, set a breakpoint, continue, hit it", async () => {
   });
 });
 
-test(
-  "MCP: thread list shows workers in a threaded program (#7)",
-  {
-    skip:
-      "MT-4 (see project_multithreading_qa memory): same root cause as " +
-      "threaded.test.mjs -- exercises the same threaded fixture's " +
-      "interrupt+resume cycle, just through the MCP/pty path instead of " +
-      "Session, and can hang the same way.",
-  },
-  async () => {
-    await withSession("threaded", async (client, fx) => {
-      const bp = await send(client, "lldb_send", { command: `breakpoint set -n ${fx.breakFunc}` });
-      assert.match(bp, /Breakpoint 1/, `breakpoint set output: ${bp}`);
+test("MCP: thread list shows workers in a threaded program (#7)", async () => {
+  await withSession("threaded", async (client, fx) => {
+    const bp = await send(client, "lldb_send", { command: `breakpoint set -n ${fx.breakFunc}` });
+    assert.match(bp, /Breakpoint 1/, `breakpoint set output: ${bp}`);
 
-      await send(client, "lldb_send", { command: "continue", timeoutMs: 60000 });
+    await send(client, "lldb_send", { command: "continue", timeoutMs: 60000 });
 
-      const threads = await send(client, "lldb_send", { command: "thread list" });
-      assert.match(threads, /thread #1/, `thread list output: ${threads}`);
-    });
-  }
-);
+    const threads = await send(client, "lldb_send", { command: "thread list" });
+    assert.match(threads, /thread #1/, `thread list output: ${threads}`);
+  });
+});
