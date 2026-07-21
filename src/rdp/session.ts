@@ -43,6 +43,8 @@ import {
   type SourceForm,
   type SourcesResponse,
   type SourceResponse,
+  type ArrayBufferGrip,
+  type ArrayBufferSliceResponse,
   type LongStringGrip,
   type SubstringResponse,
   type GetBreakpointPositionsResponse,
@@ -57,7 +59,13 @@ import {
 import { EventEmitter } from "node:events";
 import { LAUNCH_TOKEN_PREF } from "./firefox.js";
 import { EMPTY_WASM_MODULE, DETACH_GRACE_MS } from "./constants.js";
-import { noopLogger, type RspLogger } from "../protocol/rsp-server.js";
+import { noopLogger, type Logger } from "../logging.js";
+import {
+  defaultModuleByteProvider,
+  isWasmBinary,
+  MAX_MODULE_BYTES,
+  type ModuleByteProvider,
+} from "./module-bytes.js";
 
 export { grip, type TabInfo, type SourceForm, type FrameForm, type PauseEvent, type StoppedEvent };
 
@@ -137,52 +145,26 @@ function toTabInfos(tabs: RdpTabForm[] | undefined): TabInfo[] {
   return (tabs ?? []).map((t) => ({ actor: t.actor, url: t.url ?? "", title: t.title ?? "" }));
 }
 
-/** Watch tab list changes, calling onTabs on every change. Resolves when the connection closes. */
-export async function watchFirefoxTabs(
-  port = 6080,
-  host = "127.0.0.1",
-  onTabs: (tabs: TabInfo[]) => void
-): Promise<void> {
-  const client = await RdpClient.connect(port, host);
-  client.on("error", () => {}); // prevent unhandled-error crashes on malformed data
-
-  const query = async () => {
-    const { tabs } = (await client.request(ROOT_ACTOR, {
-      type: REQUESTS.listTabs,
-    })) as ListTabsResponse;
-    onTabs(toTabInfos(tabs));
-  };
-
-  client.on("event", (p) => {
-    if (p.type === EVENTS.tabListChanged || p.type === EVENTS.tabNavigated) void query();
-  });
-
-  await query();
-  // One delayed re-query to handle the startup race where Firefox hadn't
-  // created any tabs yet when we first connected (listTabs returned []).
-  const startupRetry = setTimeout(() => void query().catch(() => {}), 2000);
-
-  await new Promise<void>((resolve) =>
-    client.on("close", () => {
-      clearTimeout(startupRetry);
-      resolve();
-    })
-  );
-}
-
 /**
- * Like watchFirefoxTabs, but also enables observeWasm:true on each tab via a
- * persistent watcher. The thread config survives page navigation: any page
+ * Watch the tab list and enable observeWasm:true on each tab via a persistent
+ * watcher. The thread config survives page navigation: any page
  * loaded in a primed tab after this call compiles wasm in debug mode, making
  * breakpoints available without a reload. Resolves when the connection closes.
  */
 export async function watchAndPrimeFirefoxTabs(
   port = 6080,
   host = "127.0.0.1",
-  onTabs: (tabs: TabInfo[]) => void
+  onTabs: (tabs: TabInfo[]) => void,
+  logger: Logger = noopLogger,
+  signal?: AbortSignal
 ): Promise<void> {
-  const client = await RdpClient.connect(port, host);
-  client.on("error", () => {}); // prevent unhandled-error crashes on malformed data
+  const client = await RdpClient.connect(port, host, { logger });
+  const abort = () => client.close();
+  if (signal?.aborted) abort();
+  else signal?.addEventListener("abort", abort, { once: true });
+  client.on("error", (err: Error) =>
+    logger.warn(`[rdp] tab watcher transport error: ${err.message}`)
+  );
 
   const primedActors = new Set<string>();
 
@@ -212,9 +194,12 @@ export async function watchAndPrimeFirefoxTabs(
       // and EventFuture.finish hangs waiting for the trap's paused event.
       // The launcher's own RdpWasmSession calls watchTargets in #init(), making
       // it the sole subscriber and ensuring it receives all thread events.
-    } catch {
+    } catch (err) {
       // Tab may have disappeared; ignore and let the next query re-prime it.
       primedActors.delete(tabActor);
+      logger.debug(
+        `[rdp] could not prime tab ${tabActor}: ${err instanceof Error ? err.message : String(err)}`
+      );
     }
   };
 
@@ -229,18 +214,37 @@ export async function watchAndPrimeFirefoxTabs(
 
   client.on("event", (p) => {
     if (p.type === EVENTS.tabListChanged || p.type === EVENTS.tabNavigated)
-      void query().catch(() => {});
+      void query().catch((err) =>
+        logger.debug(
+          `[rdp] tab refresh failed: ${err instanceof Error ? err.message : String(err)}`
+        )
+      );
   });
 
-  await query();
-  const startupRetry = setTimeout(() => void query().catch(() => {}), 2000);
+  try {
+    await query();
+    const startupRetry = setTimeout(
+      () =>
+        void query().catch((err) =>
+          logger.debug(
+            `[rdp] startup tab query failed: ${err instanceof Error ? err.message : String(err)}`
+          )
+        ),
+      2000
+    );
 
-  await new Promise<void>((resolve) =>
-    client.on("close", () => {
-      clearTimeout(startupRetry);
-      resolve();
-    })
-  );
+    await new Promise<void>((resolve) =>
+      client.on("close", () => {
+        clearTimeout(startupRetry);
+        resolve();
+      })
+    );
+  } catch (err) {
+    client.close();
+    throw err;
+  } finally {
+    signal?.removeEventListener("abort", abort);
+  }
 }
 
 export interface ThreadInfo {
@@ -254,7 +258,8 @@ export interface ThreadInfo {
 
 export class RdpWasmSession extends EventEmitter {
   #client: RdpClient;
-  #logger: RspLogger;
+  #logger: Logger;
+  #moduleByteProvider: ModuleByteProvider;
   #tabActor!: string;
   #watcher!: string;
 
@@ -266,7 +271,6 @@ export class RdpWasmSession extends EventEmitter {
   #stoppedTid = 1;
 
   // tids that we interrupted during all-stop (to be resumed on next continue)
-  #interruptedTids = new Set<number>();
   // tids that are currently paused (breakpoint, step, or interrupt)
   #pausedTids = new Set<number>();
   // Subset of #pausedTids that paused with no armAllStop listener catching
@@ -292,6 +296,7 @@ export class RdpWasmSession extends EventEmitter {
 
   // Pending "is this top-level destroy a real close?" checks (see DETACH_GRACE_MS).
   #pendingDetachChecks = new Set<ReturnType<typeof setTimeout>>();
+  #closed = false;
 
   // tid to hand to the next top-level target, reused from the one a
   // navigation just destroyed rather than minted fresh. LLDB has no RSP
@@ -328,16 +333,17 @@ export class RdpWasmSession extends EventEmitter {
     this.emit("navigated", info);
   }
 
-  private constructor(client: RdpClient, logger: RspLogger) {
+  private constructor(client: RdpClient, logger: Logger, moduleByteProvider: ModuleByteProvider) {
     super();
     this.#client = client;
     this.#logger = logger;
+    this.#moduleByteProvider = moduleByteProvider;
     // Forward transport close so consumers can unblock pending promises.
-    client.on("close", () => this.emit("close"));
-    // Absorb transport errors (malformed data, JSON parse failures) so an
-    // unhandled 'error' event doesn't crash the process. The socket will also
-    // emit 'close' immediately after, which triggers proper cleanup.
-    client.on("error", () => {});
+    client.on("close", () => {
+      this.#closed = true;
+      this.emit("close");
+    });
+    client.on("error", (err: Error) => this.#logger.error(`[rdp] transport error: ${err.message}`));
   }
 
   // --- public accessors ---
@@ -382,12 +388,21 @@ export class RdpWasmSession extends EventEmitter {
     port = 6080,
     host = "127.0.0.1",
     tabActor?: string,
-    logger: RspLogger = noopLogger
+    logger: Logger = noopLogger,
+    moduleByteProvider: ModuleByteProvider = defaultModuleByteProvider
   ): Promise<RdpWasmSession> {
-    const client = await RdpClient.connect(port, host);
-    const session = new RdpWasmSession(client, logger);
-    await session.#init(tabActor);
-    return session;
+    const client = await RdpClient.connect(port, host, { logger });
+    const session = new RdpWasmSession(client, logger, moduleByteProvider);
+    try {
+      await session.#init(tabActor);
+      return session;
+    } catch (err) {
+      // Initialization is transactional: callers commonly retry while Firefox
+      // is still starting, so retaining the failed socket would leak one RDP
+      // connection per attempt.
+      client.close();
+      throw err;
+    }
   }
 
   async #init(tabActor?: string): Promise<void> {
@@ -472,7 +487,13 @@ export class RdpWasmSession extends EventEmitter {
         this.#threads.set(tid, info);
 
         // Apply any buffered breakpoints to the new worker.
-        void this.#applyBreakpoints(info);
+        void this.#applyBreakpoints(info).catch((err) =>
+          this.#logger.warn(
+            `[rdp] could not apply buffered breakpoints to tid ${info.tid}: ${
+              err instanceof Error ? err.message : String(err)
+            }`
+          )
+        );
 
         this.emit("target", info);
         break;
@@ -492,7 +513,6 @@ export class RdpWasmSession extends EventEmitter {
           this.#threads.delete(tid);
           this.#pausedTids.delete(tid);
           this.#pausePacketByTid.delete(tid);
-          this.#interruptedTids.delete(tid);
           // The page's tab was closed or navigated away; let consumers react
           // (e.g. firefox-lldb detaches the lldb process). Give a Fission
           // process-swap replacement (see DETACH_GRACE_MS) a chance to arrive
@@ -564,7 +584,6 @@ export class RdpWasmSession extends EventEmitter {
         this.#threads.delete(tid);
         this.#pausedTids.delete(tid);
         this.#pausePacketByTid.delete(tid);
-        this.#interruptedTids.delete(tid);
         removed = t;
         // Firefox's own target-destroyed-form for this target won't find it
         // in #threads anymore (we just removed it above) to offer this tid
@@ -666,44 +685,34 @@ export class RdpWasmSession extends EventEmitter {
     }
   }
 
-  wasmActorForUrl(url: string): string | undefined {
-    return this.#wasmActorByUrl.get(url);
-  }
-
   /** URL for a wasm or JS source actor, if known (populated by wasmSourcesForTid/jsSources). */
   urlForSourceActor(actor: string): string | undefined {
     return this.#sourceUrlByActor.get(actor);
   }
 
   async fetchModuleBytes(url: string): Promise<Uint8Array> {
+    const actor = this.#wasmActorByUrl.get(url);
     if (url.startsWith("http://") || url.startsWith("https://")) {
       try {
-        // Marks this as the debugger's own out-of-band fetch (distinct from
-        // the browser's page-load request for the same URL) — lets a server
-        // log, or a test harness, tell the two apart.
-        const resp = await fetch(url, { headers: { "X-Firefox-Lldb": "module-fetch" } });
-        return new Uint8Array(await resp.arrayBuffer());
+        return await this.#moduleByteProvider.fetch(url);
       } catch (e) {
-        // A network failure here (e.g. a self-signed dev cert Node's fetch
-        // doesn't trust) must not propagate: Module.bytecode's WIT signature
-        // has no error case, so an uncaught throw traps the whole gdbstub
-        // component instead of just this one module. Degrade the same way
-        // the non-HTTP fallback below does.
-        this.#logger.error(
-          `[rdp] failed to fetch module bytes from ${url}: ${(e as Error).message}`
+        // A Node-side fetch may lack the page's credentials, client cert, or
+        // cache context. Fall back to Firefox's source actor, which exposes the
+        // exact browser-loaded ArrayBuffer.
+        this.#logger.debug(
+          `[rdp] out-of-band module fetch failed for ${url}; trying browser source: ${
+            e instanceof Error ? e.message : String(e)
+          }`
         );
-        return EMPTY_WASM_MODULE;
       }
     }
-    // Non-HTTP URL (e.g. "wasm:" for JSPI synthetic wrapper modules): try the
-    // RDP source actor. If that also fails, return a minimal valid wasm binary
-    // (magic + version only) so the gdbstub doesn't crash — it will find no
-    // DWARF and continue without debug info for this synthetic module.
-    const actor = this.#wasmActorByUrl.get(url);
     if (actor) {
       const bytes = await this.#fetchWasmBytesFromActor(actor);
-      if (bytes) return bytes;
+      if (bytes && isWasmBinary(bytes)) return bytes;
     }
+    // Module.bytecode's WIT signature has no error case. Return a minimal valid
+    // wasm binary so one unavailable module does not trap the entire component.
+    this.#logger.error(`[rdp] could not acquire valid module bytes for ${url}`);
     return EMPTY_WASM_MODULE;
   }
 
@@ -715,16 +724,57 @@ export class RdpWasmSession extends EventEmitter {
       })) as SourceResponse;
       const src = resp.source;
       if (src instanceof Uint8Array) return src;
-      if (ArrayBuffer.isView(src)) return new Uint8Array((src as ArrayBufferView).buffer);
+      if (ArrayBuffer.isView(src)) {
+        const view = src as ArrayBufferView;
+        return new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+      }
       if (src instanceof ArrayBuffer) return new Uint8Array(src);
+      if (
+        src &&
+        typeof src === "object" &&
+        (src as Partial<ArrayBufferGrip>).typeName === "arraybuffer"
+      ) {
+        const grip = src as ArrayBufferGrip;
+        if (!Number.isInteger(grip.length) || grip.length < 0 || grip.length > MAX_MODULE_BYTES) {
+          throw new Error(`invalid ArrayBuffer length ${grip.length}`);
+        }
+        let sliced: ArrayBufferSliceResponse;
+        try {
+          sliced = (await this.#client.request(grip.actor, {
+            type: REQUESTS.slice,
+            start: 0,
+            count: grip.length,
+          })) as ArrayBufferSliceResponse;
+        } finally {
+          await this.#client
+            .request(grip.actor, { type: REQUESTS.release })
+            .catch((err) =>
+              this.#logger.debug(
+                `[rdp] could not release ArrayBuffer actor ${grip.actor}: ${
+                  err instanceof Error ? err.message : String(err)
+                }`
+              )
+            );
+        }
+        if (typeof sliced.encoded !== "string") throw new Error("ArrayBuffer slice has no data");
+        const bytes = Uint8Array.from(Buffer.from(sliced.encoded, "base64"));
+        if (bytes.length !== grip.length) {
+          throw new Error(`ArrayBuffer slice length mismatch (${bytes.length} != ${grip.length})`);
+        }
+        return bytes;
+      }
       if (typeof src === "string" && src.length > 4 && src.charCodeAt(0) === 0) {
         // Binary string (latin-1 encoded wasm bytes starting with \0asm)
         const out = new Uint8Array(src.length);
         for (let i = 0; i < src.length; i++) out[i] = src.charCodeAt(i) & 0xff;
         return out;
       }
-    } catch {
-      // fall through
+    } catch (err) {
+      this.#logger.debug(
+        `[rdp] source actor ${sourceActor} did not provide wasm bytes: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
     }
     return null;
   }
@@ -836,29 +886,23 @@ export class RdpWasmSession extends EventEmitter {
   // --- frames ---
 
   async frames(tid: number, start = 0, count = 1000): Promise<FrameForm[]> {
-    // Cap at 5 s for threads in mid-resume transition (they never respond).
-    // Clear the timer and close listener whether req, timeout, or close wins,
-    // so neither lingers in the event loop after the call returns.
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let onClose: (() => void) | undefined;
-    const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error("frames timeout")), 5000);
-    });
-    const closeP = new Promise<never>((_, reject) => {
-      onClose = () => reject(new Error("session closed"));
-      this.once("close", onClose);
-    });
+    // A timed-out actor FIFO cannot safely accept later requests, so let the
+    // client enforce the deadline and close the poisoned connection instead of
+    // abandoning a still-pending request behind a local Promise.race.
     try {
-      const req = this.#client.request(this.#info(tid).threadActor, {
-        type: REQUESTS.frames,
-        start,
-        count,
-      });
-      const { frames } = (await Promise.race([req, timeout, closeP])) as FramesResponse;
+      const { frames } = (await this.#client.request(
+        this.#info(tid).threadActor,
+        {
+          type: REQUESTS.frames,
+          start,
+          count,
+        },
+        { timeoutMs: 5000 }
+      )) as FramesResponse;
       return frames ?? [];
-    } finally {
-      clearTimeout(timer);
-      if (onClose) this.off("close", onClose);
+    } catch (err) {
+      if (this.#closed) throw new Error("session closed", { cause: err });
+      throw err;
     }
   }
 
@@ -977,7 +1021,6 @@ export class RdpWasmSession extends EventEmitter {
    */
   async resumeAll(): Promise<void> {
     const toResume = [...this.#pausedTids];
-    this.#interruptedTids.clear();
     for (const tid of toResume) {
       const info = this.#threads.get(tid);
       if (!info) continue;
@@ -1023,7 +1066,12 @@ export class RdpWasmSession extends EventEmitter {
       if (fired) return;
       fired = true;
       cleanup();
-      void this.#allStop(tid, packet);
+      void this.#allStop(tid, packet).catch((err) => {
+        this.#logger.error(
+          `[rdp] all-stop coordination failed: ${err instanceof Error ? err.message : String(err)}`
+        );
+        this.close();
+      });
     };
 
     // If the session closes before any thread pauses, clean up the listeners
@@ -1079,7 +1127,6 @@ export class RdpWasmSession extends EventEmitter {
         });
         this.#client.send(info.threadActor, { type: REQUESTS.interrupt, when: {} });
         await paused;
-        if (this.#pausedTids.has(tid)) this.#interruptedTids.add(tid);
       })
     );
 
@@ -1151,7 +1198,13 @@ export class RdpWasmSession extends EventEmitter {
       started.add(actor);
       void this.#client
         .request(actor, { type: REQUESTS.startListeners, listeners: ["ConsoleAPI", "PageError"] })
-        .catch(() => {});
+        .catch((err) =>
+          this.#logger.debug(
+            `[rdp] could not start console listeners on ${actor}: ${
+              err instanceof Error ? err.message : String(err)
+            }`
+          )
+        );
     };
     for (const t of this.#threads.values()) startFor(t.consoleActor);
     this.on("target", (t: ThreadInfo) => startFor(t.consoleActor));
@@ -1194,15 +1247,15 @@ export class RdpWasmSession extends EventEmitter {
     const consoleActor =
       consoleActorOverride ?? [...this.#threads.values()].find((t) => t.consoleActor)?.consoleActor;
     if (!consoleActor) throw new Error("no console actor");
-    const ack = (await this.#client.request(consoleActor, {
-      type: REQUESTS.evaluateJSAsync,
-      text,
-      ...(frameActor ? { frameActor } : {}),
-    })) as EvaluateJSAsyncAck;
-    const resultID = ack.resultID;
-    return new Promise<RdpPacket>((resolve, reject) => {
+    // Firefox may send evaluationResult immediately after the acknowledgement,
+    // in the same TCP chunk. Install the listener before sending the request so
+    // the promise continuation after `await request()` cannot miss that result.
+    let resultID: string | undefined;
+    const earlyResults = new Map<string, RdpPacket>();
+    let cleanup!: () => void;
+    const result = new Promise<RdpPacket>((resolve, reject) => {
       let done = false;
-      const cleanup = () => {
+      cleanup = () => {
         if (done) return;
         done = true;
         clearTimeout(timer);
@@ -1211,13 +1264,15 @@ export class RdpWasmSession extends EventEmitter {
       };
       const timer = setTimeout(() => {
         cleanup();
-        reject(new Error("evaluateInFrame timeout"));
-      }, 500);
+        reject(new Error("JavaScript evaluation timed out after 5000 ms"));
+      }, 5000);
       const onEvent = (p: RdpPacket) => {
-        if (
-          p.type === EVENTS.evaluationResult &&
-          (p as { resultID?: string }).resultID === resultID
-        ) {
+        if (p.type !== EVENTS.evaluationResult) return;
+        const id = (p as { resultID?: string }).resultID;
+        if (!id) return;
+        if (resultID === undefined) {
+          earlyResults.set(id, p);
+        } else if (id === resultID) {
           cleanup();
           resolve(p);
         }
@@ -1229,9 +1284,29 @@ export class RdpWasmSession extends EventEmitter {
       this.#client.on("event", onEvent);
       this.once("close", onClose);
     });
+    try {
+      const ack = (await this.#client.request(consoleActor, {
+        type: REQUESTS.evaluateJSAsync,
+        text,
+        ...(frameActor ? { frameActor } : {}),
+      })) as EvaluateJSAsyncAck;
+      resultID = ack.resultID;
+      if (!resultID) throw new Error("Firefox did not return an evaluation result ID");
+      const early = earlyResults.get(resultID);
+      if (early) {
+        cleanup();
+        return early;
+      }
+      return await result;
+    } catch (err) {
+      cleanup();
+      throw err;
+    }
   }
 
   close(): void {
+    if (this.#closed) return;
+    this.#closed = true;
     for (const timer of this.#pendingDetachChecks) clearTimeout(timer);
     this.#pendingDetachChecks.clear();
     this.#client.close();

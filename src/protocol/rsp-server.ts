@@ -9,6 +9,7 @@
 
 import net from "node:net";
 import { PacketParser, framePacket } from "./packet.js";
+import { noopLogger, type Logger } from "../logging.js";
 
 export interface RspHandler {
   /**
@@ -19,40 +20,25 @@ export interface RspHandler {
   handle(payload: Buffer, session: RspSession): Promise<Uint8Array | string | null>;
 }
 
-export interface RspLogger {
-  debug(msg: string): void;
-  info(msg: string): void;
-  warn(msg: string): void;
-  error(msg: string): void;
-}
-
-export const noopLogger: RspLogger = {
-  debug() {},
-  info() {},
-  warn() {},
-  error() {},
-};
+/** @deprecated Import Logger from logging.ts in non-RSP code. */
+export type RspLogger = Logger;
 
 /** One client connection. Created by RspServer for each accepted socket. */
 export class RspSession {
   #socket: net.Socket;
   #parser = new PacketParser();
   #handler: RspHandler;
-  #log: RspLogger;
+  #log: Logger;
   #noAck = false;
   #queue: Promise<void> = Promise.resolve();
 
-  constructor(socket: net.Socket, handler: RspHandler, log: RspLogger) {
+  constructor(socket: net.Socket, handler: RspHandler, log: Logger) {
     this.#socket = socket;
     this.#handler = handler;
     this.#log = log;
 
     socket.on("data", (data: Buffer) => this.#onData(data));
     socket.on("error", (err) => this.#log.warn(`socket error: ${err.message}`));
-  }
-
-  get noAckMode(): boolean {
-    return this.#noAck;
   }
 
   setNoAckMode(on: boolean): void {
@@ -118,14 +104,13 @@ export class RspSession {
 /** A TCP server that hands each accepted connection to an RspHandler. */
 export class RspServer {
   #server: net.Server;
-  #log: RspLogger;
+  #log: Logger;
   #port = 0;
   #sockets = new Set<net.Socket>();
+  #listening = false;
+  #closePromise: Promise<void> | undefined;
 
-  constructor(
-    handler: RspHandler,
-    options: { logger?: RspLogger; singleConnection?: boolean } = {}
-  ) {
+  constructor(handler: RspHandler, options: { logger?: Logger; singleConnection?: boolean } = {}) {
     this.#log = options.logger ?? noopLogger;
     let active: RspSession | null = null;
 
@@ -158,6 +143,7 @@ export class RspServer {
       this.#server.listen(port, host, () => {
         const addr = this.#server.address();
         this.#port = typeof addr === "object" && addr ? addr.port : port;
+        this.#listening = true;
         this.#log.info(`listening on ${host}:${this.#port}`);
         resolve(this.#port);
       });
@@ -169,11 +155,20 @@ export class RspServer {
   }
 
   close(): Promise<void> {
+    if (this.#closePromise) return this.#closePromise;
+    if (!this.#listening) return Promise.resolve();
     // Destroy any open client sockets so the close callback fires promptly even
     // if LLDB is still connected. Without this, server.close() would wait
     // indefinitely for LLDB to disconnect voluntarily.
     for (const s of this.#sockets) s.destroy();
-    return new Promise((resolve) => this.#server.close(() => resolve()));
+    this.#closePromise = new Promise((resolve, reject) =>
+      this.#server.close((err) => {
+        this.#listening = false;
+        if (err) reject(err);
+        else resolve();
+      })
+    );
+    return this.#closePromise;
   }
 }
 

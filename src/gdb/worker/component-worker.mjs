@@ -25,6 +25,11 @@ const data = new Uint8Array(workerData.sab, 16);
 // Synchronous RPC: write request, signal main, block until the response lands.
 function rpc(type, id, method, args) {
   const msg = encode({ type, id, method, args });
+  if (msg.length > data.length) {
+    const err = new Error("out-of-bounds");
+    err.payload = "out-of-bounds";
+    throw err;
+  }
   data.set(msg, 0);
   Atomics.store(ctrl, CTRL_LEN, msg.length);
   Atomics.store(ctrl, CTRL_STATE, STATE_REQUEST);

@@ -344,3 +344,18 @@ test("qUserName returns a hex-encoded non-empty username string", async () => {
 test("unsupported packets get an empty response", async () => {
   assert.equal(await client.requestText("vCont?"), "");
 });
+
+test("GdbServerSpawner.killAll waits for asynchronous server termination", async () => {
+  let release!: () => void;
+  const stopped = new Promise<void>((resolve) => (release = resolve));
+  const sp = new GdbServerSpawner(async () => ({ port: 1, stop: () => stopped }));
+  await sp.launch();
+
+  let finished = false;
+  const killing = sp.killAll().then(() => (finished = true));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(finished, false);
+  release();
+  await killing;
+  assert.equal(finished, true);
+});

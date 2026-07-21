@@ -25,6 +25,13 @@ export const FIXTURES = {
     breakFunc: "compute_factorial",
     file: "math.cpp",
   },
+  auth_factorial: {
+    pageDir: "test/fixtures/simple",
+    fire: "runFactorial()",
+    breakFunc: "compute_factorial",
+    file: "math.cpp",
+    requireAuth: true,
+  },
   sum_range: {
     pageDir: "test/fixtures/simple",
     fire: "runSum()",
@@ -127,7 +134,7 @@ export const FIXTURES = {
 
 const MIME = { ".html": "text/html", ".js": "text/javascript", ".wasm": "application/wasm" };
 
-export function startStaticServer(pageDir) {
+export function startStaticServer(pageDir, { requireAuth = false } = {}) {
   const dir = path.join(REPO, pageDir);
   let debuggerFetchCount = 0;
   const server = http.createServer((req, res) => {
@@ -139,10 +146,22 @@ export function startStaticServer(pageDir) {
     // debugger actually re-fetched (proving its bytecode cache was
     // invalidated) rather than just observing the browser's own re-fetch.
     if (req.headers["x-firefox-lldb"] === "module-fetch") debuggerFetchCount++;
+    if (
+      requireAuth &&
+      path.extname(rel) === ".wasm" &&
+      !req.headers.cookie?.includes("firefox_lldb_test=1")
+    ) {
+      res.writeHead(401, { "Content-Type": "text/plain" });
+      res.end("authentication required");
+      return;
+    }
     try {
       const body = readFileSync(path.join(dir, rel));
       res.writeHead(200, {
         "Content-Type": MIME[path.extname(rel)] ?? "application/octet-stream",
+        ...(requireAuth && path.extname(rel) === ".html"
+          ? { "Set-Cookie": "firefox_lldb_test=1; SameSite=Strict" }
+          : {}),
         // COOP/COEP so the page may use SharedArrayBuffer (threaded fixtures).
         "Cross-Origin-Opener-Policy": "same-origin",
         "Cross-Origin-Embedder-Policy": "require-corp",
@@ -317,7 +336,7 @@ export class Session {
   // one (reload, link click, location assignment) driven via evaluate().
   navigate(url) {
     if (!this.#rdpSession) throw new Error("navigate() requires onSession wiring — not available");
-    return this.#withCommandDeadline(this.#rdpSession.navigate(url));
+    return this.#withCommandDeadline(this.#rdpSession.navigate(url), 30_000, `navigate to ${url}`);
   }
 
   // Count of the debugger's own out-of-band module fetches (session.ts's
@@ -346,7 +365,7 @@ export class Session {
   static async attach(fxName, { headless = true, fire } = {}) {
     const fx = FIXTURES[fxName];
     if (!fx) throw new Error(`unknown fixture: ${fxName}`);
-    const staticServer = await startStaticServer(fx.pageDir);
+    const staticServer = await startStaticServer(fx.pageDir, { requireAuth: fx.requireAuth });
     const url = `http://127.0.0.1:${staticServer.port}/index.html`;
 
     const client = await LLDBClient.create();
@@ -359,6 +378,7 @@ export class Session {
         const args = parseCliArgs([
           "--launch",
           ...(headless ? ["--headless"] : []),
+          ...(process.env.E2E_VERBOSE ? ["--verbose"] : []),
           "--port",
           "0",
           "--rdp-port",
@@ -432,10 +452,10 @@ export class Session {
   // was previously unprotected: if the underlying RDP connection wedges
   // mid-test, nothing catches it until node's own --test-timeout abandons
   // the test, leaking Firefox (see project_ci_e2e_firefox_leak memory).
-  async #withCommandDeadline(promise, ms = 30_000) {
+  async #withCommandDeadline(promise, ms = 30_000, operation = "RDP command") {
     let timer;
     const timeout = new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`RDP command timed out after ${ms}ms`)), ms);
+      timer = setTimeout(() => reject(new Error(`${operation} timed out after ${ms}ms`)), ms);
     });
     try {
       const result = await Promise.race([promise, timeout]);
@@ -450,16 +470,24 @@ export class Session {
   }
 
   command(cmd) {
-    return this.#withCommandDeadline(this.#client.sessionCommand(cmd));
+    return this.#withCommandDeadline(
+      this.#client.sessionCommand(cmd),
+      30_000,
+      `LLDB command: ${cmd}`
+    );
   }
   state() {
-    return this.#withCommandDeadline(this.#client.sessionState());
+    return this.#withCommandDeadline(this.#client.sessionState(), 30_000, "read LLDB state");
   }
   frames() {
-    return this.#withCommandDeadline(this.#client.sessionFrames());
+    return this.#withCommandDeadline(this.#client.sessionFrames(), 30_000, "read LLDB frames");
   }
   variable(frameIndex, name) {
-    return this.#withCommandDeadline(this.#client.sessionVariable(frameIndex, name));
+    return this.#withCommandDeadline(
+      this.#client.sessionVariable(frameIndex, name),
+      30_000,
+      `read LLDB variable ${name}`
+    );
   }
 
   breakpointByName(name) {

@@ -58,10 +58,14 @@ export class GdbServerSpawner {
   }
 
   async killAll(): Promise<void> {
-    await Promise.all(
-      [...this.#servers.values()].map((e) => Promise.resolve(e.handle.stop()).catch(() => {}))
+    const results = await Promise.allSettled(
+      [...this.#servers.values()].map((e) => Promise.resolve(e.handle.stop()))
     );
     this.#servers.clear();
+    const errors = results
+      .filter((r): r is PromiseRejectedResult => r.status === "rejected")
+      .map((r) => r.reason);
+    if (errors.length) throw new AggregateError(errors, "failed to stop one or more GDB servers");
   }
 }
 

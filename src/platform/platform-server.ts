@@ -56,9 +56,8 @@ export class PlatformServer implements RspHandler {
   #serverByActor = new Map<string, Promise<{ pid: number; connectPort: number }>>();
   #actorByServerPid = new Map<number, string>();
 
-  // Per-connection state.
+  // State for the platform's single supported LLDB connection.
   #workingDir = process.cwd();
-  #env = new Map<string, string>();
   #launchArgs: string[] = [];
   #processMatches: ProcessInfo[] = [];
 
@@ -144,11 +143,9 @@ export class PlatformServer implements RspHandler {
     // (the GDB server attaches to a tab), so we accept and remember settings.
     if (data.startsWith("A")) return this.#setLaunchArgs(data);
     if (data.startsWith("QEnvironmentHexEncoded:")) {
-      this.#setEnv(hexToAscii(data.slice("QEnvironmentHexEncoded:".length)));
       return "OK";
     }
     if (data.startsWith("QEnvironment:")) {
-      this.#setEnv(data.slice("QEnvironment:".length));
       return "OK";
     }
     if (
@@ -290,11 +287,6 @@ export class PlatformServer implements RspHandler {
       this.#launchArgs[idx] = hexToAscii(parts[i + 2]);
     }
     return "OK";
-  }
-
-  #setEnv(pair: string): void {
-    const eq = pair.indexOf("=");
-    if (eq !== -1) this.#env.set(pair.slice(0, eq), pair.slice(eq + 1));
   }
 }
 

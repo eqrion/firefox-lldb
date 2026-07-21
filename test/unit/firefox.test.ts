@@ -4,7 +4,18 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { findFirefoxBinary } from "../../src/rdp/firefox.js";
+import { findFirefoxBinary, launchFirefox } from "../../src/rdp/firefox.js";
+import net from "node:net";
+
+async function freePort(): Promise<number> {
+  const server = net.createServer();
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as net.AddressInfo).port;
+  await new Promise<void>((resolve, reject) =>
+    server.close((err) => (err ? reject(err) : resolve()))
+  );
+  return port;
+}
 
 test("findFirefoxBinary returns a string or undefined (never throws)", () => {
   let result: string | undefined;
@@ -37,3 +48,14 @@ for (const channel of ["beta", "nightly"] as const) {
     );
   });
 }
+
+test("launchFirefox rejects a spawn failure instead of emitting an unhandled child error", async () => {
+  await assert.rejects(
+    launchFirefox({
+      rdpPort: await freePort(),
+      binary: "/definitely/not/a/firefox-binary",
+      headless: true,
+    }),
+    /could not start Firefox/
+  );
+});

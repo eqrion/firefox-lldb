@@ -33,6 +33,7 @@
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 import type {
   RdpWasmSession,
   FrameForm,
@@ -43,6 +44,9 @@ import type {
 import { buildSyntheticModule } from "./synthetic-module.js";
 import { inspect as inspectWasm, convert as convertSourceMap } from "../sourcemap/converter.js";
 import { EMPTY_WASM_MODULE, RESYNC_GRACE_MS } from "../rdp/constants.js";
+import { containedSourcePath } from "../sourcemap/materialize.js";
+import { sanitizeSourceMapBytes, sourceMapDataUrlBytes } from "../sourcemap/input.js";
+import { noopLogger, type Logger } from "../logging.js";
 
 function urlBasename(url: string): string {
   try {
@@ -52,6 +56,10 @@ function urlBasename(url: string): string {
     /* fall through */
   }
   return basename(url) || "source.js";
+}
+
+function urlKey(url: string): string {
+  return createHash("sha256").update(url).digest("hex").slice(0, 12);
 }
 
 export interface RpcRequest {
@@ -115,6 +123,7 @@ type Handler = (id: number, args: unknown[]) => unknown;
 
 export class RdpDebuggee {
   #session: RdpWasmSession;
+  #logger: Logger;
   #nextId = 1;
 
   // Stable module identity per source URL.
@@ -170,9 +179,20 @@ export class RdpDebuggee {
   // when a new top-level target arrives while a continue is outstanding (see
   // #scheduleResyncCheck).
   #resyncTimer: ReturnType<typeof setTimeout> | null = null;
+  #disposed = false;
+  #removeTempDir = (): void => {
+    try {
+      rmSync(this.#tmpDir, { recursive: true, force: true });
+    } catch (err) {
+      this.#logger.debug(
+        `[cleanup] could not remove ${this.#tmpDir}: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  };
 
-  constructor(session: RdpWasmSession, opts?: { onFirstContinue?: () => void }) {
+  constructor(session: RdpWasmSession, opts?: { onFirstContinue?: () => void; logger?: Logger }) {
     this.#session = session;
+    this.#logger = opts?.logger ?? noopLogger;
     this.#onFirstContinue = opts?.onFirstContinue ?? null;
 
     session.on("stopped", (e: StoppedEvent) => {
@@ -211,14 +231,16 @@ export class RdpDebuggee {
       if (info.isTopLevel) this.#scheduleResyncCheck(info.tid);
     });
 
-    const tmpDir = this.#tmpDir;
-    process.on("exit", () => {
-      try {
-        rmSync(tmpDir, { recursive: true });
-      } catch {
-        /* best-effort */
-      }
-    });
+    process.once("exit", this.#removeTempDir);
+  }
+
+  /** Release per-attach filesystem and process-level resources. Idempotent. */
+  dispose(): void {
+    if (this.#disposed) return;
+    this.#disposed = true;
+    this.#clearResyncTimer();
+    process.off("exit", this.#removeTempDir);
+    this.#removeTempDir();
   }
 
   // One entry per WIT method. dispatch() is just the lookup; each handler
@@ -344,36 +366,76 @@ export class RdpDebuggee {
     let info;
     try {
       info = await inspectWasm(bytes);
-    } catch {
+    } catch (err) {
+      this.#logger.debug(
+        `[sourcemap] could not inspect ${url}: ${err instanceof Error ? err.message : String(err)}`
+      );
       return bytes;
     }
     if (info.hasDwarf || !info.sourceMapUrl) return bytes;
 
     const mapUrl = info.sourceMapUrl;
     let mapBytes: Uint8Array | undefined;
-    if (!mapUrl.startsWith("data:")) {
+    if (mapUrl.startsWith("data:")) {
       try {
-        const resolved = new URL(mapUrl, url).href;
-        mapBytes = new Uint8Array(await (await fetch(resolved)).arrayBuffer());
-      } catch {
+        mapBytes = sourceMapDataUrlBytes(mapUrl);
+      } catch (err) {
+        this.#logger.warn(
+          `[sourcemap] could not decode data URL for ${url}: ${
+            err instanceof Error ? err.message : String(err)
+          }`
+        );
+        return bytes;
+      }
+    } else {
+      let resolved = mapUrl;
+      try {
+        resolved = new URL(mapUrl, url).href;
+        const response = await fetch(resolved);
+        if (!response.ok) throw new Error(`HTTP ${response.status} ${response.statusText}`);
+        mapBytes = new Uint8Array(await response.arrayBuffer());
+      } catch (err) {
+        this.#logger.warn(
+          `[sourcemap] could not fetch ${resolved}: ${err instanceof Error ? err.message : String(err)}`
+        );
         return bytes;
       }
     }
 
-    const compDir = join(this.#tmpDir, `${urlBasename(url)}.src`);
+    try {
+      mapBytes = sanitizeSourceMapBytes(mapBytes);
+    } catch (err) {
+      this.#logger.warn(
+        `[sourcemap] invalid source map for ${url}: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
+      return bytes;
+    }
+
+    const compDir = join(this.#tmpDir, `${urlBasename(url)}.${urlKey(url)}.src`);
     try {
       const res = await convertSourceMap(bytes, mapBytes, compDir);
       for (const sf of res.sources) {
-        const dest = join(compDir, sf.path.replace(/^\/+/, ""));
+        const dest = containedSourcePath(compDir, sf.path);
+        if (!dest) {
+          this.#logger.warn(`[sourcemap] refusing unsafe source path ${JSON.stringify(sf.path)}`);
+          continue;
+        }
         try {
           mkdirSync(dirname(dest), { recursive: true });
           writeFileSync(dest, sf.content);
-        } catch {
-          /* best-effort source materialization */
+        } catch (err) {
+          this.#logger.debug(
+            `[sourcemap] could not materialize ${dest}: ${err instanceof Error ? err.message : String(err)}`
+          );
         }
       }
       return res.wasm;
-    } catch {
+    } catch (err) {
+      this.#logger.warn(
+        `[sourcemap] conversion failed for ${url}: ${err instanceof Error ? err.message : String(err)}`
+      );
       return bytes;
     }
   }
@@ -480,12 +542,18 @@ export class RdpDebuggee {
     }
     const lineCount = text ? text.split("\n").length : 1;
     const name = urlBasename(url);
-    const filePath = join(this.#tmpDir, name);
+    const sourceDir = join(this.#tmpDir, `${name}.${urlKey(url)}.src`);
+    const filePath = join(sourceDir, name);
     if (text) {
       try {
+        mkdirSync(sourceDir, { recursive: true });
         writeFileSync(filePath, text, "utf8");
-      } catch {
-        /* best-effort */
+      } catch (err) {
+        this.#logger.debug(
+          `[source] could not materialize ${filePath}: ${
+            err instanceof Error ? err.message : String(err)
+          }`
+        );
       }
     }
     const syn = buildSyntheticModule({
@@ -707,10 +775,20 @@ export class RdpDebuggee {
         // Surface the pause we already have instead of losing it. A tid
         // merely left over from an already-reported stop (e.g. primeStop's
         // initial interrupt) isn't one of these and takes the normal path.
-        void this.#session.adoptPausedState();
+        void this.#session.adoptPausedState().catch((err) => {
+          this.#logger.error(
+            `[rdp] could not adopt paused state: ${err instanceof Error ? err.message : String(err)}`
+          );
+          this.#session.close();
+        });
       } else {
         this.#session.armAllStop();
-        this.#session.resumeAll().catch(() => {});
+        this.#session.resumeAll().catch((err) => {
+          this.#logger.error(
+            `[rdp] resume failed: ${err instanceof Error ? err.message : String(err)}`
+          );
+          this.#session.close();
+        });
         const cb = this.#onFirstContinue;
         this.#onFirstContinue = null;
         cb?.();
@@ -734,7 +812,12 @@ export class RdpDebuggee {
       // step-off dance even started), stepping now would silently resume
       // straight past it. Surface it instead, same as #doContinue's check.
       if (this.#session.hasUnwitnessedPause()) {
-        void this.#session.adoptPausedState();
+        void this.#session.adoptPausedState().catch((err) => {
+          this.#logger.error(
+            `[rdp] could not adopt paused state: ${err instanceof Error ? err.message : String(err)}`
+          );
+          this.#session.close();
+        });
         return this.#eventFutureRef();
       }
       this.#session.armAllStop();
@@ -889,7 +972,12 @@ export class RdpDebuggee {
         // onNewTarget already has a listener on it, #allStop is just still
         // running its interrupt-others phase), leave it alone rather than
         // racing a second #allStop against the one already in flight.
-        void this.#session.adoptPausedState();
+        void this.#session.adoptPausedState().catch((err) => {
+          this.#logger.error(
+            `[rdp] could not adopt paused state: ${err instanceof Error ? err.message : String(err)}`
+          );
+          this.#session.close();
+        });
         return;
       }
       this.#stop.forcingResync = true;

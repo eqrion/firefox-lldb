@@ -22,7 +22,15 @@ export function exitWhenOrphaned(): boolean {
 
 /** Marionette port for firefox-devtools-mcp's BiDi page driver. Default 2828. */
 export function marionettePort(): number {
-  return Number(process.env.FIREFOX_LLDB_MARIONETTE_PORT ?? 2828);
+  const value = Number(process.env.FIREFOX_LLDB_MARIONETTE_PORT ?? 2828);
+  if (!Number.isInteger(value) || value < 1 || value > 65535) {
+    throw new Error(
+      `FIREFOX_LLDB_MARIONETTE_PORT must be an integer from 1 to 65535, got ${String(
+        process.env.FIREFOX_LLDB_MARIONETTE_PORT
+      )}`
+    );
+  }
+  return value;
 }
 
 /** Directory to mirror each launched Firefox's stdout/stderr into, if set. */

@@ -17,10 +17,21 @@ async function main(): Promise<void> {
   // Stdout is the control channel for the firefox-lldb wrapper; stderr carries logs.
   process.stdout.write(`platform server ready on connect://localhost:${handle.port}\n`);
 
-  const onSignal = () => void handle.shutdown().then(() => process.exit(0));
+  let shuttingDown = false;
+  const onSignal = () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    void handle.shutdown().then(
+      () => process.exit(0),
+      (err) => {
+        console.error(err);
+        process.exit(1);
+      }
+    );
+  };
   process.on("SIGINT", onSignal);
   process.on("SIGTERM", onSignal);
-  process.on("SIGHUP", () => {});
+  process.on("SIGHUP", onSignal);
 
   // When launched session-detached (e.g. the e2e harness uses setsid), a killed
   // parent does not signal us, so we would orphan the launched Firefox. Poll for
@@ -28,7 +39,7 @@ async function main(): Promise<void> {
   if (exitWhenOrphaned()) {
     const timer = setInterval(() => {
       if (process.ppid === 1) {
-        void handle.shutdown().then(() => process.exit(0));
+        onSignal();
       }
     }, 1000);
     timer.unref();

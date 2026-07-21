@@ -109,11 +109,19 @@ function sendText(r: SendResult): string {
   );
 }
 
+function timeoutArg(value: unknown, fallback: number): number {
+  const timeout = Number(value ?? fallback);
+  if (!Number.isFinite(timeout) || timeout < 0) {
+    throw new Error(`timeoutMs must be a non-negative finite number, got ${String(value)}`);
+  }
+  return timeout;
+}
+
 async function call(name: string, args: Record<string, unknown>) {
   switch (name) {
     case "lldb_launch": {
       if (repl) {
-        await repl.shutdown().catch(() => {});
+        await repl.shutdown();
         repl = undefined;
       }
       repl = await PtyRepl.launch({
@@ -131,7 +139,7 @@ async function call(name: string, args: Record<string, unknown>) {
     }
     case "lldb_send": {
       if (!repl) return text("error: no session — call lldb_launch first");
-      const r = await repl.send(String(args.command), Number(args.timeoutMs ?? 60_000));
+      const r = await repl.send(String(args.command), timeoutArg(args.timeoutMs, 60_000));
       return text(sendText(r));
     }
     case "lldb_interrupt": {
@@ -140,11 +148,11 @@ async function call(name: string, args: Record<string, unknown>) {
     }
     case "lldb_read": {
       if (!repl) return text("error: no session — call lldb_launch first");
-      return text((await repl.read(Number(args.timeoutMs ?? 2000))) || "(no output)");
+      return text((await repl.read(timeoutArg(args.timeoutMs, 2000))) || "(no output)");
     }
     case "lldb_shutdown": {
       if (!repl) return text("no session");
-      await repl.shutdown().catch(() => {});
+      await repl.shutdown();
       repl = undefined;
       return text("shut down");
     }
@@ -169,8 +177,13 @@ async function main(): Promise<void> {
   });
 
   const shutdown = async () => {
-    await repl?.shutdown().catch(() => {});
-    process.exit(0);
+    try {
+      await repl?.shutdown();
+      process.exit(0);
+    } catch (err) {
+      console.error(err);
+      process.exit(1);
+    }
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);

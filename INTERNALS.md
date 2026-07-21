@@ -123,6 +123,11 @@ Key modules:
 - `src/gdb/worker/host.mjs`, `component-worker.mjs`, `wire.mjs` — the worker +
   SAB RPC bridge
 
+RDP replies are FIFO per actor. Every request has a finite deadline; a timeout
+or malformed frame closes the entire RDP connection and rejects all pending
+work, because accepting a late reply after abandoning its request would shift
+the FIFO and corrupt every later reply on that actor.
+
 ### Source maps → DWARF (`src/sourcemap/`)
 
 Wasm modules built with a source map but no embedded DWARF (e.g. some toolchains
@@ -138,7 +143,11 @@ bytes and runs them through `#maybeConvertSourceMap`:
    returns rewritten wasm carrying synthesized DWARF plus the list of original
    source files.
 3. The returned sources are materialized under a per-module temp dir
-   (`<basename>.src`) so `source list` works; `compDir` is the DWARF comp-dir.
+   (`<basename>.<url-hash>.src`) so `source list` works without collisions;
+   `compDir` is the DWARF comp-dir.
+   Source names are rewritten to safe relative paths before DWARF conversion,
+   and the materializer independently verifies containment before filesystem
+   access, since source maps are remote page input.
 4. Any failure falls back to the original bytes — source-map support never breaks
    a module that would otherwise load.
 
@@ -197,20 +206,20 @@ requests, events) generated from [`src/rdp/protocol.ts`](src/rdp/protocol.ts),
 the single source of truth. The table below maps each debugger need to the
 part of that surface serving it.
 
-| Need               | RDP source                                                                                                                                                                                                                                |
-| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| wasm module list   | `thread.sources` (filter `introductionType === "wasm"`)                                                                                                                                                                                   |
-| wasm module bytes  | HTTP fetch of the source URL — the source actor cannot serve wasm binary; lldb reads DWARF from the fetched bytes                                                                                                                         |
-| Stack frames       | `thread.frames` returns interleaved `wasmcall`/`call` frames; both are surfaced to LLDB                                                                                                                                                   |
-| wasm PC            | a `wasmcall` frame's `where.line` is the byte offset (column is always 1; not column as the original design assumed)                                                                                                                      |
-| JS PC              | a `call` frame's `where.line` is the source line (1-based). Reported as `where.line + codeOffset` so LLDB's code-section subtraction recovers the DWARF address = source line.                                                            |
-| JS sources         | each JS source is a synthetic wasm module (`src/gdb/synthetic-module.ts`) with DWARF v4 mapping address L → line L. Source text is fetched via the source actor `source` request and written to a temp file for `source list`.            |
-| Breakpoints (wasm) | `thread.setBreakpoint` at `{ sourceUrl, line: <offset>, column: 1 }` — offset snapped to a valid position from `getBreakpointPositionsCompressed`; an invalid offset is a silent no-op in Firefox                                         |
-| Breakpoints (JS)   | same packet; line = source line number (pc - codeOffset), snapped to a valid (line, column) from `getBreakpointPositionsCompressed` on the JS source actor — an unsnapped column binds to nothing and the breakpoint silently never fires |
-| Continue / step    | `thread.resume()` / `thread.resume({type:"step"})` for wasm frames, `{type:"next"}` for a JS innermost frame (one wasm instruction jumps an arbitrary number of JS source lines); stop via the `paused` event                             |
-| Locals             | `frame.getEnvironment` → the `wasm function` scope's `var0..varN` bindings (raw i32/i64/f32/f64 values), returned to lldb in wasm-local-index order                                                                                       |
-| Linear memory      | evaluate `new Uint8Array(memory0.buffer, addr, len)` in the wasm frame's scope (`evaluateJSAsync` with `frameActor`); `memory0` lives in the `wasm instance` scope                                                                        |
-| Globals            | `wasm instance` scope `global0..globalN` bindings → `instance.get-global` / `global.get` → `qWasmGlobal`                                                                                                                                  |
+| Need               | RDP source                                                                                                                                                                                                                                                                                   |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| wasm module list   | `thread.sources` (filter `introductionType === "wasm"`)                                                                                                                                                                                                                                      |
+| wasm module bytes  | Use the injectable, validated HTTP provider, then fall back to Firefox's browser-owned ArrayBuffer source actor when Node lacks the page's credentials/cache context. HTTP errors, oversized bodies, and non-wasm responses fall back to an empty module rather than reaching the component. |
+| Stack frames       | `thread.frames` returns interleaved `wasmcall`/`call` frames; both are surfaced to LLDB                                                                                                                                                                                                      |
+| wasm PC            | a `wasmcall` frame's `where.line` is the byte offset (column is always 1; not column as the original design assumed)                                                                                                                                                                         |
+| JS PC              | a `call` frame's `where.line` is the source line (1-based). Reported as `where.line + codeOffset` so LLDB's code-section subtraction recovers the DWARF address = source line.                                                                                                               |
+| JS sources         | each JS source is a synthetic wasm module (`src/gdb/synthetic-module.ts`) with DWARF v4 mapping address L → line L. Source text is fetched via the source actor `source` request and written to a temp file for `source list`.                                                               |
+| Breakpoints (wasm) | `thread.setBreakpoint` at `{ sourceUrl, line: <offset>, column: 1 }` — offset snapped to a valid position from `getBreakpointPositionsCompressed`; an invalid offset is a silent no-op in Firefox                                                                                            |
+| Breakpoints (JS)   | same packet; line = source line number (pc - codeOffset), snapped to a valid (line, column) from `getBreakpointPositionsCompressed` on the JS source actor — an unsnapped column binds to nothing and the breakpoint silently never fires                                                    |
+| Continue / step    | `thread.resume()` / `thread.resume({type:"step"})` for wasm frames, `{type:"next"}` for a JS innermost frame (one wasm instruction jumps an arbitrary number of JS source lines); stop via the `paused` event                                                                                |
+| Locals             | `frame.getEnvironment` → the `wasm function` scope's `var0..varN` bindings (raw i32/i64/f32/f64 values), returned to lldb in wasm-local-index order                                                                                                                                          |
+| Linear memory      | evaluate `new Uint8Array(memory0.buffer, addr, len)` in the wasm frame's scope (`evaluateJSAsync` with `frameActor`); `memory0` lives in the `wasm instance` scope                                                                                                                           |
+| Globals            | `wasm instance` scope `global0..globalN` bindings → `instance.get-global` / `global.get` → `qWasmGlobal`                                                                                                                                                                                     |
 
 ## Testing
 

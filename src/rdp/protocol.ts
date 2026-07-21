@@ -18,6 +18,7 @@
 //                    -- target-available-form (one frame target + one per
 //                       emscripten pthread worker target)
 //                 -> sourceActor        -- a threadActor's `sources` reply
+//                    -> arrayBuffer actor -- binary content from `source`
 //                 -> frame actor        -- a threadActor's `frames` reply
 //                 -> longString actor   -- a grip with type "longString"
 //
@@ -55,6 +56,9 @@ export const REQUESTS = {
   getBreakpointPositionsCompressed: "getBreakpointPositionsCompressed",
   // longString actor
   substring: "substring",
+  // arrayBuffer actor
+  slice: "slice",
+  release: "release",
   // frame actor
   getEnvironment: "getEnvironment",
   // consoleActor
@@ -184,8 +188,19 @@ export interface LongStringGrip {
   initial?: string;
 }
 
+/** An ArrayBuffer actor grip returned for binary wasm source content. */
+export interface ArrayBufferGrip {
+  typeName: "arraybuffer";
+  actor: string;
+  length: number;
+}
+
 export interface SourceResponse {
-  source?: string | Uint8Array | ArrayBuffer | ArrayBufferView | LongStringGrip;
+  source?: string | Uint8Array | ArrayBuffer | ArrayBufferView | LongStringGrip | ArrayBufferGrip;
+}
+
+export interface ArrayBufferSliceResponse {
+  encoded?: string;
 }
 
 export interface SubstringArgs {

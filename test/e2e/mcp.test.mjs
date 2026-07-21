@@ -92,6 +92,15 @@ test("MCP: launch, set a breakpoint, continue, hit it", async () => {
 
     const frame = await send(client, "lldb_send", { command: "frame variable" });
     assert.ok(frame.length > 0, "frame variable returned output");
+
+    // MCP clients may issue tool calls concurrently. The PTY driver must keep
+    // command echoes/results paired rather than interleaving writes.
+    const [version, target] = await Promise.all([
+      send(client, "lldb_send", { command: "version" }),
+      send(client, "lldb_send", { command: "target list" }),
+    ]);
+    assert.match(version, /lldb version/i);
+    assert.match(target, /Current targets|target #0/i);
   });
 });
 

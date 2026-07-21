@@ -44,7 +44,9 @@ export function focusFirefoxWindow(pid: number): void {
           `tell application "System Events" to set frontmost of (first process whose unix id is ${pid}) to true`,
         ],
         { stdio: "ignore" }
-      );
+      ).on("error", () => {
+        // Window focus is best-effort and must never take down a debug session.
+      });
       break;
   }
 }
@@ -187,6 +189,15 @@ function isProfileLocked(profileDir: string): boolean {
 const MARKER_START = "// >>> firefox-lldb (auto-generated; safe to delete) >>>";
 const MARKER_END = "// <<< firefox-lldb <<<";
 
+async function readOptionalFile(path: string): Promise<string | undefined> {
+  try {
+    return await readFile(path, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw err;
+  }
+}
+
 function stripMarkedBlock(content: string): string {
   const start = content.indexOf(MARKER_START);
   if (start === -1) return content;
@@ -200,15 +211,15 @@ function stripMarkedBlock(content: string): string {
  * block, replacing any block a previous (e.g. crashed) run left behind. */
 async function writeUserJsBlock(profileDir: string, prefsBlock: string): Promise<void> {
   const path = join(profileDir, "user.js");
-  const existing = await readFile(path, "utf8").catch(() => "");
-  const cleaned = stripMarkedBlock(existing);
+  const existing = await readOptionalFile(path);
+  const cleaned = stripMarkedBlock(existing ?? "");
   await writeFile(path, `${cleaned}\n${MARKER_START}\n${prefsBlock}${MARKER_END}\n`);
 }
 
 /** Undo writeUserJsBlock: remove our block, deleting user.js if that leaves it empty. */
 async function removeUserJsBlock(profileDir: string): Promise<void> {
   const path = join(profileDir, "user.js");
-  const existing = await readFile(path, "utf8").catch(() => undefined);
+  const existing = await readOptionalFile(path);
   if (existing === undefined) return;
   const cleaned = stripMarkedBlock(existing).trim();
   if (cleaned === "") await rm(path, { force: true }).catch(() => {});
@@ -319,10 +330,19 @@ export async function launchFirefox(opts: {
   if (opts.marionettePort !== undefined) {
     prefs += `user_pref("marionette.port", ${opts.marionettePort});\n`;
   }
-  if (opts.defaultProfile) {
-    await writeUserJsBlock(profileDir, prefs);
-  } else {
-    await writeFile(join(profileDir, "user.js"), prefs);
+  const cleanFailedProfileSetup = async () => {
+    if (opts.defaultProfile) await removeUserJsBlock(profileDir).catch(() => {});
+    else await rm(profileDir, { recursive: true, force: true }).catch(() => {});
+  };
+  try {
+    if (opts.defaultProfile) {
+      await writeUserJsBlock(profileDir, prefs);
+    } else {
+      await writeFile(join(profileDir, "user.js"), prefs);
+    }
+  } catch (err) {
+    await cleanFailedProfileSetup();
+    throw err;
   }
 
   const args = [
@@ -342,19 +362,44 @@ export async function launchFirefox(opts: {
   // the whole group (Firefox + plugin-container children) with -pid on close.
   const logDir = firefoxLogDir();
   const stdio: StdioOptions = logDir ? ["ignore", "pipe", "pipe"] : "ignore";
-  const child: ChildProcess = spawn(binary, args, { stdio, detached: true });
+  let child: ChildProcess;
+  try {
+    child = spawn(binary, args, { stdio, detached: true });
+  } catch (err) {
+    await cleanFailedProfileSetup();
+    throw err;
+  }
   // Some Firefox launchers (notably macOS Nightly) hand off to the browser
   // process and exit almost immediately. Subscribe before doing any other
   // work with the child: otherwise it can exit between spawn() and the
   // listener below, leaving close() waiting forever for an event it missed.
+  const started = new Promise<void>((resolve, reject) => {
+    child.once("spawn", resolve);
+    child.once("error", reject);
+  });
   const exited = new Promise<void>((resolve) => {
     if (child.exitCode !== null) resolve();
-    else child.once("exit", () => resolve());
+    else {
+      child.once("exit", () => resolve());
+      // Node does not guarantee an "exit" event when spawning fails.
+      child.once("error", () => resolve());
+    }
   });
   if (logDir) {
     const out = createWriteStream(join(logDir, `firefox-${launchToken}.log`));
+    out.on("error", (err) => {
+      process.stderr.write(`warning: could not write Firefox log: ${err.message}\n`);
+    });
     child.stdout?.pipe(out);
     child.stderr?.pipe(out);
+  }
+  try {
+    await started;
+  } catch (err) {
+    await cleanFailedProfileSetup();
+    throw new Error(
+      `could not start Firefox (${binary}): ${err instanceof Error ? err.message : String(err)}`
+    );
   }
   child.unref();
 
@@ -362,12 +407,9 @@ export async function launchFirefox(opts: {
     bringToForeground(child.pid);
   }
 
-  return {
-    profileDir,
-    exited,
-    launchToken,
-    pid: child.pid,
-    close: async () => {
+  let closePromise: Promise<void> | undefined;
+  const close = () =>
+    (closePromise ??= (async () => {
       if (child.pid !== undefined) {
         try {
           process.kill(-child.pid, "SIGKILL");
@@ -381,8 +423,15 @@ export async function launchFirefox(opts: {
       if (opts.defaultProfile) {
         await removeUserJsBlock(profileDir);
       } else {
-        await rm(profileDir, { recursive: true, force: true }).catch(() => {});
+        await rm(profileDir, { recursive: true, force: true });
       }
-    },
+    })());
+
+  return {
+    profileDir,
+    exited,
+    launchToken,
+    pid: child.pid,
+    close,
   };
 }

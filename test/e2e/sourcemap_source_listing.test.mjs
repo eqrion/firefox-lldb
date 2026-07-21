@@ -25,6 +25,12 @@ test("wasm frame has a valid file and positive line number (from source map)", a
   assert.ok(f0.line > 0, "line number is positive");
 });
 
+test("source-map materialization remains rooted in the per-session source directory", async () => {
+  const frame = (await s.frames()).find((f) => f.file?.includes("math.cpp"));
+  assert.ok(frame?.file, "expected a source-mapped math.cpp frame");
+  assert.match(frame.file, /firefox-lldb-.*math\.wasm\.[a-f0-9]+\.src/);
+});
+
 test("a JS caller frame has a valid file ending in .js with a positive line number", async () => {
   const frames = await s.frames();
   const jsFrame = frames.find((f) => f.file?.endsWith(".js"));

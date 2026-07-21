@@ -19,6 +19,7 @@
 import { RdpTransport, type RdpPacket } from "./transport.js";
 import { EVENTS, ROOT_ACTOR } from "./protocol.js";
 import { EventEmitter } from "node:events";
+import type { Logger } from "../logging.js";
 
 // Unsolicited notification types (never treated as request replies). Firefox
 // sends {type:"interrupt"} as an ACK when a thread receives interrupt while
@@ -30,16 +31,28 @@ const EVENT_TYPES = new Set<string>(Object.values(EVENTS));
 interface Pending {
   resolve: (p: RdpPacket) => void;
   reject: (e: Error) => void;
+  timer?: ReturnType<typeof setTimeout>;
 }
+
+export interface RdpRequestOptions {
+  /** A timed-out actor FIFO cannot be resynchronized, so timeout closes the client. */
+  timeoutMs?: number;
+}
+
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const DEFAULT_GREETING_TIMEOUT_MS = 10_000;
 
 export class RdpClient extends EventEmitter {
   #transport: RdpTransport;
   #pending = new Map<string, Pending[]>();
   #ready: Promise<RdpPacket>;
+  #requestTimeoutMs: number;
+  #closed = false;
 
-  private constructor(transport: RdpTransport) {
+  private constructor(transport: RdpTransport, requestTimeoutMs: number) {
     super();
     this.#transport = transport;
+    this.#requestTimeoutMs = requestTimeoutMs;
     let resolveReady!: (p: RdpPacket) => void;
     let rejectReady!: (e: Error) => void;
     this.#ready = new Promise((r, j) => {
@@ -64,6 +77,8 @@ export class RdpClient extends EventEmitter {
       const queue = this.#pending.get(from);
       if (queue && queue.length) {
         const p = queue.shift()!;
+        if (queue.length === 0) this.#pending.delete(from);
+        clearTimeout(p.timer);
         if (packet.error) p.reject(new Error(`${packet.error}: ${packet.message ?? ""}`));
         else p.resolve(packet);
         return;
@@ -71,33 +86,72 @@ export class RdpClient extends EventEmitter {
       // Unsolicited packet with no matching request and no known event type.
       this.emit("unsolicited", packet);
     });
-    transport.on("error", (e) => this.emit("error", e));
+    transport.on("error", (e: Error) => {
+      this.#closed = true;
+      rejectReady(e);
+      this.#rejectPending(e);
+      this.#transport.close();
+      // During connect there may not be an external error listener yet. The
+      // rejected ready promise is the observable error in that phase.
+      if (this.listenerCount("error") > 0) this.emit("error", e);
+    });
     transport.on("close", () => {
+      this.#closed = true;
       this.emit("close");
       // Unblock the initial connect() if the root greeting never arrived.
       rejectReady(new Error("RDP connection closed before root greeting"));
       // Reject any in-flight requests so callers don't hang forever.
-      const err = new Error("RDP connection closed");
-      for (const queue of this.#pending.values()) {
-        for (const p of queue) p.reject(err);
-      }
-      this.#pending.clear();
+      this.#rejectPending(new Error("RDP connection closed"));
     });
   }
 
-  static async connect(port = 6080, host = "127.0.0.1"): Promise<RdpClient> {
-    const transport = await RdpTransport.connect(port, host);
-    const client = new RdpClient(transport);
-    await client.#ready; // wait for the root greeting
-    return client;
+  static async connect(
+    port = 6080,
+    host = "127.0.0.1",
+    options: { requestTimeoutMs?: number; greetingTimeoutMs?: number; logger?: Logger } = {}
+  ): Promise<RdpClient> {
+    const transport = await RdpTransport.connect(port, host, options.logger);
+    const client = new RdpClient(transport, options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("RDP root greeting timeout")),
+          options.greetingTimeoutMs ?? DEFAULT_GREETING_TIMEOUT_MS
+        );
+      });
+      await Promise.race([client.#ready, timeout]);
+      return client;
+    } catch (err) {
+      client.close();
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /** Send a request to an actor and resolve with its reply. */
-  request(to: string, packet: Record<string, unknown> = {}): Promise<RdpPacket> {
+  request(
+    to: string,
+    packet: Record<string, unknown> = {},
+    options: RdpRequestOptions = {}
+  ): Promise<RdpPacket> {
+    if (this.#closed) return Promise.reject(new Error("RDP connection closed"));
     return new Promise((resolve, reject) => {
       let queue = this.#pending.get(to);
       if (!queue) this.#pending.set(to, (queue = []));
-      queue.push({ resolve, reject });
+      const pending: Pending = { resolve, reject };
+      const timeoutMs = options.timeoutMs ?? this.#requestTimeoutMs;
+      if (timeoutMs > 0) {
+        pending.timer = setTimeout(() => {
+          const err = new Error(`RDP request to ${to} timed out after ${timeoutMs} ms`);
+          pending.reject(err);
+          // Actor replies are FIFO. Once one request times out, a late reply can
+          // be mistaken for the next request, so the whole connection is unsafe.
+          this.close();
+        }, timeoutMs);
+      }
+      queue.push(pending);
       this.#transport.send({ to, ...packet });
     });
   }
@@ -108,10 +162,24 @@ export class RdpClient extends EventEmitter {
    * interrupt → "paused") so we don't pollute the FIFO reply queue.
    */
   send(to: string, packet: Record<string, unknown>): void {
+    if (this.#closed) throw new Error("RDP connection closed");
     this.#transport.send({ to, ...packet });
   }
 
   close(): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    this.#rejectPending(new Error("RDP connection closed"));
     this.#transport.close();
+  }
+
+  #rejectPending(err: Error): void {
+    for (const queue of this.#pending.values()) {
+      for (const p of queue) {
+        clearTimeout(p.timer);
+        p.reject(err);
+      }
+    }
+    this.#pending.clear();
   }
 }

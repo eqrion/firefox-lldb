@@ -43,13 +43,19 @@ let converterPromise: Promise<Converter> | null = null;
 
 async function converter(): Promise<Converter> {
   if (!converterPromise) {
-    converterPromise = (async () => {
+    const initializing = (async () => {
       const root = await (instantiate as unknown as InstantiateFn)(
         async (corePath: string) => WebAssembly.compile(await readFile(path.join(GEN, corePath))),
         new WASIShim().getImportObject()
       );
       return root.sourceMapConverter;
     })();
+    converterPromise = initializing;
+    // Do not cache a rejected initialization forever. A package asset may be
+    // restored or a transient read can succeed for the next module.
+    void initializing.catch(() => {
+      if (converterPromise === initializing) converterPromise = null;
+    });
   }
   return converterPromise;
 }

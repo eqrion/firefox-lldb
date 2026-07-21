@@ -8,7 +8,7 @@
 
 import net from "node:net";
 import { EventEmitter } from "node:events";
-import { noopLogger, type RspLogger } from "../protocol/rsp-server.js";
+import { noopLogger, type Logger } from "../logging.js";
 
 export interface RdpPacket {
   from?: string;
@@ -18,17 +18,11 @@ export interface RdpPacket {
   [key: string]: unknown;
 }
 
-// Process-wide RDP wire trace sink. debug() is a no-op on the default
-// noopLogger, so this stays silent until the server wires up a real logger
-// (its debug() is itself gated behind `-v`/DEBUG=1 — see cli/logger.ts).
-let rdpLogger: RspLogger = noopLogger;
-export function setRdpLogger(logger: RspLogger): void {
-  rdpLogger = logger;
-}
+const MAX_RDP_FRAME_BYTES = 64 * 1024 * 1024;
 
-function trace(dir: ">>" | "<<", json: string): void {
+function trace(logger: Logger, dir: ">>" | "<<", json: string): void {
   const text = json.length > 2000 ? `${json.slice(0, 2000)}…(${json.length} bytes)` : json;
-  rdpLogger.debug(`[rdp] ${dir} ${text}`);
+  logger.debug(`[rdp] ${dir} ${text}`);
 }
 
 /** Encode one packet as a `<utf8-byte-length>:<json>` frame. */
@@ -49,8 +43,11 @@ export function sliceRdpFrame(buf: Buffer): { body: string; rest: Buffer } | nul
     if (buf.length > 20) throw new Error("malformed length prefix");
     return null;
   }
-  const len = parseInt(buf.subarray(0, colon).toString("latin1"), 10);
-  if (Number.isNaN(len) || len < 0) throw new Error("invalid packet length");
+  const prefix = buf.subarray(0, colon).toString("latin1");
+  if (!/^\d+$/.test(prefix)) throw new Error("invalid packet length");
+  const len = Number(prefix);
+  if (!Number.isSafeInteger(len)) throw new Error("invalid packet length");
+  if (len > MAX_RDP_FRAME_BYTES) throw new Error(`RDP packet length ${len} exceeds limit`);
   const start = colon + 1;
   if (buf.length < start + len) return null; // wait for the full body
   const body = buf.subarray(start, start + len).toString("utf8");
@@ -60,27 +57,33 @@ export function sliceRdpFrame(buf: Buffer): { body: string; rest: Buffer } | nul
 export class RdpTransport extends EventEmitter {
   #socket: net.Socket;
   #buffer: Buffer = Buffer.alloc(0);
+  #logger: Logger;
 
-  constructor(socket: net.Socket) {
+  constructor(socket: net.Socket, logger: Logger = noopLogger) {
     super();
     this.#socket = socket;
+    this.#logger = logger;
     socket.on("data", (chunk: Buffer) => this.#onData(chunk));
     socket.on("close", () => this.emit("close"));
     socket.on("error", (err) => this.emit("error", err));
   }
 
-  static connect(port: number, host = "127.0.0.1"): Promise<RdpTransport> {
+  static connect(
+    port: number,
+    host = "127.0.0.1",
+    logger: Logger = noopLogger
+  ): Promise<RdpTransport> {
     return new Promise((resolve, reject) => {
       const socket = net.createConnection({ port, host }, () => {
         socket.setNoDelay(true);
-        resolve(new RdpTransport(socket));
+        resolve(new RdpTransport(socket, logger));
       });
       socket.once("error", reject);
     });
   }
 
   send(packet: RdpPacket): void {
-    trace(">>", JSON.stringify(packet));
+    trace(this.#logger, ">>", JSON.stringify(packet));
     this.#socket.write(encodeRdpFrame(packet));
   }
 
@@ -91,18 +94,28 @@ export class RdpTransport extends EventEmitter {
       try {
         sliced = sliceRdpFrame(this.#buffer);
       } catch (err) {
-        this.emit("error", err as Error);
+        this.#fatal(err as Error);
         return;
       }
       if (!sliced) return;
       this.#buffer = sliced.rest;
-      trace("<<", sliced.body);
+      trace(this.#logger, "<<", sliced.body);
       try {
         this.emit("packet", JSON.parse(sliced.body) as RdpPacket);
       } catch (err) {
-        this.emit("error", err as Error);
+        this.#fatal(err as Error);
+        return;
       }
     }
+  }
+
+  #fatal(err: Error): void {
+    // Framing loss is unrecoverable: retaining the buffer would report the same
+    // error on every subsequent chunk, and a JSON error means reply correlation
+    // can no longer be trusted. Closing also unblocks every pending request.
+    this.#buffer = Buffer.alloc(0);
+    this.emit("error", err);
+    this.#socket.destroy();
   }
 
   close(): void {

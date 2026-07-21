@@ -37,6 +37,7 @@ watch time.
 | thread-config actor                       | the watcher's `getThreadConfigurationActor` reply                                      |
 | target actor, thread actor, console actor | a `target-available-form` event (one frame target + one per emscripten pthread worker) |
 | source actor                              | a thread actor's `sources` reply                                                       |
+| arrayBuffer actor                         | an `arraybuffer` grip returned by a source actor's `source` reply                      |
 | frame actor                               | a thread actor's `frames` reply                                                        |
 | longString actor                          | a grip with `type: "longString"`                                                       |
 
@@ -65,6 +66,8 @@ are sent per thread actor — the watcher does not broadcast them.
 | `source`                           | source actor        | fetch source text or wasm bytes                                                                                                                                                        |
 | `getBreakpointPositionsCompressed` | source actor        | valid `(line, column)` breakpoint positions in a `{ start: { line }, end: { line } }` range — snapping to one of these is required or the breakpoint silently never fires              |
 | `substring`                        | longString actor    | fetch a slice of an over-length source, `{ start, end }`                                                                                                                               |
+| `slice`                            | arrayBuffer actor   | fetch base64-encoded browser-owned bytes, `{ start, count }`                                                                                                                           |
+| `release`                          | arrayBuffer actor   | release a temporary binary-source actor                                                                                                                                                |
 | `getEnvironment`                   | frame actor         | fetch a frame's scope chain (locals, `wasm instance`/`wasm function` scopes)                                                                                                           |
 | `startListeners`                   | console actor       | subscribe to `listeners: ["ConsoleAPI", "PageError"]`                                                                                                                                  |
 | `evaluateJSAsync`                  | console actor       | evaluate JS, optionally in a frame's scope via `frameActor`; the result arrives later as an `evaluationResult` event carrying the ack's `resultID`                                     |
@@ -101,7 +104,8 @@ Unsolicited notifications, never treated as request replies (`EVENTS` in
 Named interfaces in `protocol.ts`, used directly by `session.ts` (no ad-hoc
 casts): `GetRootResponse`, `GetCharPrefResponse`, `RdpTabForm`/`ListTabsResponse`,
 `GetWatcherResponse`, `GetThreadConfigurationActorResponse`, `SourceForm`/`SourcesResponse`,
-`SourceResponse`/`LongStringGrip`, `SubstringResponse`, `BreakpointLocation`,
+`SourceResponse`/`LongStringGrip`/`ArrayBufferGrip`, `SubstringResponse`,
+`ArrayBufferSliceResponse`, `BreakpointLocation`,
 `GetBreakpointPositionsResponse`, `FrameForm`/`FramesResponse`, `PauseEvent`,
 `StoppedEvent` (our own all-stop event, not a wire form), `EvaluateJSAsyncAck`,
 `ConsoleApiCallEvent`, `PageErrorEvent`.

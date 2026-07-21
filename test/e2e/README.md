@@ -35,7 +35,7 @@ Requires Firefox installed in a standard location (see `findFirefoxBinary` in
 
 ### Launch safety (Firefox binary must be present, but none is spawned)
 
-- `launch_port_conflict.test.mjs` — launch refuses when another process already holds the RDP port.
+- `launch_port_conflict.test.mjs` — launch refuses an occupied RDP port and rolls Firefox back when the platform port bind fails.
 
 ### Channel launch
 
@@ -67,6 +67,7 @@ Requires Firefox installed in a standard location (see `findFirefoxBinary` in
 - `inspect_heap.test.mjs` — heap fixture: heap-allocated struct/array through pointer.
 - `edge_cases.test.mjs` — interleaved JS/wasm frames, watchpoint non-crash.
 - `source_listing.test.mjs` — wasm and JS frames carry valid file/line DWARF info.
+- `sourcemap_source_listing.test.mjs` — source-map DWARF resolves inside the per-session materialization directory.
 - `js_debugging.test.mjs` — JS file:line breakpoint fires; step-over advances source line.
 - `mixed_js.test.mjs` — mixed JS/wasm: source file discovery (app.js, math.js, math.cpp).
 - `threaded.test.mjs` — multithreaded fixture: thread list, matmul_threaded frame, step.

@@ -8,7 +8,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import net from "node:net";
 import { RdpClient } from "../../src/rdp/client.js";
-import { encodeRdpFrame } from "../../src/rdp/transport.js";
+import { encodeRdpFrame, sliceRdpFrame } from "../../src/rdp/transport.js";
 
 function startFakeRdpServer(
   handler?: (data: Buffer, socket: net.Socket) => void
@@ -78,8 +78,40 @@ test("pending request() rejects when connection closes before reply", async () =
   // Close the server-side socket abruptly.
   srv.socket()?.destroy();
 
-  await assert.rejects(pending, /closed/i, "pending request should reject on close");
+  await assert.rejects(pending, /closed|ECONNRESET/i, "pending request should reject on close");
 
   client.close();
   srv.close();
+});
+
+test("request timeout poisons the FIFO connection and rejects pending work", async () => {
+  const srv = await startFakeRdpServer();
+  const client = await RdpClient.connect(srv.port, "127.0.0.1", { requestTimeoutMs: 25 });
+  const closed = new Promise<void>((resolve) => client.once("close", resolve));
+
+  const first = client.request("someActor", { type: "neverReplies" });
+  const second = client.request("someActor", { type: "queuedBehindIt" });
+  await Promise.all([assert.rejects(first, /timed out/i), assert.rejects(second, /closed/i)]);
+  await closed;
+
+  srv.close();
+});
+
+test("malformed RDP JSON closes the transport and rejects pending work", async () => {
+  const srv = await startFakeRdpServer();
+  const client = await RdpClient.connect(srv.port);
+  client.on("error", () => {});
+  const closed = new Promise<void>((resolve) => client.once("close", resolve));
+  const pending = client.request("someActor", { type: "waiting" });
+
+  srv.socket()?.write("3:{x}");
+  await assert.rejects(pending);
+  await closed;
+
+  srv.close();
+});
+
+test("RDP framing rejects malformed and oversized length prefixes", () => {
+  assert.throws(() => sliceRdpFrame(Buffer.from("3x:{}")), /invalid packet length/i);
+  assert.throws(() => sliceRdpFrame(Buffer.from(`${64 * 1024 * 1024 + 1}:`)), /exceeds limit/i);
 });

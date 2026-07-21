@@ -23,7 +23,7 @@
 // issue).
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { Session, continueUntilBreakpoint, sleep } from "./harness.mjs";
+import { Session, continueUntilBreakpoint } from "./harness.mjs";
 
 let s;
 before(async () => {
@@ -50,11 +50,17 @@ test("navigating to a page with a different module URL loads the new module and 
   // development — a fresh Z0 lands on the new module's address) — but
   // that's housekeeping, not a stop LLDB reports to the user, so it goes
   // on to send a real, plain continue and waits for a genuine subsequent
-  // stop. Trigger the run once that housekeeping has had a moment to
-  // finish: it now hits a breakpoint site LLDB actually recognizes.
+  // stop. Trigger the run until that housekeeping has finished. Under the
+  // suite's normal four-way concurrency, rebinding can take longer than a
+  // fixed delay; a one-shot call made before the new site exists is lost.
   const continued = continueUntilBreakpoint(s);
-  sleep(500).then(() => s.evaluate("runFactorial()"));
-  const st = await continued;
+  const trigger = setInterval(() => s.evaluate("runFactorial()"), 500);
+  let st;
+  try {
+    st = await continued;
+  } finally {
+    clearInterval(trigger);
+  }
 
   assert.equal(st.reason, "breakpoint");
   const f0 = await s.topFrame();

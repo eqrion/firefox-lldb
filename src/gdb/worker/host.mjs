@@ -47,15 +47,19 @@ export function startGdbServer({ dispatch, port, onInfo, onTrace, onError, verbo
 
   worker.on("message", async (m) => {
     if (m === 1) {
-      const len = Atomics.load(ctrl, CTRL_LEN);
-      const req = decode(data.subarray(0, len));
-      let resp;
+      let out;
       try {
-        resp = { ok: true, value: await dispatch(req) };
+        const len = Atomics.load(ctrl, CTRL_LEN);
+        if (len < 0 || len > data.length) throw new Error("invalid worker request length");
+        const req = decode(data.subarray(0, len));
+        out = encode({ ok: true, value: await dispatch(req) });
       } catch (e) {
-        resp = { ok: false, error: String(e?.message || e) };
+        try {
+          out = encode({ ok: false, error: String(e?.message || e) });
+        } catch {
+          out = encode({ ok: false, error: "rpc failure" });
+        }
       }
-      let out = encode(resp);
       if (out.length > data.length) {
         // A response that overflows the shared buffer (e.g. an unreasonable
         // memory read produced by a non-wasm-plugin session) would throw on
@@ -104,9 +108,11 @@ export function startGdbServer({ dispatch, port, onInfo, onTrace, onError, verbo
     rejectReady = null;
   });
 
+  let stopPromise;
+
   return {
     ready,
-    stop: () => worker.terminate(),
+    stop: () => (stopPromise ??= worker.terminate().then(() => {})),
     get port() {
       return boundPort;
     },

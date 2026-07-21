@@ -7,7 +7,8 @@
 // wasm-LLDB embedding and the standalone server for an external native lldb).
 
 import { parseArgs } from "node:util";
-import { RspServer, type RspLogger } from "../protocol/rsp-server.js";
+import { RspServer } from "../protocol/rsp-server.js";
+import type { Logger } from "../logging.js";
 import { GdbServerSpawner, type GdbServerLauncher } from "../platform/gdb-server-spawner.js";
 import { startAttachShim } from "../protocol/attach-shim.js";
 import { PlatformServer } from "../platform/platform-server.js";
@@ -18,7 +19,6 @@ import {
   verifyFirefoxLaunchToken,
   type TabInfo,
 } from "../rdp/session.js";
-import { setRdpLogger } from "../rdp/transport.js";
 import { RdpDebuggee } from "../gdb/rdp-debuggee.js";
 import { launchFirefox, type FirefoxChannel, type FirefoxHandle } from "../rdp/firefox.js";
 // @ts-expect-error - .mjs host has no type declarations
@@ -48,7 +48,7 @@ Options:
                       profile is already running elsewhere.
   --headless          Run Firefox headlessly.
   --fire <js>         Evaluate JS after the first breakpoint arms (test use).
-  -v, --verbose       Log debug output.
+  -v, --verbose       Log debug output (may include page/protocol data).
   -h, --help          Show this message.
 
 LLDB attach sequence:
@@ -107,20 +107,24 @@ export function parseCliArgs(argv: string[]): Args {
 
   const port = Number(values.port ?? 1234);
   const rdpPort = Number(values["rdp-port"] ?? 6080);
-  if (Number.isNaN(port)) {
-    process.stderr.write(`error: --port must be a number, got "${values.port}"\n`);
+  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+    process.stderr.write(
+      `error: --port must be an integer from 0 to 65535, got "${values.port}"\n`
+    );
     process.exit(1);
   }
-  if (Number.isNaN(rdpPort)) {
-    process.stderr.write(`error: --rdp-port must be a number, got "${values["rdp-port"]}"\n`);
+  if (!Number.isInteger(rdpPort) || rdpPort < 1 || rdpPort > 65535) {
+    process.stderr.write(
+      `error: --rdp-port must be an integer from 1 to 65535, got "${values["rdp-port"]}"\n`
+    );
     process.exit(1);
   }
   let marionettePort: number | undefined;
   if (values["marionette-port"] !== undefined) {
     marionettePort = Number(values["marionette-port"]);
-    if (Number.isNaN(marionettePort)) {
+    if (!Number.isInteger(marionettePort) || marionettePort < 1 || marionettePort > 65535) {
       process.stderr.write(
-        `error: --marionette-port must be a number, got "${values["marionette-port"]}"\n`
+        `error: --marionette-port must be an integer from 1 to 65535, got "${values["marionette-port"]}"\n`
       );
       process.exit(1);
     }
@@ -155,7 +159,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function connectWithRetry(
   rdpPort: number,
   tabActor: string | undefined,
-  logger: RspLogger
+  logger: Logger
 ): Promise<RdpWasmSession> {
   let lastErr: unknown;
   for (let i = 0; i < 80; i++) {
@@ -173,17 +177,21 @@ async function connectWithRetry(
 async function watchTabs(
   rdpPort: number,
   onTabs: (tabs: TabInfo[]) => void,
-  shouldStop: () => boolean = () => false
+  logger: Logger,
+  signal: AbortSignal
 ): Promise<void> {
-  while (!shouldStop()) {
+  while (!signal.aborted) {
     try {
-      await watchAndPrimeFirefoxTabs(rdpPort, "127.0.0.1", onTabs);
-    } catch {
+      await watchAndPrimeFirefoxTabs(rdpPort, "127.0.0.1", onTabs, logger, signal);
+    } catch (err) {
       // Connection error; fall through to the sleep+retry below.
+      logger.debug(
+        `[rdp] tab watcher reconnecting after: ${err instanceof Error ? err.message : String(err)}`
+      );
     }
     // Whether the RDP connection closed cleanly or with an error, retry after
     // a short delay so --connect mode recovers when Firefox restarts.
-    if (!shouldStop()) await sleep(250);
+    if (!signal.aborted) await sleep(250);
   }
 }
 
@@ -191,7 +199,7 @@ export interface StartOptions {
   /** Bridge the per-tab GDB server port (see PlatformServerDeps.wrapConnectPort). */
   wrapConnectPort?: (port: number) => Promise<number>;
   /** Override the logger (the in-process embedding uses a quieter one). */
-  logger?: RspLogger;
+  logger?: Logger;
   /** Called once per newly-seen tab with a non-blank URL. Defaults to printing
    * a `process attach --plugin wasm --pid N` hint to stderr (for native lldb). */
   onTab?: (tab: TabInfo, pid: number) => void;
@@ -219,7 +227,7 @@ export interface PlatformServerHandle {
 function createTabLauncher(
   args: Args,
   opts: StartOptions,
-  logger: RspLogger,
+  logger: Logger,
   launching: boolean,
   verbose: boolean,
   getCurrentTabs: () => TabInfo[]
@@ -232,7 +240,12 @@ function createTabLauncher(
       const currentTabs = getCurrentTabs();
       const idx = currentTabs.findIndex((t) => t.actor === tabActor);
       if (idx !== -1) {
-        const fresh = await listFirefoxTabs(args.rdpPort).catch(() => currentTabs);
+        const fresh = await listFirefoxTabs(args.rdpPort).catch((err) => {
+          logger.debug(
+            `[rdp] could not refresh tab actors: ${err instanceof Error ? err.message : String(err)}`
+          );
+          return currentTabs;
+        });
         resolvedActor = fresh[idx]?.actor ?? tabActor;
       }
     }
@@ -240,6 +253,8 @@ function createTabLauncher(
     const session = launching
       ? await connectWithRetry(args.rdpPort, resolvedActor, logger)
       : await RdpWasmSession.start(args.rdpPort, "127.0.0.1", resolvedActor, logger);
+    let debuggee: RdpDebuggee | undefined;
+    let gdbServer: ReturnType<typeof startGdbServer> | undefined;
 
     // Close the session on any failure past this point; otherwise a launch that
     // throws leaks the RDP watcher connection, and a retried qLaunchGDBServer
@@ -281,18 +296,28 @@ function createTabLauncher(
       const onFirstContinue = fire
         ? () => {
             const wrapped = `(function poll(){try{${fire}}catch(e){setTimeout(poll,20);}})()`;
-            session.evaluate(wrapped).catch(() => {});
+            session
+              .evaluate(wrapped)
+              .catch((err) =>
+                logger.debug(
+                  `[rdp] --fire evaluation failed: ${err instanceof Error ? err.message : String(err)}`
+                )
+              );
           }
         : undefined;
 
-      const debuggee = new RdpDebuggee(session, onFirstContinue ? { onFirstContinue } : undefined);
-      opts.onSession?.(session, () => debuggee.triggerInterrupt());
+      const liveDebuggee = new RdpDebuggee(session, {
+        ...(onFirstContinue ? { onFirstContinue } : {}),
+        logger,
+      });
+      debuggee = liveDebuggee;
+      opts.onSession?.(session, () => liveDebuggee.triggerInterrupt());
 
       // Force a genuine RDP all-stop and snapshot before the component starts.
       // The component's startup update_on_stop reads the stop state once; priming
       // here means it captures a real pause with real frames instead of a
       // synthetic "stopped" with no pause behind it (issue #21).
-      if (session.hasThreads()) await debuggee.primeStop();
+      if (session.hasThreads()) await liveDebuggee.primeStop();
 
       // The component presents an already-attached, stopped process on connect,
       // which works for `process connect` but breaks LLDB's `process attach`
@@ -303,8 +328,8 @@ function createTabLauncher(
       // `process attach --plugin wasm` works.
       // Use port 0 so the OS assigns the component port — avoids the
       // TOCTOU race that freePort() has (grab-port → close → bind).
-      const gdbServer = startGdbServer({
-        dispatch: (req: unknown) => debuggee.dispatch(req as never),
+      gdbServer = startGdbServer({
+        dispatch: (req: unknown) => liveDebuggee.dispatch(req as never),
         port: 0,
         onInfo: (m: string) => logger.debug(`[component] ${m}`),
         onTrace: (m: string) => logger.debug(`[gdbstub] ${m}`),
@@ -319,13 +344,38 @@ function createTabLauncher(
       });
       return {
         port: shim.port,
-        stop: async () => {
-          await shim.close();
-          gdbServer.stop();
-          session.close();
-        },
+        stop: (() => {
+          let stopPromise: Promise<void> | undefined;
+          return () =>
+            (stopPromise ??= (async () => {
+              const errors: unknown[] = [];
+              try {
+                await shim.close();
+              } catch (err) {
+                errors.push(err);
+              }
+              try {
+                await gdbServer.stop();
+              } catch (err) {
+                errors.push(err);
+              }
+              debuggee?.dispose();
+              session.close();
+              if (errors.length) throw new AggregateError(errors, "failed to stop per-tab server");
+            })());
+        })(),
       };
     } catch (err) {
+      await gdbServer
+        ?.stop()
+        .catch((stopErr: unknown) =>
+          logger.error(
+            `failed to stop GDB worker after launch error: ${
+              stopErr instanceof Error ? stopErr.message : String(stopErr)
+            }`
+          )
+        );
+      debuggee?.dispose();
       session.close();
       throw err;
     }
@@ -341,7 +391,6 @@ export async function startPlatformServer(
 ): Promise<PlatformServerHandle> {
   const verbose = args.verbose || debugEnvEnabled();
   const logger = opts.logger ?? consoleLogger(verbose);
-  setRdpLogger(logger);
   const launching = !args.connect;
 
   let firefox: FirefoxHandle | undefined;
@@ -367,7 +416,15 @@ export async function startPlatformServer(
       // whole session).
       await verifyFirefoxLaunchToken(args.rdpPort, "127.0.0.1", firefox.launchToken);
     } catch (err) {
-      await firefox.close().catch(() => {});
+      await firefox
+        .close()
+        .catch((closeErr) =>
+          logger.error(
+            `failed to clean up Firefox after verification error: ${
+              closeErr instanceof Error ? closeErr.message : String(closeErr)
+            }`
+          )
+        );
       throw err;
     }
     logger.info("launched Firefox");
@@ -386,9 +443,32 @@ export async function startPlatformServer(
     listTabs: async () => currentTabs,
     wrapConnectPort: opts.wrapConnectPort,
   });
-  const server = new RspServer(platformServer, { logger });
+  const server = new RspServer(platformServer, { logger, singleConnection: true });
 
-  const bound = await server.listen(args.port);
+  let bound: number;
+  try {
+    bound = await server.listen(args.port);
+  } catch (err) {
+    // Firefox is detached from this process, so process exit will not clean it
+    // up if a later startup step (most commonly the platform port bind) fails.
+    await spawner
+      .killAll()
+      .catch((stopErr) =>
+        logger.error(
+          `failed to roll back GDB servers after startup error: ${
+            stopErr instanceof Error ? stopErr.message : String(stopErr)
+          }`
+        )
+      );
+    await firefox
+      ?.close()
+      .catch((closeErr) =>
+        logger.error(
+          `failed to roll back Firefox after startup error: ${closeErr instanceof Error ? closeErr.message : String(closeErr)}`
+        )
+      );
+    throw err;
+  }
 
   if (!launching) {
     listFirefoxTabs(args.rdpPort).catch(() =>
@@ -407,9 +487,9 @@ export async function startPlatformServer(
           `[info]   process attach --plugin wasm --pid ${pid}\n`
       ));
 
-  let stopped = false;
+  const watcherAbort = new AbortController();
   const hinted = new Set<string>();
-  void watchTabs(
+  const watcherPromise = watchTabs(
     args.rdpPort,
     (tabs) => {
       currentTabs = tabs;
@@ -420,15 +500,30 @@ export async function startPlatformServer(
         }
       }
     },
-    () => stopped
+    logger,
+    watcherAbort.signal
   );
 
-  const shutdown = async () => {
-    stopped = true;
-    await spawner.killAll();
-    await server.close();
-    await firefox?.close();
-  };
+  let shutdownPromise: Promise<void> | undefined;
+  const shutdown = () =>
+    (shutdownPromise ??= (async () => {
+      watcherAbort.abort();
+      const errors: unknown[] = [];
+      const clean = async (work: Promise<unknown>) => {
+        try {
+          await work;
+        } catch (err) {
+          errors.push(err);
+        }
+      };
+      // Stop accepting work first, then tear down per-tab workers/RDP sessions,
+      // then the tab watcher, and only then kill Firefox.
+      await clean(server.close());
+      await clean(spawner.killAll());
+      await clean(watcherPromise);
+      await clean(firefox?.close() ?? Promise.resolve());
+      if (errors.length) throw new AggregateError(errors, "platform shutdown failed");
+    })());
 
   return {
     port: bound,

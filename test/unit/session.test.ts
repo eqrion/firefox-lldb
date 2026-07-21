@@ -152,6 +152,11 @@ class FakeRdpServer {
     this.sock?.write(encodeRdpFrame(packet));
   }
 
+  /** Push multiple packets in one socket write to exercise same-chunk races. */
+  sendTogether(...packets: object[]): void {
+    this.sock?.write(Buffer.concat(packets.map(encodeRdpFrame)));
+  }
+
   // Helpers to push specific event types ---------------------------------
 
   targetAvailable(
@@ -204,6 +209,32 @@ class FakeRdpServer {
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
+
+test("RdpWasmSession.start closes its socket when initialization fails", async () => {
+  let socketClosed!: () => void;
+  const closed = new Promise<void>((resolve) => (socketClosed = resolve));
+  const server = net.createServer((socket) => {
+    let buf = Buffer.alloc(0);
+    socket.on("close", socketClosed);
+    socket.write(encodeRdpFrame({ from: "root" }));
+    socket.on("data", (chunk: Buffer) => {
+      buf = Buffer.concat([buf, chunk]);
+      const decoded = decodeAll(buf);
+      buf = decoded.rest as Buffer<ArrayBuffer>;
+      for (const packet of decoded.packets) {
+        if (packet.to === "root" && packet.type === "listTabs") {
+          socket.write(encodeRdpFrame({ from: "root", tabs: [] }));
+        }
+      }
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as net.AddressInfo).port;
+
+  await assert.rejects(RdpWasmSession.start(port), /no Firefox tab found/);
+  await closed;
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+});
 
 // ---------------------------------------------------------------------------
 // Tests: thread tracking
@@ -1184,6 +1215,75 @@ test("uncontrolled top-level target swap (no navigate()) invalidates stale wasm 
     sources.some((s) => s.actor === "wasmActorNew"),
     "new actor should be registered after the uncontrolled swap"
   );
+
+  session.close();
+  srv.close();
+});
+
+test("fetchModuleBytes reads browser-owned ArrayBuffer source actors", async () => {
+  const srv = new FakeRdpServer();
+  await srv.listen();
+  const session = await srv.acceptSession();
+  const wasm = Uint8Array.of(0, 0x61, 0x73, 0x6d, 1, 0, 0, 0);
+
+  srv.targetAvailable("thread1", { isTopLevel: true });
+  await sleep(200);
+  srv.onNext(
+    (r) => r.type === "sources",
+    () => ({
+      from: "thread1",
+      sources: [{ actor: "wasmSource", url: "wasm:fixture", introductionType: "wasm" }],
+    })
+  );
+  await session.wasmSources();
+  srv.onNext(
+    (r) => r.to === "wasmSource" && r.type === "source",
+    () => ({
+      from: "wasmSource",
+      source: { actor: "arrayBuffer1", length: wasm.length, typeName: "arraybuffer" },
+    })
+  );
+  srv.onNext(
+    (r) => r.to === "arrayBuffer1" && r.type === "slice",
+    () => ({ from: "arrayBuffer1", encoded: Buffer.from(wasm).toString("base64") })
+  );
+  srv.onNext(
+    (r) => r.to === "arrayBuffer1" && r.type === "release",
+    () => ({ from: "arrayBuffer1" })
+  );
+
+  assert.deepEqual(await session.fetchModuleBytes("wasm:fixture"), wasm);
+
+  session.close();
+  srv.close();
+});
+
+test("evalJS captures an evaluationResult delivered with its acknowledgement", async () => {
+  const srv = new FakeRdpServer();
+  await srv.listen();
+  const session = await srv.acceptSession();
+
+  srv.targetAvailable("thread1", { isTopLevel: true, consoleActor: "console1" });
+  await sleep(200);
+
+  srv.onNext(
+    (r) => r.type === "evaluateJSAsync",
+    () => {
+      srv.sendTogether(
+        { from: "console1", resultID: "same-chunk-result" },
+        {
+          from: "console1",
+          type: "evaluationResult",
+          resultID: "same-chunk-result",
+          result: 42,
+        }
+      );
+      return null;
+    }
+  );
+
+  const result = await session.evalJS("6 * 7");
+  assert.equal(result.result, 42);
 
   session.close();
   srv.close();

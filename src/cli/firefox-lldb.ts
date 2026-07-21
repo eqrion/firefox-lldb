@@ -21,6 +21,7 @@ import { quietLogger } from "./logger.js";
 import { runRepl } from "./repl.js";
 import type { RdpWasmSession } from "../rdp/session.js";
 import { debugEnvEnabled } from "../config.js";
+import type { Logger } from "../logging.js";
 
 // Open bridge sockets, tracked so we can tear them down on exit (otherwise
 // net.Server.close() blocks on the live connections).
@@ -28,7 +29,7 @@ const bridgeSockets = new Set<net.Socket>();
 
 // Bridge a localhost TCP RSP server to an in-process channel the wasm LLDB
 // connects to via "inprocess://<id>". Returns the channel ID.
-async function bridgeTcp(client: LLDBClient, port: number): Promise<number> {
+async function bridgeTcp(client: LLDBClient, port: number, logger: Logger): Promise<number> {
   const channelId = await client.createChannel();
   const socket = net.connect(port, "127.0.0.1");
   bridgeSockets.add(socket);
@@ -42,8 +43,15 @@ async function bridgeTcp(client: LLDBClient, port: number): Promise<number> {
     socket.once("error", reject);
   });
   // server -> LLDB
-  socket.on("data", (d) => void client.channelServerWrite(channelId, new Uint8Array(d)));
-  socket.on("error", () => {});
+  socket.on("data", (d) => {
+    void client.channelServerWrite(channelId, new Uint8Array(d)).catch((err) => {
+      logger.error(
+        `[bridge] server-to-LLDB write failed: ${err instanceof Error ? err.message : String(err)}`
+      );
+      socket.destroy();
+    });
+  });
+  socket.on("error", (err) => logger.warn(`[bridge] socket error: ${err.message}`));
   // LLDB -> server
   await client.bridgeChannel(channelId, (data) => void socket.write(Buffer.from(data)));
   await connected;
@@ -53,6 +61,7 @@ async function bridgeTcp(client: LLDBClient, port: number): Promise<number> {
 async function main(): Promise<void> {
   const args = parseCliArgs(process.argv.slice(2));
   const verbose = args.verbose || debugEnvEnabled();
+  const logger = quietLogger(verbose);
 
   const client = await LLDBClient.create();
   client.setFileProvider((path) => readFile(path).catch(() => null));
@@ -63,16 +72,22 @@ async function main(): Promise<void> {
     if (exiting) return;
     exiting = true;
     for (const s of bridgeSockets) s.destroy();
-    await handle?.shutdown().catch(() => {});
-    await client.destroy();
+    for (const work of [handle?.shutdown(), client.destroy()]) {
+      try {
+        await work;
+      } catch (err) {
+        logger.error(`[cleanup] ${err instanceof Error ? err.message : String(err)}`);
+        code = code || 1;
+      }
+    }
     process.exit(code);
   };
   process.on("SIGTERM", () => void cleanup(0));
+  process.on("SIGHUP", () => void cleanup(0));
 
   // A dead parent (e.g. a pty master closing, or a controlling process being
-  // killed) doesn't always deliver a signal we handle -- SIGHUP's default
-  // disposition just kills us without running cleanup, orphaning Firefox.
-  // Poll for reparenting to init/launchd (ppid 1) and clean up when it happens.
+  // killed) doesn't always deliver a signal. Poll for reparenting to
+  // init/launchd (ppid 1) and clean up when it happens.
   const orphanCheck = setInterval(() => {
     if (process.ppid === 1) void cleanup(0);
   }, 1000);
@@ -95,61 +110,68 @@ async function main(): Promise<void> {
   // Each per-tab GDB server launched by qLaunchGDBServer gets bridged; the
   // platform server returns the channel ID as the connection "port" and the
   // wasm LLDB connects to inprocess://<id> (PlatformWasmRemoteGDBServer::MakeUrl).
-  handle = await startPlatformServer(args, {
-    wrapConnectPort: (port) => bridgeTcp(client, port),
-    logger: quietLogger(verbose),
-    onTab: (tab, pid) => repl.print(`tab available: ${tab.url}\n  attach --pid ${pid}`),
-    onSession: (s, interrupt) => {
-      session = s;
-      triggerInterrupt = interrupt;
-      void s.streamConsole((m) => repl.printConsole(m));
-      // "navigated" fires as soon as the old top-level target is gone, before
-      // the new one (if any) arrives — too early to know the destination URL.
-      // Wait for the next top-level "target" to report where the page landed;
-      // if none ever arrives, "detached" below reports the tab closed instead.
-      let awaitingNavigationTarget = false;
-      s.on("navigated", () => {
-        repl.print("page navigating; re-syncing debug session...");
-        awaitingNavigationTarget = true;
-      });
-      s.on("target", (info) => {
-        if (!info.isTopLevel || !awaitingNavigationTarget) return;
-        awaitingNavigationTarget = false;
-        repl.print(`page navigated to ${info.url}`);
-      });
-      s.on("detached", () => {
-        repl.print("the attached tab was closed; detaching.");
-        session = undefined;
-        triggerInterrupt = undefined;
-        void client.sessionCommand("process detach").catch(() => {});
-      });
-    },
-  });
+  try {
+    handle = await startPlatformServer(args, {
+      wrapConnectPort: (port) => bridgeTcp(client, port, logger),
+      logger,
+      onTab: (tab, pid) => repl.print(`tab available: ${tab.url}\n  attach --pid ${pid}`),
+      onSession: (s, interrupt) => {
+        session = s;
+        triggerInterrupt = interrupt;
+        void s.streamConsole((m) => repl.printConsole(m));
+        // "navigated" fires as soon as the old top-level target is gone, before
+        // the new one (if any) arrives — too early to know the destination URL.
+        // Wait for the next top-level "target" to report where the page landed;
+        // if none ever arrives, "detached" below reports the tab closed instead.
+        let awaitingNavigationTarget = false;
+        s.on("navigated", () => {
+          repl.print("page navigating; re-syncing debug session...");
+          awaitingNavigationTarget = true;
+        });
+        s.on("target", (info) => {
+          if (!info.isTopLevel || !awaitingNavigationTarget) return;
+          awaitingNavigationTarget = false;
+          repl.print(`page navigated to ${info.url}`);
+        });
+        s.on("detached", () => {
+          repl.print("the attached tab was closed; detaching.");
+          session = undefined;
+          triggerInterrupt = undefined;
+          void client
+            .sessionCommand("process detach")
+            .catch((err) => logger.debug(`[cleanup] LLDB detach failed: ${String(err)}`));
+        });
+      },
+    });
 
-  // Quit when a launched Firefox goes away (#24).
-  void handle.firefoxExited?.then(() => {
-    repl.print("Firefox exited.");
-    void cleanup(0);
-  });
+    // Quit when a launched Firefox goes away (#24).
+    void handle.firefoxExited?.then(() => {
+      repl.print("Firefox exited.");
+      void cleanup(0);
+    });
 
-  // Bridge the platform connection itself, then drive the platform setup the
-  // native wrapper used to pass via `-o`. These produce noisy connect chatter,
-  // so we run them quietly and only surface the attach / tab list.
-  const platformChannel = await bridgeTcp(client, handle.port);
-  await client.sessionCommand("platform select remote-gdb-server");
-  await client.sessionCommand(`platform connect inprocess://${platformChannel}`);
-  await client.sessionCommand("command alias attach process attach --plugin wasm");
+    // Bridge the platform connection itself, then drive the platform setup the
+    // native wrapper used to pass via `-o`. These produce noisy connect chatter,
+    // so we run them quietly and only surface the attach / tab list.
+    const platformChannel = await bridgeTcp(client, handle.port, logger);
+    await client.sessionCommand("platform select remote-gdb-server");
+    await client.sessionCommand(`platform connect inprocess://${platformChannel}`);
+    await client.sessionCommand("command alias attach process attach --plugin wasm");
 
-  let intro = "firefox-lldb — `attach --pid N` to attach, `js p <expr>` to evaluate JS.";
-  if (args.url) {
-    repl.print(intro + "\nattaching...");
-    const res = await client.sessionCommand("process attach --plugin wasm --pid 1");
-    intro = (res.output + res.error).trimEnd();
-  } else {
-    const res = await client.sessionCommand("platform process list");
-    intro += "\n" + res.output.trimEnd();
+    let intro = "firefox-lldb — `attach --pid N` to attach, `js p <expr>` to evaluate JS.";
+    if (args.url) {
+      repl.print(intro + "\nattaching...");
+      const res = await client.sessionCommand("process attach --plugin wasm --pid 1");
+      intro = (res.output + res.error).trimEnd();
+    } else {
+      const res = await client.sessionCommand("platform process list");
+      intro += "\n" + res.output.trimEnd();
+    }
+    repl.start(intro);
+  } catch (err) {
+    logger.error(err instanceof Error ? (err.stack ?? err.message) : String(err));
+    await cleanup(1);
   }
-  repl.start(intro);
 }
 
 main().catch((err) => {
