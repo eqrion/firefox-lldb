@@ -14,7 +14,7 @@ import { LLDBClient } from "lldb-wasm";
 import { parseCliArgs, startPlatformServer } from "../../src/core/platform-session.ts";
 import { freePort } from "../../src/platform/gdb-server-spawner.ts";
 import { runRepl } from "../../src/cli/repl.ts";
-import { FIXTURES, startStaticServer, withDeadline } from "./harness.mjs";
+import { FIXTURES, startStaticServer, withDeadline, LLDB_FAILED_STATUS } from "./harness.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const stripAnsi = (s) => s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
@@ -119,7 +119,8 @@ export class ReplSession {
         const c0 = await rs.#bridgeTcp(handle.port);
         await client.sessionCommand("platform select remote-gdb-server");
         const conn = await client.sessionCommand(`platform connect inprocess://${c0}`);
-        if (conn.status >= 6) throw new Error(`platform connect failed: ${conn.error}`);
+        if (conn.status >= LLDB_FAILED_STATUS)
+          throw new Error(`platform connect failed: ${conn.error}`);
         await client.sessionCommand("command alias attach process attach --plugin wasm");
 
         // Cold launch + wasm load can exceed the attach timeout; retry like
@@ -129,7 +130,7 @@ export class ReplSession {
         let lastErr = "";
         for (let attempt = 0; attempt < 4; attempt++) {
           const res = await client.sessionCommand("process attach --plugin wasm --pid 1");
-          if (res.status < 6) {
+          if (res.status < LLDB_FAILED_STATUS) {
             const st = await client.sessionState();
             if (st.reason !== "none" && st.reason !== "exited") {
               rs.#repl.start();

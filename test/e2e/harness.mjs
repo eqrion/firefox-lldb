@@ -168,6 +168,10 @@ export function startStaticServer(pageDir) {
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// lldb::ReturnStatus: values below this are Invalid/Started/Success*; this
+// and above are Failed/Quit. sessionCommand()'s `status` is that raw enum.
+export const LLDB_FAILED_STATUS = 6;
+
 // Race `work` against a deadline well short of node's own --test-timeout. If
 // a step inside `work` hangs (a slow/wedged Firefox launch, a stuck RDP round
 // trip), node kills the whole test process outright once its own timeout
@@ -323,14 +327,15 @@ export class Session {
         const c0 = await session.#bridgeTcp(handle.port);
         await client.sessionCommand("platform select remote-gdb-server");
         const conn = await client.sessionCommand(`platform connect inprocess://${c0}`);
-        if (conn.status >= 6) throw new Error(`platform connect failed: ${conn.error}`);
+        if (conn.status >= LLDB_FAILED_STATUS)
+          throw new Error(`platform connect failed: ${conn.error}`);
 
         // Cold launch + wasm load can exceed the attach timeout; retry like
         // the Python harness.
         let lastErr = "";
         for (let attempt = 0; attempt < 4; attempt++) {
           const res = await client.sessionCommand("process attach --plugin wasm --pid 1");
-          if (res.status < 6) {
+          if (res.status < LLDB_FAILED_STATUS) {
             const st = await client.sessionState();
             if (st.reason !== "none" && st.reason !== "exited") return session;
             lastErr = `attach left process in state ${st.reason}`;
@@ -360,7 +365,8 @@ export class Session {
     const c0 = await session.#bridgeTcp(handle.port);
     await client.sessionCommand("platform select remote-gdb-server");
     const conn = await client.sessionCommand(`platform connect inprocess://${c0}`);
-    if (conn.status >= 6) throw new Error(`platform connect failed: ${conn.error}`);
+    if (conn.status >= LLDB_FAILED_STATUS)
+      throw new Error(`platform connect failed: ${conn.error}`);
     return session;
   }
 
