@@ -27,6 +27,26 @@
  * ## `"execution-trap"`
  */
 export type Error = 'invalid-entity' | 'invalid-pc' | 'invalid-frame' | 'unsupported-type' | 'mismatched-type' | 'non-wasm-frame' | 'alloc-failure' | 'breakpoint-update' | 'read-only' | 'out-of-bounds' | 'memory-grow-failure' | 'execution-trap';
+export interface InjectCall {
+  callee: WasmFunc,
+  arguments: Array<WasmValue>,
+}
+export type ResumptionValue = ResumptionValueNormal | ResumptionValueInjectCall | ResumptionValueThrowException | ResumptionValueEarlyReturn;
+export interface ResumptionValueNormal {
+  tag: 'normal',
+}
+export interface ResumptionValueInjectCall {
+  tag: 'inject-call',
+  val: InjectCall,
+}
+export interface ResumptionValueThrowException {
+  tag: 'throw-exception',
+  val: WasmException,
+}
+export interface ResumptionValueEarlyReturn {
+  tag: 'early-return',
+  val: Array<WasmValue>,
+}
 export type Event = EventComplete | EventTrap | EventBreakpoint | EventInterrupted | EventException | EventInjectedCallReturn;
 export interface EventComplete {
   tag: 'complete',
@@ -46,26 +66,6 @@ export interface EventException {
 }
 export interface EventInjectedCallReturn {
   tag: 'injected-call-return',
-  val: Array<WasmValue>,
-}
-export interface InjectCall {
-  callee: WasmFunc,
-  arguments: Array<WasmValue>,
-}
-export type ResumptionValue = ResumptionValueNormal | ResumptionValueInjectCall | ResumptionValueThrowException | ResumptionValueEarlyReturn;
-export interface ResumptionValueNormal {
-  tag: 'normal',
-}
-export interface ResumptionValueInjectCall {
-  tag: 'inject-call',
-  val: InjectCall,
-}
-export interface ResumptionValueThrowException {
-  tag: 'throw-exception',
-  val: WasmException,
-}
-export interface ResumptionValueEarlyReturn {
-  tag: 'early-return',
   val: Array<WasmValue>,
 }
 export type WasmType = WasmTypeWasmI32 | WasmTypeWasmI64 | WasmTypeWasmF32 | WasmTypeWasmF64 | WasmTypeWasmV128 | WasmTypeWasmFuncref | WasmTypeWasmExnref;

@@ -4,15 +4,24 @@
 use crate::api::{Debuggee, Frame, Memory, Module};
 use anyhow::Result;
 use gdbstub_arch::wasm::addr::{WasmAddr, WasmAddrType};
-use std::collections::{HashMap, hash_map::Entry};
+use std::collections::{BTreeMap, HashMap, HashSet, hash_map::Entry};
 
 /// Representation of the synthesized Wasm address space.
+///
+/// Modules are keyed by a monotonic id that is never reused, rather than by
+/// position in a dense array: a navigation can drop modules from the
+/// debuggee's `all_modules()` list (the page they belonged to is gone), and
+/// removing a dense-array entry would shift every later module's id — and
+/// with it, its `WasmAddr` and any breakpoints LLDB has bound against that
+/// address. A stable, sparse id lets a navigation prune the modules that
+/// disappeared without disturbing the ones that didn't.
 pub struct AddrSpace {
     module_ids: HashMap<u64, u32>,
     memory_ids: HashMap<u64, u32>,
-    modules: Vec<Module>,
-    module_bytecode: Vec<Vec<u8>>,
+    modules: BTreeMap<u32, Module>,
+    module_bytecode: BTreeMap<u32, Vec<u8>>,
     memories: Vec<Memory>,
+    next_module_id: u32,
 }
 
 /// The result of a lookup in the address space.
@@ -33,10 +42,11 @@ impl AddrSpace {
     pub fn new() -> Self {
         AddrSpace {
             module_ids: HashMap::new(),
-            modules: vec![],
-            module_bytecode: vec![],
+            modules: BTreeMap::new(),
+            module_bytecode: BTreeMap::new(),
             memory_ids: HashMap::new(),
             memories: vec![],
+            next_module_id: 0,
         }
     }
 
@@ -44,10 +54,11 @@ impl AddrSpace {
         match self.module_ids.entry(m.unique_id()) {
             Entry::Occupied(o) => *o.get(),
             Entry::Vacant(v) => {
-                let id = u32::try_from(self.modules.len()).unwrap();
+                let id = self.next_module_id;
+                self.next_module_id += 1;
                 let bytecode = m.bytecode().unwrap_or(vec![]);
-                self.module_bytecode.push(bytecode);
-                self.modules.push(m.clone());
+                self.module_bytecode.insert(id, bytecode);
+                self.modules.insert(id, m.clone());
                 *v.insert(id)
             }
         }
@@ -65,12 +76,30 @@ impl AddrSpace {
     }
 
     /// Update/create new mappings so that all modules and instances'
-    /// memories in the debuggee have mappings.
-    /// Returns true if any new modules were registered.
+    /// memories in the debuggee have mappings, and drop modules that are no
+    /// longer present (e.g. the page they belonged to was navigated away).
+    /// Returns true if the registered module set changed — grew, shrank, or
+    /// both, as when a navigation swaps one page's modules for another's.
     pub fn update(&mut self, d: &Debuggee) -> Result<bool> {
-        let before = self.modules.len();
+        let mut live_ids = HashSet::with_capacity(self.module_ids.len());
+        let mut changed = false;
         for module in d.all_modules() {
+            let unique_id = module.unique_id();
+            changed |= !self.module_ids.contains_key(&unique_id);
             let _ = self.module_id(&module);
+            live_ids.insert(unique_id);
+        }
+        let dead_ids: Vec<u64> = self
+            .module_ids
+            .keys()
+            .filter(|unique_id| !live_ids.contains(*unique_id))
+            .copied()
+            .collect();
+        for unique_id in dead_ids {
+            changed = true;
+            let id = self.module_ids.remove(&unique_id).unwrap();
+            self.modules.remove(&id);
+            self.module_bytecode.remove(&id);
         }
         for instance in d.all_instances() {
             let mut idx = 0;
@@ -83,7 +112,7 @@ impl AddrSpace {
                 }
             }
         }
-        Ok(self.modules.len() > before)
+        Ok(changed)
     }
 
     pub fn has_modules(&self) -> bool {
@@ -92,8 +121,8 @@ impl AddrSpace {
 
     /// Iterate over each registered module paired with its base `WasmAddr`.
     pub fn modules_with_addrs(&self) -> impl Iterator<Item = (&Module, WasmAddr)> + '_ {
-        self.modules.iter().enumerate().map(|(idx, m)| {
-            let addr = WasmAddr::new(WasmAddrType::Object, u32::try_from(idx).unwrap(), 0).unwrap();
+        self.modules.iter().map(|(&id, m)| {
+            let addr = WasmAddr::new(WasmAddrType::Object, id, 0).unwrap();
             (m, addr)
         })
     }
@@ -107,9 +136,8 @@ impl AddrSpace {
         let mut xml = String::from(
             "<?xml version=\"1.0\"?><!DOCTYPE memory-map SYSTEM \"memory-map.dtd\"><memory-map>",
         );
-        for (idx, bc) in self.module_bytecode.iter().enumerate() {
-            let start =
-                WasmAddr::new(WasmAddrType::Object, u32::try_from(idx).unwrap(), 0).unwrap();
+        for (&id, bc) in self.module_bytecode.iter() {
+            let start = WasmAddr::new(WasmAddrType::Object, id, 0).unwrap();
             let len = bc.len();
             if len > 0 {
                 write!(
@@ -160,23 +188,28 @@ impl AddrSpace {
     }
 
     pub fn lookup(&self, addr: WasmAddr, d: &Debuggee) -> AddrSpaceLookup<'_> {
-        let index = usize::try_from(addr.module_index()).unwrap();
         match addr.addr_type() {
             WasmAddrType::Object => {
-                if index >= self.modules.len() {
+                // Module ids are sparse (see the AddrSpace doc comment) —
+                // look up by id, not by dense position. A stale id from
+                // before a navigation pruned it correctly returns Empty
+                // rather than aliasing whatever module now occupies that
+                // slot.
+                let id = addr.module_index();
+                let Some(bytecode) = self.module_bytecode.get(&id) else {
                     return AddrSpaceLookup::Empty;
-                }
-                let bytecode = &self.module_bytecode[index];
+                };
                 if addr.offset() >= u32::try_from(bytecode.len()).unwrap() {
                     return AddrSpaceLookup::Empty;
                 }
                 AddrSpaceLookup::Module {
-                    module: &self.modules[index],
+                    module: self.modules.get(&id).unwrap(),
                     bytecode,
                     offset: addr.offset(),
                 }
             }
             WasmAddrType::Memory => {
+                let index = usize::try_from(addr.module_index()).unwrap();
                 if index >= self.memories.len() {
                     return AddrSpaceLookup::Empty;
                 }

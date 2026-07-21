@@ -35,8 +35,16 @@ wasmtime, which is a manual, rare action. Each edit is commented in place.
   if new modules appeared, the stop reply uses `MultiThreadStopReason::Library`
   instead of `SwBreak`, emitting `library:;` in the T packet so LLDB re-reads
   `qXfer:libraries` and loads the newly registered synthetic JS modules.
-- `src/addr.rs` — `AddrSpace::update()` now returns `bool` (true when new
-  modules were registered).
+- `src/addr.rs` — `AddrSpace::update()` now returns `bool` when the module set
+  *changes* (added or removed), not just grows — a page navigation drops the
+  old page's modules from `all_modules()`, and that needs to surface as a
+  library change too. Module storage moved from a dense `Vec` (id = array
+  index) to a sparse `BTreeMap<u32, Module>` keyed by a monotonic, never-reused
+  id: pruning a dense array's entry would shift every later module's id (and
+  with it, its `WasmAddr` and any breakpoints LLDB has bound against that
+  address). `lookup()` looks up by id instead of assuming a dense range, so a
+  stale `WasmAddr` from before a prune correctly misses instead of aliasing
+  whatever now occupies that slot.
 - `wit/world.wit` — extended the `debuggee` resource with `list-threads`,
   `stopped-thread`; `exit-frames` and `single-step` now take an explicit `tid: u32`.
   `resource module` gains `name: func() -> string` for source URL basenames.
