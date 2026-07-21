@@ -719,32 +719,43 @@ export class RdpDebuggee {
 
   #doSingleStep(tid: number): Ref {
     this.#armStopped();
-    // LLDB's own "step off a stale breakpoint before resuming" dance —
-    // triggered by its cached, pre-navigation view of where a breakpoint
-    // site is — runs as a singleStep BEFORE it ever issues a real continue.
-    // If a pause already happened with nothing listening (e.g. a buffered
-    // breakpoint refiring on a newly-navigated page, won before this
-    // step-off dance even started), stepping now would silently resume
-    // straight past it. Surface it instead, same as #doContinue's check.
-    if (this.#session.hasUnwitnessedPause()) {
-      void this.#session.adoptPausedState();
-      return this.#eventFutureRef();
+    // #stop.pending is null when a pending interrupt was already consumed by
+    // #armStopped() — the stop is immediate; stepping now would run the
+    // thread right past it while LLDB believes it's already stopped.
+    // Skip the step, matching #doContinue's guard.
+    if (this.#stop.pending !== null) {
+      // LLDB's own "step off a stale breakpoint before resuming" dance —
+      // triggered by its cached, pre-navigation view of where a breakpoint
+      // site is — runs as a singleStep BEFORE it ever issues a real continue.
+      // If a pause already happened with nothing listening (e.g. a buffered
+      // breakpoint refiring on a newly-navigated page, won before this
+      // step-off dance even started), stepping now would silently resume
+      // straight past it. Surface it instead, same as #doContinue's check.
+      if (this.#session.hasUnwitnessedPause()) {
+        void this.#session.adoptPausedState();
+        return this.#eventFutureRef();
+      }
+      this.#session.armAllStop();
+      // A JS (`call`) innermost frame is JIT-compiled: RDP "step" advances one
+      // wasm instruction, which jumps an arbitrary number of JS source lines.
+      // Use "next" (RDP step-over by source line) so a step lands on the next
+      // JS line. This degrades JS step-in to step-over (single-subprogram
+      // synthetic modules can't distinguish JS functions anyway).
+      const innermost = this.#framesByTid.get(tid)?.[0];
+      const limit = innermost?.type === "call" ? "next" : "step";
+      this.#session.stepOne(tid, limit);
     }
-    this.#session.armAllStop();
-    // A JS (`call`) innermost frame is JIT-compiled: RDP "step" advances one
-    // wasm instruction, which jumps an arbitrary number of JS source lines.
-    // Use "next" (RDP step-over by source line) so a step lands on the next
-    // JS line. This degrades JS step-in to step-over (single-subprogram
-    // synthetic modules can't distinguish JS functions anyway).
-    const innermost = this.#framesByTid.get(tid)?.[0];
-    const limit = innermost?.type === "call" ? "next" : "step";
-    this.#session.stepOne(tid, limit);
     return this.#eventFutureRef();
   }
 
   #doInterrupt(): null {
     this.#armStopped();
-    this.#session.interrupt(this.#session.stoppedTid);
+    // Same guard as #doContinue/#doSingleStep: a null #stop.pending here
+    // means the stop was already resolved by a consumed pending interrupt,
+    // so there's nothing live left to interrupt.
+    if (this.#stop.pending !== null) {
+      this.#session.interrupt(this.#session.stoppedTid);
+    }
     return null;
   }
 
