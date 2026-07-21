@@ -26,6 +26,13 @@ import { startGdbServer } from "../gdb/worker/host.mjs";
 import { consoleLogger } from "../cli/logger.js";
 import { debugEnvEnabled } from "../config.js";
 
+const MAX_TRACE_CHARS = 4096;
+
+function boundedTrace(message: string): string {
+  if (message.length <= MAX_TRACE_CHARS) return message;
+  return `${message.slice(0, MAX_TRACE_CHARS)}… [${message.length - MAX_TRACE_CHARS} chars omitted]`;
+}
+
 const USAGE = `\
 Usage: firefox-lldb-server [options]
 
@@ -332,7 +339,7 @@ function createTabLauncher(
         dispatch: (req: unknown) => liveDebuggee.dispatch(req as never),
         port: 0,
         onInfo: (m: string) => logger.debug(`[component] ${m}`),
-        onTrace: (m: string) => logger.debug(`[gdbstub] ${m}`),
+        onTrace: (m: string) => logger.debug(`[gdbstub] ${boundedTrace(m)}`),
         onError: (m: string) => logger.error(m),
         verbose,
       });

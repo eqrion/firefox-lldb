@@ -15,11 +15,16 @@ const DIM = "\x1b[2m";
 
 // A custom reporter replaces node:test's own output entirely -- console.log/
 // error calls inside a test file arrive here as test:stdout/test:stderr
-// events, not on the real stdout/stderr fds, so a switch that doesn't handle
-// them silently drops everything a test (or DEBUG=1 verbose logging) prints.
+// events, not on the real stdout/stderr fds. Route verbose diagnostics back to
+// the real stderr fd instead of yielding them as reporter output: CI redirects
+// stderr to a trace file, keeping multi-megabyte RSP logs off the live Actions
+// stream while still making their tail available on failure.
 const VERBOSE = process.env.DEBUG === "1";
 
-export default async function* reporter(source) {
+export async function* report(
+  source,
+  { verbose = VERBOSE, writeDiagnostic = (message) => process.stderr.write(message) } = {}
+) {
   let pass = 0;
   let fail = 0;
   const failures = [];
@@ -36,7 +41,7 @@ export default async function* reporter(source) {
       }
       case "test:stdout":
       case "test:stderr": {
-        if (VERBOSE) yield `${DIM}${data.message}${RESET}`;
+        if (verbose) writeDiagnostic(data.message);
         break;
       }
       case "test:pass": {
@@ -73,3 +78,5 @@ export default async function* reporter(source) {
     }
   }
 }
+
+export default report;
