@@ -273,6 +273,11 @@ export class RdpWasmSession extends EventEmitter {
   // it (see the EVENTS.paused case). Cleared once #allStop reports a stop
   // that accounts for them, or the tid resumes.
   #unwitnessedPausedTids = new Set<number>();
+  // Real pause packet per currently-paused tid, mirroring #pausedTids's
+  // lifecycle exactly (same add/delete sites). Lets adoptPausedState()
+  // report the actual why.type instead of a synthetic empty packet that
+  // always defaults to "breakpoint" downstream in RdpDebuggee.
+  #pausePacketByTid = new Map<number, PauseEvent>();
 
   // breakpoints buffered so new workers inherit them
   #breakpoints = new Map<string, Set<number>>(); // sourceUrl -> set of offsets
@@ -486,6 +491,7 @@ export class RdpWasmSession extends EventEmitter {
           const [tid, info] = entry;
           this.#threads.delete(tid);
           this.#pausedTids.delete(tid);
+          this.#pausePacketByTid.delete(tid);
           this.#interruptedTids.delete(tid);
           // The page's tab was closed or navigated away; let consumers react
           // (e.g. firefox-lldb detaches the lldb process). Give a Fission
@@ -519,6 +525,7 @@ export class RdpWasmSession extends EventEmitter {
         if (!entry) break;
         const [tid] = entry;
         this.#pausedTids.add(tid);
+        this.#pausePacketByTid.set(tid, p as PauseEvent);
         // No one is listening for this specific pause right now (armAllStop
         // isn't currently coordinating it) — e.g. a newly-navigated page's
         // buffered breakpoint fires before the next Debuggee.continue arms
@@ -535,6 +542,7 @@ export class RdpWasmSession extends EventEmitter {
         if (entry) {
           const [tid] = entry;
           this.#pausedTids.delete(tid);
+          this.#pausePacketByTid.delete(tid);
           this.#unwitnessedPausedTids.delete(tid);
         }
         break;
@@ -555,6 +563,7 @@ export class RdpWasmSession extends EventEmitter {
       if (t.isTopLevel) {
         this.#threads.delete(tid);
         this.#pausedTids.delete(tid);
+        this.#pausePacketByTid.delete(tid);
         this.#interruptedTids.delete(tid);
         removed = t;
         // Firefox's own target-destroyed-form for this target won't find it
@@ -1100,7 +1109,12 @@ export class RdpWasmSession extends EventEmitter {
   async adoptPausedState(): Promise<boolean> {
     const paused = [...this.#pausedTids];
     if (paused.length === 0) return false;
-    await this.#allStop(paused[0], {} as PauseEvent);
+    // Report the real pause packet (why.type etc.) if we captured one for
+    // this tid, rather than a synthetic empty one that always reads as a
+    // generic breakpoint downstream — this tid was genuinely paused, just
+    // not by us, so its real cause (trap/exception/breakpoint) is known.
+    const packet = this.#pausePacketByTid.get(paused[0]) ?? ({} as PauseEvent);
+    await this.#allStop(paused[0], packet);
     return true;
   }
 
