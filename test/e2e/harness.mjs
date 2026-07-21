@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { readFileSync } from "node:fs";
 import { LLDBClient } from "lldb-wasm";
-import { parseCliArgs, startPlatformServer } from "../../src/cli/firefox-lldb-server.ts";
+import { parseCliArgs, startPlatformServer } from "../../src/core/platform-session.ts";
 import { freePort } from "../../src/platform/gdb-server-spawner.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -232,7 +232,7 @@ export class Session {
 
   // Fire-and-forget JS evaluation on the page, for use *after* attach (the
   // `--fire` CLI flag only covers the one-shot "first breakpoint arms" case).
-  // Mirrors firefox-lldb-server.ts's own --fire wiring: don't await the
+  // Mirrors core/platform-session.ts's own --fire wiring: don't await the
   // evaluate() call itself, since the expression may call into wasm and hit
   // an armed breakpoint, in which case evaluate() never resolves — awaiting
   // it here would just reproduce that hang one level up.

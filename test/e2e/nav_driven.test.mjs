@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-// Driven navigation: our own session.navigate() (the path firefox-lldb-server
+// Driven navigation: our own session.navigate() (the path core/platform-session.ts
 // uses to steer an already-attached tab to a new URL), as opposed to a
 // page-triggered one. Proves the re-sync machinery — rdp-debuggee.ts's
 // #scheduleResyncCheck forcing a stop when nothing pauses on its own, and

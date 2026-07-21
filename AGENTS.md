@@ -13,6 +13,7 @@ src/platform/      LLDB platform server (process list, qLaunchGDBServer)
 src/rdp/           RDP client, RdpWasmSession, headless Firefox launcher
 src/gdb/           RdpDebuggee, worker + SAB-RPC, jco-generated gdbstub
 src/sourcemap/     source-map -> DWARF converter (host glue + jco-generated component)
+src/core/          shared Firefox + per-tab launcher + platform server bring-up
 src/cli/           CLI entry points (firefox-lldb, firefox-lldb-server) + REPL
 src/mcp/           MCP server that drives the real REPL for coding agents
 test/unit/         unit tests (protocol + platform server)

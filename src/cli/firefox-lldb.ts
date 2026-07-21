@@ -15,7 +15,7 @@
 import net from "node:net";
 import { readFile } from "node:fs/promises";
 import { LLDBClient } from "lldb-wasm";
-import { parseCliArgs, startPlatformServer } from "./firefox-lldb-server.js";
+import { parseCliArgs, startPlatformServer } from "../core/platform-session.js";
 import { focusFirefoxWindow } from "../rdp/firefox.js";
 import { quietLogger } from "./logger.js";
 import { runRepl } from "./repl.js";

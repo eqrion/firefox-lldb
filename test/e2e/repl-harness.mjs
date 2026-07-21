@@ -11,7 +11,7 @@
 import net from "node:net";
 import { PassThrough, Writable } from "node:stream";
 import { LLDBClient } from "lldb-wasm";
-import { parseCliArgs, startPlatformServer } from "../../src/cli/firefox-lldb-server.ts";
+import { parseCliArgs, startPlatformServer } from "../../src/core/platform-session.ts";
 import { freePort } from "../../src/platform/gdb-server-spawner.ts";
 import { runRepl } from "../../src/cli/repl.ts";
 import { FIXTURES, startStaticServer, withDeadline } from "./harness.mjs";

@@ -10,7 +10,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import net from "node:net";
-import { parseCliArgs, startPlatformServer } from "../../src/cli/firefox-lldb-server.ts";
+import { parseCliArgs, startPlatformServer } from "../../src/core/platform-session.ts";
 import { freePort } from "../../src/platform/gdb-server-spawner.ts";
 
 test("launch refuses when the RDP port is already occupied", async () => {
