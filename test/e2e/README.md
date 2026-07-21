@@ -66,6 +66,7 @@ Requires Firefox installed in a standard location (see `findFirefoxBinary` in
 - `inspect_types.test.mjs` — types fixture: integers, floats, pointers, bitfields, structs.
 - `inspect_heap.test.mjs` — heap fixture: heap-allocated struct/array through pointer.
 - `edge_cases.test.mjs` — interleaved JS/wasm frames, watchpoint non-crash.
+- `lldb_lifecycle_commands.test.mjs` — detach/re-attach, invalid PID rejection, and remote-platform command survival.
 - `source_listing.test.mjs` — wasm and JS frames carry valid file/line DWARF info.
 - `sourcemap_source_listing.test.mjs` — source-map DWARF resolves inside the per-session materialization directory.
 - `js_debugging.test.mjs` — JS file:line breakpoint fires; step-over advances source line.

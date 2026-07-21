@@ -83,6 +83,11 @@ export class PlatformServer implements RspHandler {
     return this.#tabPid(actor);
   }
 
+  /** Whether a PID was assigned to a tab advertised by this platform. */
+  hasTabPid(pid: number): boolean {
+    return this.#tabPidMap.has(pid);
+  }
+
   async #listProcesses(): Promise<ProcessInfo[]> {
     if (!this.#listTabs) return [];
     try {

@@ -237,7 +237,8 @@ function createTabLauncher(
   logger: Logger,
   launching: boolean,
   verbose: boolean,
-  getCurrentTabs: () => TabInfo[]
+  getCurrentTabs: () => TabInfo[],
+  isValidAttachPid: (pid: number) => boolean
 ): GdbServerLauncher {
   return async ({ port, url, tabActor }) => {
     // Actor IDs are scoped to an RDP connection. The watcher uses a separate
@@ -347,6 +348,7 @@ function createTabLauncher(
       const shim = await startAttachShim({
         listenPort: port,
         componentPort: gdbServer.port,
+        isValidPid: isValidAttachPid,
         trace: verbose ? (m) => logger.debug(`[shim] ${m}`) : undefined,
       });
       return {
@@ -441,10 +443,22 @@ export async function startPlatformServer(
   // to satisfy `platform process list` and resolve `process attach --pid N`.
   let currentTabs: TabInfo[] = [];
 
-  const launcher = createTabLauncher(args, opts, logger, launching, verbose, () => currentTabs);
+  let platformServer: PlatformServer;
+  const launcher = createTabLauncher(
+    args,
+    opts,
+    logger,
+    launching,
+    verbose,
+    () => currentTabs,
+    // LLDB may reach vAttach before the asynchronous tab watcher has assigned
+    // the first tab's synthetic PID. PID 1 is reserved for that first tab;
+    // later PIDs must already exist in the platform's stable map.
+    (pid) => pid === 1 || platformServer.hasTabPid(pid)
+  );
 
   const spawner = new GdbServerSpawner(launcher);
-  const platformServer = new PlatformServer({
+  platformServer = new PlatformServer({
     spawner,
     defaultUrl: args.url,
     listTabs: async () => currentTabs,

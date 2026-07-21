@@ -117,3 +117,38 @@ test("shim does NOT inject W00 when component closes before vAttach", async () =
   await shim.close();
   compServer.close();
 });
+
+test("shim rejects vAttach for a PID the platform did not advertise", async () => {
+  let upstream = "";
+  const compServer = await new Promise<{ port: number; close(): void }>((resolve) => {
+    const srv = net.createServer((conn) => {
+      conn.on("data", (data) => (upstream += data.toString("latin1")));
+    });
+    srv.listen(0, "127.0.0.1", () => {
+      const port = (srv.address() as net.AddressInfo).port;
+      resolve({ port, close: () => srv.close() });
+    });
+  });
+  const shim = await startAttachShim({
+    listenPort: 0,
+    componentPort: compServer.port,
+    isValidPid: (pid) => pid === 1,
+  });
+  const lldb = net.createConnection({ port: shim.port, host: "127.0.0.1" });
+  await new Promise<void>((resolve, reject) => {
+    lldb.once("connect", resolve);
+    lldb.once("error", reject);
+  });
+
+  const rejected = new Promise<Buffer>((resolve) => lldb.once("data", resolve));
+  lldb.write(framePacket("vAttach;3e7"));
+  const reply = (await rejected).toString("latin1");
+  assert.match(reply, /\$E01#/);
+
+  await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  assert.doesNotMatch(upstream, /vAttach/, "invalid attach must not reach the component");
+
+  lldb.destroy();
+  await shim.close();
+  compServer.close();
+});

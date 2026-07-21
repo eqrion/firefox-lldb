@@ -62,6 +62,8 @@ export function startAttachShim(opts: {
   listenPort: number;
   componentPort: number;
   host?: string;
+  /** Validate the user-facing platform PID encoded in vAttach. */
+  isValidPid?: (pid: number) => boolean;
   trace?: (m: string) => void;
 }): Promise<AttachShim> {
   const host = opts.host ?? "127.0.0.1";
@@ -126,6 +128,13 @@ export function startAttachShim(opts: {
             continue;
           }
           if (payload.startsWith("vAttach")) {
+            const pidHex = payload.startsWith("vAttach;") ? payload.slice("vAttach;".length) : "";
+            const pid = /^[0-9a-fA-F]+$/.test(pidHex) ? parseInt(pidHex, 16) : Number.NaN;
+            if (opts.isValidPid && (!Number.isSafeInteger(pid) || !opts.isValidPid(pid))) {
+              trace?.(`reject ${payload}: unknown platform pid`);
+              replyToClient("E01");
+              continue;
+            }
             upstream.write(raw);
             attached = true;
             trace?.("vAttach forwarded; switching to transparent pipe");
