@@ -2,7 +2,7 @@
 
 An e2e suite that drives the **embedded wasm LLDB** (the same path the
 `firefox-lldb` command uses) instead of a native lldb. This is the primary
-correctness signal. The Python suite in `../e2e-python/` is deprecated.
+correctness signal.
 
 Run:
 

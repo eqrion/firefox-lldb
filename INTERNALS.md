@@ -226,8 +226,6 @@ part of that surface serving it.
   multiple breakpoints + continue, struct/pointer/heap inspection, dynamic
   dispatch, every step mode, locals/args/globals, JS-frame debugging, source maps,
   wasm traps, and multithreading.
-- **e2e-python** (`npm run test:e2e-python`) — deprecated; drives an external
-  wasm-plugin lldb. Kept for reference only; new tests go in `test/e2e/`.
 
 **Every significant change must land with an e2e test that exercises it.** A
 feature or fix the suite doesn't cover is treated as unverified.

@@ -18,8 +18,7 @@ src/cli/           CLI entry points (firefox-lldb, firefox-lldb-server) + REPL
 src/mcp/           MCP server that drives the real REPL for coding agents
 test/unit/         unit tests (protocol + platform server)
 test/e2e/          Node e2e suite (primary)
-test/fixtures/     emscripten test fixtures (shared by both e2e suites)
-test/e2e-python/   deprecated Python e2e suite
+test/fixtures/     emscripten test fixtures
 vendor/            vendored gdbstub-component + source-map-dwarf crate/component (Rust, wasm32-wasip2)
 ```
 

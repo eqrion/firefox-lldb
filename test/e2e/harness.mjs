@@ -4,8 +4,7 @@
 
 // Node e2e harness: drives the embedded wasm LLDB through its off-worker
 // "session" API (structured SB-API queries), the same path the `firefox-lldb`
-// command uses. This mirrors the Python harness (test/e2e-python/harness.py) but with
-// no native lldb — everything runs in this Node process.
+// command uses — no native lldb, everything runs in this Node process.
 
 import net from "node:net";
 import http from "node:http";
@@ -19,7 +18,6 @@ import { freePort } from "../../src/platform/gdb-server-spawner.ts";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..", "..");
 
-// Mirrors the FIXTURES map in the deprecated Python harness.
 export const FIXTURES = {
   factorial: {
     pageDir: "test/fixtures/simple",
@@ -341,10 +339,10 @@ export class Session {
     return bridgeTcp(this.#client, this.#sockets, port);
   }
 
-  // Launch headless Firefox at the fixture, attach via the platform, and return
-  // a Session. Mirrors harness.py `_start_platform` + `_attach_via_platform`.
-  // `fire` overrides the fixture's default fire expression (used by JS tests
-  // that need a second deferred call, e.g. "runFactorial(); setTimeout(...)").
+  // Launch headless Firefox at the fixture, attach via the platform, and
+  // return a Session. `fire` overrides the fixture's default fire expression
+  // (used by JS tests that need a second deferred call, e.g.
+  // "runFactorial(); setTimeout(...)").
   static async attach(fxName, { headless = true, fire } = {}) {
     const fx = FIXTURES[fxName];
     if (!fx) throw new Error(`unknown fixture: ${fxName}`);
@@ -404,10 +402,9 @@ export class Session {
     return session;
   }
 
-  // Attach to a fixture, set a breakpoint on its target function, and continue
-  // until stopped there. Mirrors harness.py `_stopped_at_breakpoint`.
-  // Continues past signals (e.g. SIGSEGV from -fwasm-exceptions throw) until
-  // a breakpoint or terminal state is reached.
+  // Attach to a fixture, set a breakpoint on its target function, and
+  // continue until stopped there. Continues past signals (e.g. SIGSEGV from
+  // -fwasm-exceptions throw) until a breakpoint or terminal state is reached.
   static async stoppedAtBreakpoint(fxName) {
     const session = await Session.attach(fxName);
     const fx = FIXTURES[fxName];
