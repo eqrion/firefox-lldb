@@ -101,9 +101,10 @@ interface StopState {
   // spurious and just resumes from (it's meant for a real client Ctrl-C,
   // which this isn't). Override the tag to "breakpoint" for this one stop so
   // it lands in the arm that actually consults update_on_stop()'s changed
-  // modules and reports MultiThreadStopReason::Library. Intentionally NOT
-  // cleared when the "stopped" listener drops an unwaited-for stop, when the
-  // session closes, or in #armStopped's pending-interrupt branch.
+  // modules and reports MultiThreadStopReason::Library. Cleared wherever
+  // `pending` settles or is bypassed (the "stopped" listener, session close,
+  // triggerInterrupt(), or #armStopped's pending-interrupt branch) so it
+  // never survives to mislabel a later, unrelated stop.
   forcingResync: boolean;
 }
 
@@ -192,6 +193,7 @@ export class RdpDebuggee {
       // worker thread doesn't hang when the RDP connection drops mid-session.
       this.#stop.pending?.reject(new Error("session closed"));
       this.#stop.pending = null;
+      this.#stop.forcingResync = false;
     });
 
     // A navigation (driven or page-triggered) invalidates every per-URL cache
@@ -796,6 +798,11 @@ export class RdpDebuggee {
    * first, then answer "frames" — giving us a real snapshot without waiting.
    */
   triggerInterrupt(): void {
+    // A real interrupt supersedes any in-flight resync check: cancel it so
+    // it can't later fire into an unrelated wait this triggerInterrupt() (or
+    // whatever comes after it) arms. #clearResyncTimer() is a no-op if
+    // nothing is armed.
+    this.#clearResyncTimer();
     for (const tid of this.#session.listTids()) {
       try {
         this.#session.interrupt(tid);
@@ -806,6 +813,7 @@ export class RdpDebuggee {
     const pending = this.#stop.pending;
     if (pending) {
       this.#stop.reason = "signal";
+      this.#stop.forcingResync = false;
       pending.resolve({ tid: this.#session.stoppedTid, pausePacket: {} as PauseEvent });
       this.#stop.pending = null;
     } else {
@@ -817,6 +825,7 @@ export class RdpDebuggee {
     if (this.#stop.pendingInterrupt) {
       this.#stop.pendingInterrupt = false;
       this.#stop.reason = "signal";
+      this.#stop.forcingResync = false;
       this.#stop.promise = Promise.resolve({
         tid: this.#session.stoppedTid,
         pausePacket: {} as PauseEvent,
@@ -914,6 +923,14 @@ export class RdpDebuggee {
       case "interrupted":
         return "interrupted";
       default:
+        // "signal" (triggerInterrupt's Ctrl-C, or #armStopped's consumed
+        // pendingInterrupt) deliberately has no case of its own here and
+        // falls through to "breakpoint". The component's Event::Interrupted
+        // arm only reports a real stop when its own Rust-side self.interrupt
+        // flag is set — i.e. LLDB called the native Debuggee.interrupt WIT
+        // method over RSP. A host-manufactured Ctrl-C never sets that, so
+        // tagging it "interrupted" would make the component treat it as
+        // spurious and silently resume instead of actually stopping.
         return "breakpoint";
     }
   }
