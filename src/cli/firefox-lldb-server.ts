@@ -9,6 +9,7 @@
 
 import { pathToFileURL } from "node:url";
 import { parseCliArgs, startPlatformServer } from "../core/platform-session.js";
+import { exitWhenOrphaned } from "../config.js";
 
 async function main(): Promise<void> {
   const args = parseCliArgs(process.argv.slice(2));
@@ -24,7 +25,7 @@ async function main(): Promise<void> {
   // When launched session-detached (e.g. the e2e harness uses setsid), a killed
   // parent does not signal us, so we would orphan the launched Firefox. Poll for
   // reparenting to init/launchd (ppid 1) and shut down cleanly when it happens.
-  if (process.env.FIREFOX_LLDB_EXIT_WHEN_ORPHANED) {
+  if (exitWhenOrphaned()) {
     const timer = setInterval(() => {
       if (process.ppid === 1) {
         void handle.shutdown().then(() => process.exit(0));

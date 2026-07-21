@@ -18,10 +18,11 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { freePort } from "../platform/gdb-server-spawner.js";
 import { PtyRepl, type SendResult } from "./pty-repl.js";
+import { marionettePort } from "../config.js";
 
 // Fixed defaults so the firefox-devtools-mcp entry in .mcp.json can hard-code a
 // matching --marionette-port. Override per-process via env if a port clashes.
-const MARIONETTE_PORT = Number(process.env.FIREFOX_LLDB_MARIONETTE_PORT ?? 2828);
+const MARIONETTE_PORT = marionettePort();
 
 const TOOLS: Tool[] = [
   {

@@ -24,6 +24,7 @@ import { launchFirefox, type FirefoxChannel, type FirefoxHandle } from "../rdp/f
 // @ts-expect-error - .mjs host has no type declarations
 import { startGdbServer } from "../gdb/worker/host.mjs";
 import { consoleLogger } from "../cli/logger.js";
+import { debugEnvEnabled } from "../config.js";
 
 const USAGE = `\
 Usage: firefox-lldb-server [options]
@@ -220,6 +221,7 @@ function createTabLauncher(
   opts: StartOptions,
   logger: RspLogger,
   launching: boolean,
+  verbose: boolean,
   getCurrentTabs: () => TabInfo[]
 ): GdbServerLauncher {
   return async ({ port, url, tabActor }) => {
@@ -301,7 +303,6 @@ function createTabLauncher(
       // `process attach --plugin wasm` works.
       // Use port 0 so the OS assigns the component port — avoids the
       // TOCTOU race that freePort() has (grab-port → close → bind).
-      const verbose = args.verbose || process.env.DEBUG === "1";
       const gdbServer = startGdbServer({
         dispatch: (req: unknown) => debuggee.dispatch(req as never),
         port: 0,
@@ -338,7 +339,7 @@ export async function startPlatformServer(
   args: Args,
   opts: StartOptions = {}
 ): Promise<PlatformServerHandle> {
-  const verbose = args.verbose || process.env.DEBUG === "1";
+  const verbose = args.verbose || debugEnvEnabled();
   const logger = opts.logger ?? consoleLogger(verbose);
   setRdpLogger(logger);
   const launching = !args.connect;
@@ -376,7 +377,7 @@ export async function startPlatformServer(
   // to satisfy `platform process list` and resolve `process attach --pid N`.
   let currentTabs: TabInfo[] = [];
 
-  const launcher = createTabLauncher(args, opts, logger, launching, () => currentTabs);
+  const launcher = createTabLauncher(args, opts, logger, launching, verbose, () => currentTabs);
 
   const spawner = new GdbServerSpawner(launcher);
   const platformServer = new PlatformServer({

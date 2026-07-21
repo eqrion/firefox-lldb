@@ -13,6 +13,7 @@ import { connect as netConnect } from "node:net";
 import { tmpdir, homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
+import { firefoxLogDir } from "../config.js";
 
 /** True if something is already accepting connections on host:port. */
 function isPortOpen(port: number, host = "127.0.0.1", timeoutMs = 200): Promise<boolean> {
@@ -339,7 +340,7 @@ export async function launchFirefox(opts: {
 
   // detached: true makes the child a process group leader so we can kill
   // the whole group (Firefox + plugin-container children) with -pid on close.
-  const logDir = process.env.FIREFOX_LLDB_LOG_DIR;
+  const logDir = firefoxLogDir();
   const stdio: StdioOptions = logDir ? ["ignore", "pipe", "pipe"] : "ignore";
   const child: ChildProcess = spawn(binary, args, { stdio, detached: true });
   if (logDir) {

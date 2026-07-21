@@ -20,6 +20,7 @@ import { focusFirefoxWindow } from "../rdp/firefox.js";
 import { quietLogger } from "./logger.js";
 import { runRepl } from "./repl.js";
 import type { RdpWasmSession } from "../rdp/session.js";
+import { debugEnvEnabled } from "../config.js";
 
 // Open bridge sockets, tracked so we can tear them down on exit (otherwise
 // net.Server.close() blocks on the live connections).
@@ -51,7 +52,7 @@ async function bridgeTcp(client: LLDBClient, port: number): Promise<number> {
 
 async function main(): Promise<void> {
   const args = parseCliArgs(process.argv.slice(2));
-  const verbose = args.verbose || process.env.DEBUG === "1";
+  const verbose = args.verbose || debugEnvEnabled();
 
   const client = await LLDBClient.create();
   client.setFileProvider((path) => readFile(path).catch(() => null));
