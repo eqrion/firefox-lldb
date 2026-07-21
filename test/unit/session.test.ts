@@ -50,7 +50,8 @@ class FakeRdpServer {
   private srv: net.Server;
   private sock: net.Socket | null = null;
   private buf = Buffer.alloc(0);
-  private handlers: Array<{ match: (r: ReqPacket) => boolean; handle: HandlerFn }> = [];
+  private handlers: Array<{ match: (r: ReqPacket) => boolean; handle: HandlerFn; once?: boolean }> =
+    [];
   readonly received: ReqPacket[] = [];
   private pendingConnect: (() => void) | null = null;
   port = 0;
@@ -136,7 +137,7 @@ class FakeRdpServer {
 
   /** Register a one-shot handler for any request (call before that request). */
   onNext(match: (r: ReqPacket) => boolean, handle: HandlerFn): void {
-    const entry = { match, handle };
+    const entry = { match, handle, once: true };
     this.handlers.unshift(entry); // checked before generic handlers
   }
 
@@ -148,7 +149,8 @@ class FakeRdpServer {
   #dispatch(req: ReqPacket): void {
     const idx = this.handlers.findIndex((h) => h.match(req));
     if (idx === -1) return;
-    const { handle } = this.handlers[idx];
+    const { handle, once } = this.handlers[idx];
+    if (once) this.handlers.splice(idx, 1);
     const resp = handle(req);
     if (resp) this.send(resp);
   }
@@ -294,7 +296,13 @@ test("target-destroyed-form with real Firefox payload shape (no threadActor) pru
   srv.targetAvailable("threadB", { isTopLevel: true });
   await sleep(200);
   const tidB = session.listTids()[0];
-  assert.notEqual(tidB, tidA, "the swapped-in thread gets a fresh tid");
+  // Reused, not fresh: LLDB has no RSP mechanism to learn "tid N is gone,
+  // thread state referencing it is stale" (gdbstub has no thread-exited/exec
+  // stop reason), and its own breakpoint step-off dance keeps addressing the
+  // old tid regardless of what we tell it. Keeping the number stable across
+  // the swap means that stale-looking reference is actually still valid,
+  // now pointed at the new page's thread (see #pendingTopLevelTid).
+  assert.equal(tidB, tidA, "the swapped-in top-level thread reuses the old tid");
 
   session.close();
   srv.close();
@@ -562,13 +570,20 @@ test("setWasmBreakpoint buffers breakpoint and applies it to new workers", async
     (r) => r.type === "setBreakpoint",
     (r) => ({ from: r.to as string })
   );
+  // #applyBreakpoints polls the new target's sources before snapping (see
+  // its own test below); answer with none so the poll exhausts quickly
+  // instead of hitting its per-attempt timeout on every retry.
+  srv.onAll(
+    (r) => r.type === "sources",
+    (r) => ({ from: r.to as string, sources: [] })
+  );
 
   // Set a breakpoint before any workers appear.
   await session.setWasmBreakpoint("http://host/mod.wasm", 1234);
 
   // Now a new worker appears.
   srv.targetAvailable("workerT", { consoleActor: "consoleW" });
-  await sleep(200);
+  await sleep(700);
 
   // The setBreakpoint request should have been sent to workerT.
   const bps = srv.received.filter((r) => r.type === "setBreakpoint" && r.to === "workerT");
@@ -1143,13 +1158,20 @@ test("uncontrolled top-level target swap (no navigate()) invalidates stale wasm 
       return { from: "thread2" };
     }
   );
+  // #applyBreakpoints polls thread2's sources before snapping; answer with
+  // none (nothing has refreshed sources for the new target yet, same as in
+  // production before the next debuggee stop) so the poll exhausts quickly
+  // instead of hitting its per-attempt timeout on every retry.
+  srv.onAll(
+    (r) => r.type === "sources",
+    (r) => ({ from: r.to as string, sources: [] })
+  );
   srv.targetAvailable("thread2", { isTopLevel: true, url: "http://example.com/v1.html" });
-  await sleep(200);
+  await sleep(700);
 
-  // thread2's source actors haven't been queried yet (that only happens on
-  // the next debuggee stop, same as in production) — the re-applied
-  // breakpoint must fall back to the unsnapped offset rather than hang or
-  // crash trying to reach the now-dead wasmActorOld.
+  // thread2's source actors never resolved (the poll above exhausted) — the
+  // re-applied breakpoint must fall back to the unsnapped offset rather
+  // than hang or crash trying to reach the now-dead wasmActorOld.
   assert.equal(
     secondSetLine,
     12,
