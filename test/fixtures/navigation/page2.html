@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Navigation Wasm Debugger Test — page 2</title>
+</head>
+<body>
+  <h1>page 2</h1>
+
+  <script src="math.js"></script>
+  <script>
+    let factorial;
+
+    MathModule().then(mod => {
+      factorial = mod.cwrap('compute_factorial', 'number', ['number']);
+    });
+
+    function runFactorial() {
+      return factorial(10);
+    }
+  </script>
+</body>
+</html>

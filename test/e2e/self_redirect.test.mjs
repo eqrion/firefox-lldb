@@ -11,13 +11,14 @@
 // handling.
 //
 // This only checks survival, not that the breakpoint refires correctly on
-// the new page: LLDB's own process/thread model has a separate, deeper gap
-// where it isn't told anything changed when the page's threads get swapped
-// out from under an active session without an intervening wasm-level stop
-// (no analogous "everything changed, re-sync" stop reason exists for that,
-// unlike the existing "library changed" one for new modules) — continuing
-// past this point can wedge waiting for a stop that never comes. That's a
-// separate, real gap outside this fix's scope.
+// the new page — that fuller contract (re-sync, no wedging, module
+// unload/reload) is covered by the nav_*.test.mjs suite. The deeper gap once
+// noted here — LLDB's own process/thread model not being told anything
+// changed when the page's threads get swapped out without an intervening
+// wasm-level stop — is now handled: session.ts reuses the old top-level tid
+// across a swap (LLDB has no RSP mechanism to learn "tid N is gone" to do
+// otherwise) and rdp-debuggee.ts surfaces a pause that already happened
+// with nothing listening (hasUnwitnessedPause) instead of resuming past it.
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";

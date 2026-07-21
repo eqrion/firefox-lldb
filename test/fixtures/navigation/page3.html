@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Navigation Wasm Debugger Test — page 3 (different module URL)</title>
+</head>
+<body>
+  <h1>page 3</h1>
+
+  <!-- A copy of math.wasm under a different URL (math2.wasm), so navigating
+       here from page 1 swaps out math.wasm entirely rather than keeping it
+       around under a fresh module id — this is what nav_module_unload.test.mjs
+       exercises. -->
+  <script src="math2.js"></script>
+  <script>
+    let factorial;
+
+    MathModule().then(mod => {
+      factorial = mod.cwrap('compute_factorial', 'number', ['number']);
+    });
+
+    function runFactorial() {
+      return factorial(10);
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Navigation Wasm Debugger Test — page 1</title>
+</head>
+<body>
+  <h1>page 1</h1>
+  <a id="go" href="page2.html">page 2</a>
+
+  <script src="math.js"></script>
+  <script>
+    let factorial;
+
+    MathModule().then(mod => {
+      factorial = mod.cwrap('compute_factorial', 'number', ['number']);
+    });
+
+    function runFactorial() {
+      return factorial(10);
+    }
+
+    // Navigation triggers exercised by the nav_*.test.mjs e2e tests, in
+    // addition to clicking the #go link directly.
+    function assignPage2() {
+      location.href = 'page2.html';
+    }
+
+    function assignPage3() {
+      location.href = 'page3.html';
+    }
+
+    function reloadSelf() {
+      location.reload();
+    }
+  </script>
+</body>
+</html>

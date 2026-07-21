@@ -39,6 +39,12 @@ export const FIXTURES = {
     breakFunc: "compute_factorial",
     file: "math.cpp",
   },
+  navigation: {
+    pageDir: "test/fixtures/navigation",
+    fire: "runFactorial()",
+    breakFunc: "compute_factorial",
+    file: "math.cpp",
+  },
   oop: { pageDir: "test/fixtures/oop", fire: "run()", breakFunc: "area", file: "oop.cpp" },
   parser: {
     pageDir: "test/fixtures/parser",
@@ -125,9 +131,16 @@ const MIME = { ".html": "text/html", ".js": "text/javascript", ".wasm": "applica
 
 export function startStaticServer(pageDir) {
   const dir = path.join(REPO, pageDir);
+  let debuggerFetchCount = 0;
   const server = http.createServer((req, res) => {
     const rel =
       decodeURIComponent((req.url ?? "/").split("?")[0]).replace(/^\/+/, "") || "index.html";
+    // Tagged by session.ts's fetchModuleBytes — the debugger's own
+    // out-of-band fetch of a module's bytes, distinct from the browser's own
+    // page-load request for the same URL. Lets a reload test assert the
+    // debugger actually re-fetched (proving its bytecode cache was
+    // invalidated) rather than just observing the browser's own re-fetch.
+    if (req.headers["x-firefox-lldb"] === "module-fetch") debuggerFetchCount++;
     try {
       const body = readFileSync(path.join(dir, rel));
       res.writeHead(200, {
@@ -143,11 +156,17 @@ export function startStaticServer(pageDir) {
     }
   });
   return new Promise((resolve) => {
-    server.listen(0, "127.0.0.1", () => resolve({ server, port: server.address().port }));
+    server.listen(0, "127.0.0.1", () =>
+      resolve({
+        server,
+        port: server.address().port,
+        debuggerFetchCount: () => debuggerFetchCount,
+      })
+    );
   });
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Race `work` against a deadline well short of node's own --test-timeout. If
 // a step inside `work` hangs (a slow/wedged Firefox launch, a stuck RDP round
@@ -180,6 +199,23 @@ export async function withDeadline(session, work, ms) {
   }
 }
 
+// Repeatedly continue until a breakpoint stop is reached. Used by the
+// nav_*.test.mjs suite after triggering a navigation: a forced re-sync stop
+// (see rdp-debuggee.ts's #scheduleResyncCheck) can land before the buffered
+// breakpoint does, so a single continue() isn't guaranteed to be the one that
+// hits it. Mirrors the retry loop in Session.stoppedAtBreakpoint.
+export async function continueUntilBreakpoint(session, maxAttempts = 10) {
+  for (let i = 0; i < maxAttempts; i++) {
+    await session.continue();
+    const st = await session.state();
+    if (st.reason === "breakpoint") return st;
+    if (st.reason === "none" || st.reason === "exited") {
+      throw new Error(`process ended before reaching a breakpoint: state ${st.reason}`);
+    }
+  }
+  throw new Error(`did not reach a breakpoint after ${maxAttempts} continues`);
+}
+
 // A live debug session against a fixture, driven through the session API.
 export class Session {
   #client;
@@ -204,6 +240,28 @@ export class Session {
     if (!this.#rdpSession) throw new Error("evaluate() requires onSession wiring — not available");
     const wrapped = `(function poll(){try{${js}}catch(e){setTimeout(poll,20);}})()`;
     this.#rdpSession.evaluate(wrapped).catch(() => {});
+  }
+
+  // Driven navigation (session.navigate()), as opposed to a page-triggered
+  // one (reload, link click, location assignment) driven via evaluate().
+  navigate(url) {
+    if (!this.#rdpSession) throw new Error("navigate() requires onSession wiring — not available");
+    return this.#withCommandDeadline(this.#rdpSession.navigate(url));
+  }
+
+  // Count of the debugger's own out-of-band module fetches (session.ts's
+  // fetchModuleBytes), distinct from the browser's page-load fetch of the
+  // same URL — proves a reload actually re-fetched rather than serving a
+  // stale cached bytecode.
+  wasmFetchCount() {
+    return this.#staticServer?.debuggerFetchCount() ?? 0;
+  }
+
+  // An absolute URL for another file served by this fixture's static server
+  // — session.navigate() takes a real URL, not a page-relative path.
+  pageUrl(rel) {
+    if (!this.#staticServer) throw new Error("pageUrl() requires a running static server");
+    return `http://127.0.0.1:${this.#staticServer.port}/${rel}`;
   }
 
   async #bridgeTcp(port) {
