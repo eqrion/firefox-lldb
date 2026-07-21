@@ -8,6 +8,7 @@
 
 import net from "node:net";
 import { EventEmitter } from "node:events";
+import { noopLogger, type RspLogger } from "../protocol/rsp-server.js";
 
 export interface RdpPacket {
   from?: string;
@@ -17,18 +18,17 @@ export interface RdpPacket {
   [key: string]: unknown;
 }
 
-// Process-wide RDP wire tracing, toggled by the server when run with `-v`
-// (or DEBUG=1). Emits `>>`/`<<` lines matching the RSP tracer convention so the
-// Firefox RDP channel can be inspected alongside the LLDB-facing protocols.
-let traceEnabled = false;
-export function setRdpTrace(on: boolean): void {
-  traceEnabled = on;
+// Process-wide RDP wire trace sink. debug() is a no-op on the default
+// noopLogger, so this stays silent until the server wires up a real logger
+// (its debug() is itself gated behind `-v`/DEBUG=1 — see cli/logger.ts).
+let rdpLogger: RspLogger = noopLogger;
+export function setRdpLogger(logger: RspLogger): void {
+  rdpLogger = logger;
 }
 
 function trace(dir: ">>" | "<<", json: string): void {
-  if (!traceEnabled) return;
   const text = json.length > 2000 ? `${json.slice(0, 2000)}…(${json.length} bytes)` : json;
-  console.error(`[rdp] ${dir} ${text}`);
+  rdpLogger.debug(`[rdp] ${dir} ${text}`);
 }
 
 export class RdpTransport extends EventEmitter {

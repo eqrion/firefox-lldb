@@ -26,7 +26,7 @@ export interface RspLogger {
   error(msg: string): void;
 }
 
-const noopLogger: RspLogger = {
+export const noopLogger: RspLogger = {
   debug() {},
   info() {},
   warn() {},

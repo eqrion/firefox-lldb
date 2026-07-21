@@ -57,6 +57,7 @@ import {
 import { EventEmitter } from "node:events";
 import { LAUNCH_TOKEN_PREF } from "./firefox.js";
 import { EMPTY_WASM_MODULE, DETACH_GRACE_MS } from "./constants.js";
+import { noopLogger, type RspLogger } from "../protocol/rsp-server.js";
 
 export { grip, type TabInfo, type SourceForm, type FrameForm, type PauseEvent, type StoppedEvent };
 
@@ -253,6 +254,7 @@ export interface ThreadInfo {
 
 export class RdpWasmSession extends EventEmitter {
   #client: RdpClient;
+  #logger: RspLogger;
   #tabActor!: string;
   #watcher!: string;
 
@@ -321,9 +323,10 @@ export class RdpWasmSession extends EventEmitter {
     this.emit("navigated", info);
   }
 
-  private constructor(client: RdpClient) {
+  private constructor(client: RdpClient, logger: RspLogger) {
     super();
     this.#client = client;
+    this.#logger = logger;
     // Forward transport close so consumers can unblock pending promises.
     client.on("close", () => this.emit("close"));
     // Absorb transport errors (malformed data, JSON parse failures) so an
@@ -370,9 +373,14 @@ export class RdpWasmSession extends EventEmitter {
   }
 
   /** Connect, enable wasm observation, and start watching targets. */
-  static async start(port = 6080, host = "127.0.0.1", tabActor?: string): Promise<RdpWasmSession> {
+  static async start(
+    port = 6080,
+    host = "127.0.0.1",
+    tabActor?: string,
+    logger: RspLogger = noopLogger
+  ): Promise<RdpWasmSession> {
     const client = await RdpClient.connect(port, host);
-    const session = new RdpWasmSession(client);
+    const session = new RdpWasmSession(client, logger);
     await session.#init(tabActor);
     return session;
   }
@@ -672,7 +680,9 @@ export class RdpWasmSession extends EventEmitter {
         // has no error case, so an uncaught throw traps the whole gdbstub
         // component instead of just this one module. Degrade the same way
         // the non-HTTP fallback below does.
-        console.error(`[rdp] failed to fetch module bytes from ${url}: ${(e as Error).message}`);
+        this.#logger.error(
+          `[rdp] failed to fetch module bytes from ${url}: ${(e as Error).message}`
+        );
         return EMPTY_WASM_MODULE;
       }
     }

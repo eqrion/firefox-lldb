@@ -18,7 +18,7 @@ import {
   verifyFirefoxLaunchToken,
   type TabInfo,
 } from "../rdp/session.js";
-import { setRdpTrace } from "../rdp/transport.js";
+import { setRdpLogger } from "../rdp/transport.js";
 import { RdpDebuggee } from "../gdb/rdp-debuggee.js";
 import { launchFirefox, type FirefoxChannel, type FirefoxHandle } from "../rdp/firefox.js";
 // @ts-expect-error - .mjs host has no type declarations
@@ -151,11 +151,15 @@ export function parseCliArgs(argv: string[]): Args {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function connectWithRetry(rdpPort: number, tabActor?: string): Promise<RdpWasmSession> {
+async function connectWithRetry(
+  rdpPort: number,
+  tabActor: string | undefined,
+  logger: RspLogger
+): Promise<RdpWasmSession> {
   let lastErr: unknown;
   for (let i = 0; i < 80; i++) {
     try {
-      return await RdpWasmSession.start(rdpPort, "127.0.0.1", tabActor);
+      return await RdpWasmSession.start(rdpPort, "127.0.0.1", tabActor, logger);
     } catch (err) {
       lastErr = err;
       await sleep(250);
@@ -232,8 +236,8 @@ function createTabLauncher(
     }
 
     const session = launching
-      ? await connectWithRetry(args.rdpPort, resolvedActor)
-      : await RdpWasmSession.start(args.rdpPort, "127.0.0.1", resolvedActor);
+      ? await connectWithRetry(args.rdpPort, resolvedActor, logger)
+      : await RdpWasmSession.start(args.rdpPort, "127.0.0.1", resolvedActor, logger);
 
     // Close the session on any failure past this point; otherwise a launch that
     // throws leaks the RDP watcher connection, and a retried qLaunchGDBServer
@@ -303,6 +307,7 @@ function createTabLauncher(
         port: 0,
         onInfo: (m: string) => logger.debug(`[component] ${m}`),
         onTrace: (m: string) => logger.debug(`[gdbstub] ${m}`),
+        onError: (m: string) => logger.error(m),
         verbose,
       });
       await gdbServer.ready;
@@ -335,7 +340,7 @@ export async function startPlatformServer(
 ): Promise<PlatformServerHandle> {
   const verbose = args.verbose || process.env.DEBUG === "1";
   const logger = opts.logger ?? consoleLogger(verbose);
-  setRdpTrace(verbose);
+  setRdpLogger(logger);
   const launching = !args.connect;
 
   let firefox: FirefoxHandle | undefined;

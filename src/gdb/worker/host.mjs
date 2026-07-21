@@ -24,9 +24,11 @@ import {
  * @param {number} opts.port  TCP port the component listens on for LLDB.
  * @param {(msg: string) => void} [opts.onInfo]
  * @param {(msg: string) => void} [opts.onTrace]
+ * @param {(msg: string) => void} [opts.onError]  Defaults to console.error.
  * @param {boolean} [opts.verbose]
  */
-export function startGdbServer({ dispatch, port, onInfo, onTrace, verbose }) {
+export function startGdbServer({ dispatch, port, onInfo, onTrace, onError, verbose }) {
+  const reportError = onError ?? ((msg) => console.error(msg));
   const sab = new SharedArrayBuffer(16 + DATA_BYTES);
   const ctrl = new Int32Array(sab, 0, CTRL_WORDS);
   const data = new Uint8Array(sab, 16);
@@ -82,14 +84,14 @@ export function startGdbServer({ dispatch, port, onInfo, onTrace, verbose }) {
   });
   worker.on("error", (e) => {
     if (e?.code === "ERR_WORKER_OUT_OF_MEMORY") {
-      console.error(
+      reportError(
         "[gdb worker] out of memory — the session was likely driven by the generic " +
           "gdb-remote plugin, which misreads the wasm address space. Reattach with " +
           "the wasm plugin: `attach --pid N` (firefox-lldb) or " +
           "`process attach --plugin wasm --pid N`."
       );
     } else {
-      console.error("[gdb worker error]", e);
+      reportError(`[gdb worker error] ${e?.stack || e}`);
     }
     // If the worker crashed before the 'listening' message arrived, unblock
     // the caller who is awaiting gdbServer.ready.
