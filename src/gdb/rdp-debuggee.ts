@@ -74,6 +74,11 @@ function outOfBounds(): Error {
 
 type Ref = { $res: string; id: number };
 
+// One handler per WIT method, keyed "Interface.method" (matches dispatch()'s
+// req.type + "." + req.method). A handler may take fewer params than this
+// signature declares if it doesn't need id/args.
+type Handler = (id: number, args: unknown[]) => unknown;
+
 export class RdpDebuggee {
   #session: RdpWasmSession;
   #nextId = 1;
@@ -193,225 +198,61 @@ export class RdpDebuggee {
     });
   }
 
-  async dispatch(req: RpcRequest): Promise<unknown> {
+  // One entry per WIT method. dispatch() is just the lookup; each handler
+  // below is independently readable instead of one arm of a single switch.
+  #handlers: Record<string, Handler> = {
+    "Debuggee.allModules": () => this.#allModules(),
+    "Debuggee.allInstances": () => this.#allInstances(),
+    "Debuggee.listThreads": () => this.#session.listTids(),
+    "Debuggee.stoppedThread": () => this.#session.stoppedTid,
+    "Debuggee.exitFrames": (_id, args) => this.#exitFrames(args[0] as number),
+    "Debuggee.continue": () => this.#doContinue(),
+    "Debuggee.singleStep": (_id, args) => this.#doSingleStep(args[0] as number),
+    "Debuggee.interrupt": () => this.#doInterrupt(),
+    "EventFuture.finish": () => this.#finishEvent(),
+
+    "Module.uniqueId": (id) => BigInt(id),
+    "Module.name": (id) => this.#moduleName(id),
+    "Module.bytecode": (id) => this.#moduleBytecode(id),
+    "Module.addBreakpoint": (id, args) => this.#moduleAddBreakpoint(id, args[0] as number),
+    "Module.removeBreakpoint": (id, args) => this.#moduleRemoveBreakpoint(id, args[0] as number),
+
+    "Instance.getModule": (id) => this.#moduleRef(this.#instanceUrlById.get(id)!),
+    "Instance.uniqueId": (id) => BigInt(this.#moduleByUrl.get(this.#instanceUrlById.get(id)!)!.id),
+    "Instance.getMemory": (id, args) => this.#instanceGetMemory(id, args[0] as number),
+    "Instance.getGlobal": (_id, args) => this.#instanceGetGlobal(args[0] as number),
+
+    "Global.get": (id) => this.#readGlobal(this.#globalIndexById.get(id)!),
+    "Global.uniqueId": (id) => BigInt(this.#globalIndexById.get(id)!),
+    "Global.clone": (id) => this.#globalClone(id),
+
+    "Memory.uniqueId": () => 1n,
+    "Memory.sizeBytes": async () => BigInt(await this.#memorySize()),
+    "Memory.pageSizeBytes": () => 65536n,
+    "Memory.getBytes": (_id, args) =>
+      this.#readMemory(Number(args[0] as bigint), Number(args[1] as bigint)),
+
+    "Frame.getInstance": (id) => this.#frameInstance(id),
+    "Frame.getFuncIndex": () => 0,
+    "Frame.getPc": (id) => this.#frameGetPc(id),
+    "Frame.getLocals": (id) => this.#localsForFrame(id),
+    "Frame.getStack": () => [],
+    "Frame.parentFrame": (id) => this.#parentFrame(id),
+
+    "WasmValue.getType": (id) => this.#wasmValueGetType(id),
+    "WasmValue.unwrapI32": (id) => this.#wasmValueUnwrapI32(id),
+    "WasmValue.unwrapI64": (id) => this.#wasmValueUnwrapI64(id),
+    "WasmValue.unwrapF32": (id) => this.#wasmValueUnwrapF(id),
+    "WasmValue.unwrapF64": (id) => this.#wasmValueUnwrapF(id),
+    "WasmValue.clone": (id) => this.#wasmValueClone(id),
+  };
+
+  dispatch(req: RpcRequest): unknown {
     const { type, id, method, args } = req;
     const key = `${type}.${method}`;
-    switch (key) {
-      case "Debuggee.allModules":
-        return this.#allModules();
-      case "Debuggee.allInstances":
-        return this.#allInstances();
-      case "Debuggee.listThreads":
-        return this.#session.listTids();
-      case "Debuggee.stoppedThread":
-        return this.#session.stoppedTid;
-      case "Debuggee.exitFrames": {
-        const tid = args[0] as number;
-        return this.#exitFrames(tid);
-      }
-      case "Debuggee.continue": {
-        this.#armStopped();
-        // #resolveStopped is null when a pending interrupt was already consumed.
-        // In that case the stop is immediate — skip the resume so Firefox stays paused.
-        if (this.#resolveStopped !== null) {
-          if (this.#session.hasUnwitnessedPause()) {
-            // A pause already happened with nothing listening for it — e.g. a
-            // buffered breakpoint fired on a newly-navigated page before this
-            // continue armed the all-stop machinery (armAllStop's paused:<tid>
-            // listeners weren't registered yet). resumeAll() would resume
-            // straight past that paused thread and nothing would stop again.
-            // Surface the pause we already have instead of losing it. A tid
-            // merely left over from an already-reported stop (e.g. primeStop's
-            // initial interrupt) isn't one of these and takes the normal path.
-            void this.#session.adoptPausedState();
-          } else {
-            this.#session.armAllStop();
-            this.#session.resumeAll().catch(() => {});
-            const cb = this.#onFirstContinue;
-            this.#onFirstContinue = null;
-            cb?.();
-          }
-        }
-        return this.#eventFutureRef();
-      }
-      case "Debuggee.singleStep": {
-        const tid = args[0] as number;
-        this.#armStopped();
-        // LLDB's own "step off a stale breakpoint before resuming" dance —
-        // triggered by its cached, pre-navigation view of where a
-        // breakpoint site is — runs as a singleStep BEFORE it ever issues a
-        // real continue. If a pause already happened with nothing
-        // listening (e.g. a buffered breakpoint refiring on a
-        // newly-navigated page, won before this step-off dance even
-        // started), stepping now would silently resume straight past it.
-        // Surface it instead, same as the Debuggee.continue check.
-        if (this.#session.hasUnwitnessedPause()) {
-          void this.#session.adoptPausedState();
-          return this.#eventFutureRef();
-        }
-        this.#session.armAllStop();
-        // A JS (`call`) innermost frame is JIT-compiled: RDP "step" advances one
-        // wasm instruction, which jumps an arbitrary number of JS source lines.
-        // Use "next" (RDP step-over by source line) so a step lands on the next
-        // JS line. This degrades JS step-in to step-over (single-subprogram
-        // synthetic modules can't distinguish JS functions anyway).
-        const innermost = this.#framesByTid.get(tid)?.[0];
-        const limit = innermost?.type === "call" ? "next" : "step";
-        this.#session.stepOne(tid, limit);
-        return this.#eventFutureRef();
-      }
-      case "Debuggee.interrupt": {
-        this.#armStopped();
-        this.#session.interrupt(this.#session.stoppedTid);
-        return null;
-      }
-      case "EventFuture.finish": {
-        await this.#stopped;
-        await this.#snapshotAll();
-        return { tag: this.#eventTag() };
-      }
-
-      case "Module.uniqueId":
-        return BigInt(id);
-      case "Module.name": {
-        // Defensive: a navigation can clear #moduleById out from under a
-        // Module ref the component is still holding (its own addr_space
-        // hasn't pruned it yet — that only happens on the next stop's
-        // update_on_stop). Name is display-only; degrade rather than crash
-        // the whole gdbstub worker on a WIT call with no error case.
-        const entry = this.#moduleById.get(id);
-        if (!entry) return "<stale module>";
-        // Suffix with the module id so a same-URL reload or a navigation
-        // back to a previously-seen URL gets a name LLDB has never seen
-        // before. LLDB's own library-list diff appears to key off this
-        // name string, not the reported address: reusing a bare basename
-        // ("math.wasm") across two different module incarnations reads to
-        // it as "the same library, still loaded, nothing to do", so it
-        // never re-resolves breakpoints bound to the one it already knew
-        // about — confirmed by tracing real RSP traffic (its own Z0
-        // rebind-attempt only ever retried the stale, pre-navigation
-        // address once the name repeated, but correctly picked the new
-        // one once the name differed).
-        return `${urlBasename(entry.url)}#${id}`;
-      }
-      case "Module.bytecode": {
-        const entry = this.#moduleById.get(id);
-        if (!entry) return EMPTY_WASM_MODULE;
-        const syn = this.#syntheticByUrl.get(entry.url);
-        return syn ? syn.bytecode : this.#wasmBytecode(entry.url);
-      }
-      case "Module.addBreakpoint": {
-        const entry = this.#moduleById.get(id);
-        if (!entry) return null;
-        const syn = this.#syntheticByUrl.get(entry.url);
-        const pc = args[0] as number;
-        if (syn) {
-          await this.#session.setJsBreakpoint(entry.url, pc - syn.codeOffset);
-        } else {
-          await this.#session.setWasmBreakpoint(entry.url, pc);
-        }
-        return null;
-      }
-      case "Module.removeBreakpoint": {
-        const entry = this.#moduleById.get(id);
-        if (!entry) return null;
-        const syn = this.#syntheticByUrl.get(entry.url);
-        const pc = args[0] as number;
-        if (syn) {
-          await this.#session.removeJsBreakpoint(entry.url, pc - syn.codeOffset);
-        } else {
-          await this.#session.removeWasmBreakpoint(entry.url, pc);
-        }
-        return null;
-      }
-
-      case "Instance.getModule":
-        return this.#moduleRef(this.#instanceUrlById.get(id)!);
-      case "Instance.uniqueId":
-        return BigInt(this.#moduleByUrl.get(this.#instanceUrlById.get(id)!)!.id);
-      case "Instance.getMemory": {
-        const iUrl = this.#instanceUrlById.get(id)!;
-        if (this.#syntheticByUrl.has(iUrl) || (args[0] as number) !== 0) {
-          return Promise.reject(outOfBounds());
-        }
-        return { $res: "Memory", id: this.#nextId++ };
-      }
-      case "Instance.getGlobal": {
-        const gid = this.#nextId++;
-        this.#globalIndexById.set(gid, args[0] as number);
-        return { $res: "Global", id: gid };
-      }
-
-      case "Global.get":
-        return this.#readGlobal(this.#globalIndexById.get(id)!);
-      case "Global.uniqueId":
-        return BigInt(this.#globalIndexById.get(id)!);
-      case "Global.clone": {
-        const gid = this.#nextId++;
-        this.#globalIndexById.set(gid, this.#globalIndexById.get(id)!);
-        return { $res: "Global", id: gid };
-      }
-
-      case "Memory.uniqueId":
-        return 1n;
-      case "Memory.sizeBytes":
-        return BigInt(await this.#memorySize());
-      case "Memory.pageSizeBytes":
-        return 65536n;
-      case "Memory.getBytes":
-        return this.#readMemory(Number(args[0] as bigint), Number(args[1] as bigint));
-
-      case "Frame.getInstance":
-        return this.#frameInstance(id);
-      case "Frame.getFuncIndex":
-        return 0;
-      case "Frame.getPc": {
-        const fi = this.#frameInfoById.get(id);
-        const frame = fi ? this.#framesByTid.get(fi.tid)?.[fi.index] : undefined;
-        const line = frame?.where?.line ?? 0;
-        if (frame?.type === "call") {
-          const url = this.#session.urlForSourceActor(frame.where!.actor) ?? frame.where!.actor;
-          return line + (this.#syntheticByUrl.get(url)?.codeOffset ?? 0);
-        }
-        return line;
-      }
-      case "Frame.getLocals":
-        return this.#localsForFrame(id);
-      case "Frame.getStack":
-        return [];
-      case "Frame.parentFrame":
-        return this.#parentFrame(id);
-
-      case "WasmValue.getType": {
-        const entry = this.#valueById.get(id);
-        // Defensive: id not found → report funcref so value_to_bytes returns 0u32
-        // rather than crashing with a null-deref (TypeScript ! assertion).
-        return { tag: entry?.tag ?? "wasm-funcref" };
-      }
-      case "WasmValue.unwrapI32": {
-        const entry = this.#valueById.get(id);
-        return entry ? Number(entry.raw) >>> 0 : 0;
-      }
-      case "WasmValue.unwrapI64": {
-        const entry = this.#valueById.get(id);
-        return BigInt(entry?.raw ?? 0);
-      }
-      case "WasmValue.unwrapF32":
-      case "WasmValue.unwrapF64": {
-        const entry = this.#valueById.get(id);
-        return Number(entry?.raw ?? 0);
-      }
-      case "WasmValue.clone": {
-        const v = this.#valueById.get(id);
-        const newId = this.#nextId++;
-        // Defensive: id not found → clone as zero i32 rather than crashing.
-        this.#valueById.set(newId, v ?? { tag: "wasm-i32", raw: 0 });
-        return { $res: "WasmValue", id: newId };
-      }
-
-      default:
-        throw new Error(`RdpDebuggee: unhandled ${key}`);
-    }
+    const handler = this.#handlers[key];
+    if (!handler) throw new Error(`RdpDebuggee: unhandled ${key}`);
+    return handler(id, args);
   }
 
   // --- modules -------------------------------------------------------------
@@ -436,6 +277,31 @@ export class RdpDebuggee {
       this.#moduleById.set(m.id, m);
     }
     return { $res: "Module", id: m.id };
+  }
+
+  // A navigation can clear #moduleById out from under a Module ref the
+  // component is still holding (its own addr_space hasn't pruned it yet —
+  // that only happens on the next stop's update_on_stop). Callers below
+  // degrade gracefully instead of crashing the whole gdbstub worker on a WIT
+  // call with no error case.
+  #requireModule(id: number): { id: number; url: string } | undefined {
+    return this.#moduleById.get(id);
+  }
+
+  #moduleName(id: number): string {
+    const entry = this.#requireModule(id);
+    if (!entry) return "<stale module>";
+    // Suffix with the module id so a same-URL reload or a navigation back to
+    // a previously-seen URL gets a name LLDB has never seen before. LLDB's
+    // own library-list diff appears to key off this name string, not the
+    // reported address: reusing a bare basename ("math.wasm") across two
+    // different module incarnations reads to it as "the same library, still
+    // loaded, nothing to do", so it never re-resolves breakpoints bound to
+    // the one it already knew about — confirmed by tracing real RSP traffic
+    // (its own Z0 rebind-attempt only ever retried the stale, pre-navigation
+    // address once the name repeated, but correctly picked the new one once
+    // the name differed).
+    return `${urlBasename(entry.url)}#${id}`;
   }
 
   // Fetch a real wasm module's bytecode, converting source maps to DWARF on the
@@ -489,10 +355,55 @@ export class RdpDebuggee {
     }
   }
 
+  async #moduleBytecode(id: number): Promise<Uint8Array> {
+    const entry = this.#requireModule(id);
+    if (!entry) return EMPTY_WASM_MODULE;
+    const syn = this.#syntheticByUrl.get(entry.url);
+    return syn ? syn.bytecode : this.#wasmBytecode(entry.url);
+  }
+
+  async #moduleAddBreakpoint(id: number, pc: number): Promise<null> {
+    const entry = this.#requireModule(id);
+    if (!entry) return null;
+    const syn = this.#syntheticByUrl.get(entry.url);
+    if (syn) {
+      await this.#session.setJsBreakpoint(entry.url, pc - syn.codeOffset);
+    } else {
+      await this.#session.setWasmBreakpoint(entry.url, pc);
+    }
+    return null;
+  }
+
+  async #moduleRemoveBreakpoint(id: number, pc: number): Promise<null> {
+    const entry = this.#requireModule(id);
+    if (!entry) return null;
+    const syn = this.#syntheticByUrl.get(entry.url);
+    if (syn) {
+      await this.#session.removeJsBreakpoint(entry.url, pc - syn.codeOffset);
+    } else {
+      await this.#session.removeWasmBreakpoint(entry.url, pc);
+    }
+    return null;
+  }
+
   // --- instances -----------------------------------------------------------
   async #allInstances(): Promise<Ref[]> {
     const sources = await this.#session.wasmSources();
     return sources.length ? [this.#instanceRef(sources[0].url)] : [];
+  }
+
+  #instanceGetMemory(id: number, memIndex: number): Ref | Promise<never> {
+    const iUrl = this.#instanceUrlById.get(id)!;
+    if (this.#syntheticByUrl.has(iUrl) || memIndex !== 0) {
+      return Promise.reject(outOfBounds());
+    }
+    return { $res: "Memory", id: this.#nextId++ };
+  }
+
+  #instanceGetGlobal(globalIndex: number): Ref {
+    const gid = this.#nextId++;
+    this.#globalIndexById.set(gid, globalIndex);
+    return { $res: "Global", id: gid };
   }
 
   // --- frames --------------------------------------------------------------
@@ -583,6 +494,17 @@ export class RdpDebuggee {
     return this.#frameRef(fi.tid, fi.index + 1);
   }
 
+  #frameGetPc(id: number): number {
+    const fi = this.#frameInfoById.get(id);
+    const frame = fi ? this.#framesByTid.get(fi.tid)?.[fi.index] : undefined;
+    const line = frame?.where?.line ?? 0;
+    if (frame?.type === "call") {
+      const url = this.#session.urlForSourceActor(frame.where!.actor) ?? frame.where!.actor;
+      return line + (this.#syntheticByUrl.get(url)?.codeOffset ?? 0);
+    }
+    return line;
+  }
+
   #frameInstance(frameId: number): Ref {
     const fi = this.#frameInfoById.get(frameId);
     const frames = fi ? (this.#framesByTid.get(fi.tid) ?? []) : [];
@@ -629,6 +551,12 @@ export class RdpDebuggee {
     return this.#valueRef(vars[`global${index}`]?.value);
   }
 
+  #globalClone(id: number): Ref {
+    const gid = this.#nextId++;
+    this.#globalIndexById.set(gid, this.#globalIndexById.get(id)!);
+    return { $res: "Global", id: gid };
+  }
+
   async #instanceScopeBindings(): Promise<Record<string, { value?: unknown }>> {
     const topActor = this.#topFrameActorByTid.get(this.#session.stoppedTid);
     if (!topActor) return {};
@@ -658,6 +586,36 @@ export class RdpDebuggee {
     const id = this.#nextId++;
     this.#valueById.set(id, { tag, raw: value });
     return { $res: "WasmValue", id };
+  }
+
+  #wasmValueGetType(id: number): { tag: string } {
+    const entry = this.#valueById.get(id);
+    // Defensive: id not found → report funcref so value_to_bytes returns 0u32
+    // rather than crashing with a null-deref (TypeScript ! assertion).
+    return { tag: entry?.tag ?? "wasm-funcref" };
+  }
+
+  #wasmValueUnwrapI32(id: number): number {
+    const entry = this.#valueById.get(id);
+    return entry ? Number(entry.raw) >>> 0 : 0;
+  }
+
+  #wasmValueUnwrapI64(id: number): bigint {
+    const entry = this.#valueById.get(id);
+    return BigInt(entry?.raw ?? 0);
+  }
+
+  #wasmValueUnwrapF(id: number): number {
+    const entry = this.#valueById.get(id);
+    return Number(entry?.raw ?? 0);
+  }
+
+  #wasmValueClone(id: number): Ref {
+    const v = this.#valueById.get(id);
+    const newId = this.#nextId++;
+    // Defensive: id not found → clone as zero i32 rather than crashing.
+    this.#valueById.set(newId, v ?? { tag: "wasm-i32", raw: 0 });
+    return { $res: "WasmValue", id: newId };
   }
 
   async #memorySize(): Promise<number> {
@@ -712,6 +670,69 @@ export class RdpDebuggee {
   }
 
   // --- resumption ----------------------------------------------------------
+  #doContinue(): Ref {
+    this.#armStopped();
+    // #resolveStopped is null when a pending interrupt was already consumed.
+    // In that case the stop is immediate — skip the resume so Firefox stays paused.
+    if (this.#resolveStopped !== null) {
+      if (this.#session.hasUnwitnessedPause()) {
+        // A pause already happened with nothing listening for it — e.g. a
+        // buffered breakpoint fired on a newly-navigated page before this
+        // continue armed the all-stop machinery (armAllStop's paused:<tid>
+        // listeners weren't registered yet). resumeAll() would resume
+        // straight past that paused thread and nothing would stop again.
+        // Surface the pause we already have instead of losing it. A tid
+        // merely left over from an already-reported stop (e.g. primeStop's
+        // initial interrupt) isn't one of these and takes the normal path.
+        void this.#session.adoptPausedState();
+      } else {
+        this.#session.armAllStop();
+        this.#session.resumeAll().catch(() => {});
+        const cb = this.#onFirstContinue;
+        this.#onFirstContinue = null;
+        cb?.();
+      }
+    }
+    return this.#eventFutureRef();
+  }
+
+  #doSingleStep(tid: number): Ref {
+    this.#armStopped();
+    // LLDB's own "step off a stale breakpoint before resuming" dance —
+    // triggered by its cached, pre-navigation view of where a breakpoint
+    // site is — runs as a singleStep BEFORE it ever issues a real continue.
+    // If a pause already happened with nothing listening (e.g. a buffered
+    // breakpoint refiring on a newly-navigated page, won before this
+    // step-off dance even started), stepping now would silently resume
+    // straight past it. Surface it instead, same as #doContinue's check.
+    if (this.#session.hasUnwitnessedPause()) {
+      void this.#session.adoptPausedState();
+      return this.#eventFutureRef();
+    }
+    this.#session.armAllStop();
+    // A JS (`call`) innermost frame is JIT-compiled: RDP "step" advances one
+    // wasm instruction, which jumps an arbitrary number of JS source lines.
+    // Use "next" (RDP step-over by source line) so a step lands on the next
+    // JS line. This degrades JS step-in to step-over (single-subprogram
+    // synthetic modules can't distinguish JS functions anyway).
+    const innermost = this.#framesByTid.get(tid)?.[0];
+    const limit = innermost?.type === "call" ? "next" : "step";
+    this.#session.stepOne(tid, limit);
+    return this.#eventFutureRef();
+  }
+
+  #doInterrupt(): null {
+    this.#armStopped();
+    this.#session.interrupt(this.#session.stoppedTid);
+    return null;
+  }
+
+  async #finishEvent(): Promise<{ tag: string }> {
+    await this.#stopped;
+    await this.#snapshotAll();
+    return { tag: this.#eventTag() };
+  }
+
   /**
    * Force a genuine all-stop and snapshot live thread state. Called on attach so
    * the stop LLDB sees on connect is backed by a real RDP pause with real frames
