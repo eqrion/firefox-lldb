@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Wasm Debugger Service Worker Reload Test</title>
+    <script>
+      // Match COI service-worker bootstraps used by pages that cannot set
+      // response headers themselves: register once, then reload under the
+      // worker so it can add COOP/COEP. That reload can race automatic attach.
+      if (!navigator.serviceWorker.controller) {
+        navigator.serviceWorker
+          .register("coi-serviceworker.js")
+          .then(() => navigator.serviceWorker.ready)
+          .then(() => location.reload());
+      }
+    </script>
+  </head>
+  <body>
+    <script src="math.js"></script>
+    <script>
+      let factorial;
+      MathModule().then((mod) => {
+        factorial = mod.cwrap("compute_factorial", "number", ["number"]);
+      });
+      function runFactorial() {
+        return factorial(10);
+      }
+    </script>
+  </body>
+</html>

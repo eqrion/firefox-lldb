@@ -134,7 +134,10 @@ export const FIXTURES = {
 
 const MIME = { ".html": "text/html", ".js": "text/javascript", ".wasm": "application/wasm" };
 
-export function startStaticServer(pageDir, { requireAuth = false } = {}) {
+export function startStaticServer(
+  pageDir,
+  { requireAuth = false, crossOriginIsolation = true } = {}
+) {
   const dir = path.join(REPO, pageDir);
   let debuggerFetchCount = 0;
   const server = http.createServer((req, res) => {
@@ -163,8 +166,14 @@ export function startStaticServer(pageDir, { requireAuth = false } = {}) {
           ? { "Set-Cookie": "firefox_lldb_test=1; SameSite=Strict" }
           : {}),
         // COOP/COEP so the page may use SharedArrayBuffer (threaded fixtures).
-        "Cross-Origin-Opener-Policy": "same-origin",
-        "Cross-Origin-Embedder-Policy": "require-corp",
+        // The MCP reload-race fixture deliberately adds these through a service
+        // worker instead, reproducing the process swap from issue #46.
+        ...(crossOriginIsolation
+          ? {
+              "Cross-Origin-Opener-Policy": "same-origin",
+              "Cross-Origin-Embedder-Policy": "require-corp",
+            }
+          : {}),
       });
       res.end(body);
     } catch {

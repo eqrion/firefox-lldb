@@ -17,7 +17,7 @@ import {
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import { freePort } from "../platform/gdb-server-spawner.js";
-import { PtyRepl, type SendResult } from "./pty-repl.js";
+import { DEFAULT_SEND_TIMEOUT_MS, PtyRepl, type SendResult } from "./pty-repl.js";
 import { marionettePort } from "../config.js";
 
 // Fixed defaults so the firefox-devtools-mcp entry in .mcp.json can hard-code a
@@ -64,7 +64,7 @@ const TOOLS: Tool[] = [
         command: { type: "string", description: "The command line to type." },
         timeoutMs: {
           type: "number",
-          description: "Max wait for the next prompt (default 60000).",
+          description: `Max wait for the next prompt (default ${DEFAULT_SEND_TIMEOUT_MS}).`,
         },
       },
       required: ["command"],
@@ -139,7 +139,10 @@ async function call(name: string, args: Record<string, unknown>) {
     }
     case "lldb_send": {
       if (!repl) return text("error: no session — call lldb_launch first");
-      const r = await repl.send(String(args.command), timeoutArg(args.timeoutMs, 60_000));
+      const r = await repl.send(
+        String(args.command),
+        timeoutArg(args.timeoutMs, DEFAULT_SEND_TIMEOUT_MS)
+      );
       return text(sendText(r));
     }
     case "lldb_interrupt": {

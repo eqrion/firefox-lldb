@@ -75,6 +75,7 @@ Requires Firefox installed in a standard location (see `findFirefoxBinary` in
 - `threaded.test.mjs` — multithreaded fixture: thread list, matmul_threaded frame, step.
 - `threaded_repeated_breakpoint.test.mjs` — repeated pthread workloads survive three breakpoint stop/resume cycles.
 - `wasm_trap.test.mjs` — wasm traps (divide-by-zero, unreachable, out-of-bounds, call_indirect mismatch) pause as a signal stop; trapping frame is inspectable.
+- `mcp.test.mjs` — real MCP launch/command flow, including automatic-attach recovery across an initial page reload and the bounded default wait for a command that does not return a prompt.
 
 ### Navigation (survival, re-sync, and ergonomics across a top-level target swap)
 

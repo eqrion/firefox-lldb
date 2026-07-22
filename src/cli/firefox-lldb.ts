@@ -23,6 +23,38 @@ import type { RdpWasmSession } from "../rdp/session.js";
 import { debugEnvEnabled } from "../config.js";
 import type { Logger } from "../logging.js";
 
+// lldb::ReturnStatus values at or above this are failures. Keep the automatic
+// attach retry local to the CLI: an uncontrolled page reload can invalidate the
+// first per-tab server while `process attach` is in flight, but the platform is
+// ready to launch a fresh one as soon as the replacement target arrives.
+const LLDB_FAILED_STATUS = 6;
+const AUTO_ATTACH_ATTEMPTS = 4;
+
+async function attachWithRetry(
+  client: LLDBClient,
+  pid: number,
+  onRetry?: (attempt: number) => void
+): Promise<string> {
+  let lastError = "unknown attach failure";
+  for (let attempt = 1; attempt <= AUTO_ATTACH_ATTEMPTS; attempt++) {
+    const result = await client.sessionCommand(`process attach --plugin wasm --pid ${pid}`);
+    if (result.status < LLDB_FAILED_STATUS) {
+      const state = await client.sessionState();
+      if (state.reason !== "none" && state.reason !== "exited") {
+        return (result.output + result.error).trimEnd();
+      }
+      lastError = `process did not stop (state ${state.reason})`;
+    } else {
+      lastError = (result.error || result.output).trim() || lastError;
+    }
+    if (attempt < AUTO_ATTACH_ATTEMPTS) {
+      onRetry?.(attempt);
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+  }
+  throw new Error(`automatic attach failed after ${AUTO_ATTACH_ATTEMPTS} attempts: ${lastError}`);
+}
+
 // Open bridge sockets, tracked so we can tear them down on exit (otherwise
 // net.Server.close() blocks on the live connections).
 const bridgeSockets = new Set<net.Socket>();
@@ -161,8 +193,9 @@ async function main(): Promise<void> {
     let intro = "firefox-lldb — `attach --pid N` to attach, `js p <expr>` to evaluate JS.";
     if (args.url) {
       repl.print(intro + "\nattaching...");
-      const res = await client.sessionCommand("process attach --plugin wasm --pid 1");
-      intro = (res.output + res.error).trimEnd();
+      intro = await attachWithRetry(client, 1, (attempt) =>
+        repl.print(`automatic attach attempt ${attempt} was interrupted; retrying...`)
+      );
     } else {
       const res = await client.sessionCommand("platform process list");
       intro += "\n" + res.output.trimEnd();

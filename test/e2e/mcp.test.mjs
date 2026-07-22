@@ -55,17 +55,25 @@ function withDeadline(work, ms) {
   return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
 }
 
-async function withSession(fxName, fn) {
+async function withSession(
+  fxName,
+  fn,
+  { page = "index.html", fire, crossOriginIsolation = true } = {}
+) {
   const fx = FIXTURES[fxName];
-  const staticServer = await startStaticServer(fx.pageDir);
-  const url = `http://127.0.0.1:${staticServer.port}/index.html`;
+  const staticServer = await startStaticServer(fx.pageDir, { crossOriginIsolation });
+  const url = `http://127.0.0.1:${staticServer.port}/${page}`;
   const client = await connect();
   try {
     await withDeadline(
       (async () => {
-        const banner = await send(client, "lldb_launch", { url, headless: true, fire: fx.fire });
+        const banner = await send(client, "lldb_launch", {
+          url,
+          headless: true,
+          fire: fire ?? fx.fire,
+        });
         assert.match(banner, /marionette-port \d+/, `launch banner: ${banner}`);
-        await fn(client, fx);
+        await fn(client, fx, banner);
       })(),
       90_000
     );
@@ -101,7 +109,34 @@ test("MCP: launch, set a breakpoint, continue, hit it", async () => {
     ]);
     assert.match(version, /lldb version/i);
     assert.match(target, /Current targets|target #0/i);
+
+    // With no more work and no breakpoints, continue never produces another
+    // prompt. Omitting timeoutMs must let the server return its documented
+    // no-prompt result before the MCP SDK's own 60-second request deadline.
+    await send(client, "lldb_send", { command: "breakpoint delete 1" });
+    const running = await send(client, "lldb_send", { command: "continue" });
+    assert.match(running, /no prompt returned/i, `continue output: ${running}`);
+    const interrupted = await send(client, "lldb_interrupt");
+    assert.doesNotMatch(interrupted, /no prompt returned/i, `interrupt output: ${interrupted}`);
   });
+});
+
+test("MCP: launch survives a page reload racing automatic attach (#46)", async () => {
+  await withSession(
+    "factorial",
+    async (client, fx, banner) => {
+      assert.match(banner, /page navigating; re-syncing/i, `launch banner: ${banner}`);
+      assert.match(
+        banner,
+        /automatic attach attempt 1 was interrupted/i,
+        `launch banner: ${banner}`
+      );
+      assert.doesNotMatch(banner, /attach failed/i, `launch banner: ${banner}`);
+      const bp = await send(client, "lldb_send", { command: `breakpoint set -n ${fx.breakFunc}` });
+      assert.match(bp, /Breakpoint 1/, `breakpoint set output: ${bp}`);
+    },
+    { page: "reload-service-worker.html", crossOriginIsolation: false }
+  );
 });
 
 test("MCP: thread list shows workers in a threaded program (#7)", async () => {

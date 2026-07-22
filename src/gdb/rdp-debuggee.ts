@@ -16,11 +16,13 @@
 // frames report pc = where.line + codeOffset so LLDB's subtraction of the code
 // section offset recovers the DWARF address (= the source line).
 //
-// The lazy approach avoids slow startup: synthetic modules are built only for
-// JS sources that actually appear in the stopped call stack. Because
-// #snapshotAll() runs inside EventFuture.finish (before the component's
-// update_on_stop -> all_modules call), any synthetic module built here is
-// present in addr_space before frame_to_pc runs.
+// Sources discovered after attach are handled lazily from stopped call stacks.
+// Sources already present at attach are preloaded before the component starts:
+// a trap stop must stay SIGSEGV and therefore cannot also carry the RSP library
+// notification LLDB would otherwise need to load a newly discovered synthetic
+// module. Because #snapshotAll() runs inside EventFuture.finish (before the
+// component's update_on_stop -> all_modules call), any later synthetic built
+// from a breakpoint stack is present in addr_space before frame_to_pc runs.
 //
 // WIT changes vs the single-thread version:
 //   - Debuggee.listThreads  -> session.listTids()
@@ -307,10 +309,10 @@ export class RdpDebuggee {
     for (const s of wasmSources) {
       this.#moduleRef(s.url);
     }
-    // Return refs for all registered modules — wasm plus any synthetic JS
-    // modules built lazily during the last #snapshotAll. The component calls
-    // allModules() after #snapshotAll() returns, so synthetics built during
-    // that snapshot are already present here.
+    // Return refs for all registered modules — wasm plus synthetic JS modules
+    // preloaded at attach or built lazily during the last #snapshotAll. The
+    // component calls allModules() after #snapshotAll() returns, so synthetics
+    // built during that snapshot are already present here.
     return [...this.#moduleByUrl.values()].map((m) => ({ $res: "Module", id: m.id }));
   }
 
@@ -564,6 +566,18 @@ export class RdpDebuggee {
     });
     this.#syntheticByUrl.set(url, syn);
     this.#moduleRef(url);
+  }
+
+  // A trap must remain a SIGSEGV stop so LLDB exposes the fault correctly.
+  // Unlike the breakpoint stop path, that signal stop cannot simultaneously
+  // carry RSP's `library` notification, so a JS module first discovered in
+  // the trapping stack would be added to the component's address space too
+  // late for LLDB to load and symbolicate it (issue #45). Register the page's
+  // current JS sources before the component performs its initial module scan.
+  async #preloadJsSources(): Promise<void> {
+    for (const source of await this.#session.jsSources()) {
+      await this.#ensureSynthetic(source.url, source.actor);
+    }
   }
 
   async #exitFrames(tid: number): Promise<Ref[]> {
@@ -869,6 +883,7 @@ export class RdpDebuggee {
     this.#session.interrupt(tid);
     await this.#stop.promise;
     await this.#snapshotAll();
+    await this.#preloadJsSources();
   }
 
   /**

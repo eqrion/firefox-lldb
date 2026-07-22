@@ -35,6 +35,14 @@ test("integer divide-by-zero traps; divisor is inspectable in the trapping frame
     assert.equal(b.valid, true);
     assert.equal(a.signed, 1);
     assert.equal(b.signed, 0); // why it trapped: the divisor is zero
+
+    const frames = await s.frames();
+    const jsFrames = frames.filter((frame) => frame.file?.endsWith(".js"));
+    assert.ok(jsFrames.length > 0, "trap backtrace has at least one symbolicated JS caller");
+    assert.ok(
+      jsFrames.every((frame) => frame.line > 0),
+      "every symbolicated JS caller has a source line"
+    );
   } finally {
     await s.shutdown();
   }

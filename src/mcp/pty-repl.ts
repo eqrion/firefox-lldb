@@ -15,6 +15,7 @@ import { spawn as ptySpawn, type IPty } from "node-pty";
 const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
 const promptCount = (s: string): number => (stripAnsi(s).match(/\(lldb\)/g) ?? []).length;
 const MAX_BUFFER_CHARS = 4 * 1024 * 1024;
+export const DEFAULT_SEND_TIMEOUT_MS = 5_000;
 
 interface PromptWaiter {
   target: number;
@@ -103,15 +104,22 @@ export class PtyRepl {
       await repl.#waitForPrompt(1, opts.startupTimeoutMs ?? 90_000);
       return repl;
     } catch (err) {
+      const output = await repl.read(0);
       await repl.shutdown();
-      throw err;
+      throw new Error(
+        output
+          ? `${err instanceof Error ? err.message : String(err)}: ${output}`
+          : err instanceof Error
+            ? err.message
+            : String(err)
+      );
     }
   }
 
   // Send a command line and return the output it produced, once a fresh prompt
   // returns. `continue` has no prompt until the next stop, so a timeout here is
   // expected for a running target rather than an error.
-  async send(command: string, timeoutMs = 60_000): Promise<SendResult> {
+  async send(command: string, timeoutMs = DEFAULT_SEND_TIMEOUT_MS): Promise<SendResult> {
     const run = this.#sendQueue.then(async () => {
       const target = this.#promptTotal + 1;
       const mark = this.#consumed;
