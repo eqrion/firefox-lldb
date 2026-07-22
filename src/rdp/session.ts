@@ -1025,7 +1025,8 @@ export class RdpWasmSession extends EventEmitter {
     // enter pthread_join as soon as it resumes; Firefox may then stop
     // servicing worker-thread resume packets that were queued behind it.
     // Sending the triggering thread last ensures every worker is runnable
-    // before the main thread can wait for it.
+    // before the main thread can wait for it. In particular, this avoids the
+    // repeated all-stop pthread_join deadlock from issue #7.
     const toResume = [...this.#pausedTids].sort((a, b) => {
       if (a === this.#stoppedTid) return 1;
       if (b === this.#stoppedTid) return -1;

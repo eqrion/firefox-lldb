@@ -73,6 +73,7 @@ Requires Firefox installed in a standard location (see `findFirefoxBinary` in
 - `js_debugging.test.mjs` — JS file:line breakpoint fires; step-over advances source line.
 - `mixed_js.test.mjs` — mixed JS/wasm: source file discovery (app.js, math.js, math.cpp).
 - `threaded.test.mjs` — multithreaded fixture: thread list, matmul_threaded frame, step.
+- `threaded_repeated_breakpoint.test.mjs` — repeated pthread workloads survive three breakpoint stop/resume cycles.
 - `wasm_trap.test.mjs` — wasm traps (divide-by-zero, unreachable, out-of-bounds, call_indirect mismatch) pause as a signal stop; trapping frame is inspectable.
 
 ### Navigation (survival, re-sync, and ergonomics across a top-level target swap)
