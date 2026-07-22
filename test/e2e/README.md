@@ -64,6 +64,7 @@ Requires Firefox installed in a standard location (see `findFirefoxBinary` in
 ### Extended (type inspection, JS debugging, threading)
 
 - `inspect_types.test.mjs` — types fixture: integers, floats, pointers, bitfields, structs.
+- `expression_pointer_deref.test.mjs` — pointer expressions complete without LLDB internal diagnostics.
 - `inspect_heap.test.mjs` — heap fixture: heap-allocated struct/array through pointer.
 - `edge_cases.test.mjs` — interleaved JS/wasm frames, watchpoint non-crash.
 - `lldb_lifecycle_commands.test.mjs` — detach/re-attach, invalid PID rejection, and remote-platform command survival.
