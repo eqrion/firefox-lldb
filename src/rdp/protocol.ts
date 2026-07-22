@@ -136,6 +136,10 @@ export interface SourceForm {
   introductionType?: string;
 }
 
+export interface ResourcesAvailableArrayEvent {
+  array?: Array<[resourceType: string, resources: SourceForm[]]>;
+}
+
 export interface SourcesResponse {
   sources?: SourceForm[];
 }
@@ -241,6 +245,7 @@ export const EVENTS = {
   targetAvailableForm: "target-available-form",
   targetDestroyedForm: "target-destroyed-form",
   resourceAvailableForm: "resource-available-form",
+  resourcesAvailableArray: "resources-available-array",
   resourceUpdatedForm: "resource-updated-form",
   resourceDestroyedForm: "resource-destroyed-form",
   tabListChanged: "tabListChanged",

@@ -62,6 +62,10 @@
       document.getElementById('matmul-result').textContent = out;
     }
 
+    function runWorkerBreakpoint() {
+      mod.cwrap('start_multiply_worker', null, [])();
+    }
+
     function runDot() {
       const n = nthreads();
       const t0 = performance.now();

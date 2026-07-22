@@ -32,6 +32,12 @@ static void* multiply_rows(void* arg) {
     return nullptr;
 }
 
+static void* multiply_rows_unjoined(void* arg) {
+    multiply_rows(arg);
+    delete static_cast<RowRange*>(arg);
+    return nullptr;
+}
+
 struct DotArg {
     int row_a;
     int row_b;
@@ -83,6 +89,16 @@ void matmul_threaded(int nthreads) {
 
     delete[] threads;
     delete[] ranges;
+}
+
+EMSCRIPTEN_KEEPALIVE
+void start_multiply_worker() {
+    // Keep the argument alive until the worker has consumed it. This
+    // deliberately returns without joining so the browser's main thread stays
+    // available to forward the worker's RDP breakpoint packet.
+    RowRange* range = new RowRange{0, N};
+    pthread_t thread;
+    pthread_create(&thread, nullptr, multiply_rows_unjoined, range);
 }
 
 EMSCRIPTEN_KEEPALIVE

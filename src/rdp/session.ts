@@ -41,6 +41,7 @@ import {
   type GetWatcherResponse,
   type GetThreadConfigurationActorResponse,
   type SourceForm,
+  type ResourcesAvailableArrayEvent,
   type SourcesResponse,
   type SourceResponse,
   type ArrayBufferGrip,
@@ -535,6 +536,27 @@ export class RdpWasmSession extends EventEmitter {
               }
             }, DETACH_GRACE_MS);
             this.#pendingDetachChecks.add(timer);
+          }
+        }
+        break;
+      }
+      case EVENTS.resourcesAvailableArray: {
+        // Current Firefox batches watched resources. Worker SourceActor ids
+        // are thread-local, so retain every actor -> URL mapping; otherwise a
+        // stopped worker frame is mistaken for a brand-new module whose name
+        // is the opaque actor id, and gdbstub aborts during frame_to_pc.
+        const groups = (p as ResourcesAvailableArrayEvent).array;
+        if (!groups) break;
+        for (const group of groups) {
+          if (!Array.isArray(group) || group[0] !== "source" || !Array.isArray(group[1])) continue;
+          for (const source of group[1] as SourceForm[]) {
+            if (!source.actor || !source.url) continue;
+            this.#sourceUrlByActor.set(source.actor, source.url);
+            if (source.introductionType === "wasm") {
+              this.#wasmActorByUrl.set(source.url, source.actor);
+            } else {
+              this.#jsActorByUrl.set(source.url, source.actor);
+            }
           }
         }
         break;

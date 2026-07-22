@@ -274,6 +274,34 @@ test("target-available-form with same actor is deduplicated", async () => {
   srv.close();
 });
 
+test("resources-available-array maps worker source actors to their URLs", async () => {
+  const srv = new FakeRdpServer();
+  await srv.listen();
+  const session = await srv.acceptSession();
+
+  srv.send({
+    from: "workerTarget",
+    type: "resources-available-array",
+    array: [
+      [
+        "source",
+        [
+          {
+            actor: "workerSource",
+            url: "http://host/mod.wasm",
+            introductionType: "wasm",
+          },
+        ],
+      ],
+    ],
+  });
+  await sleep(50);
+
+  assert.equal(session.urlForSourceActor("workerSource"), "http://host/mod.wasm");
+  session.close();
+  srv.close();
+});
+
 test("target-destroyed-form removes thread from listTids", async () => {
   const srv = new FakeRdpServer();
   await srv.listen();
