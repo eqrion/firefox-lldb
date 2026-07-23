@@ -3,7 +3,7 @@
 
 // Single threaded MINIMAL_RUNTIME programs do not need access to
 // document.currentScript, so a simple export declaration is enough.
-var MatMulModule = (() => {
+var DynamicThreadsModule = (() => {
   // When MODULARIZE this JS may be executed later,
   // after document.currentScript is gone, so we save it.
   // In EXPORT_ES6 mode we can just use 'import.meta.url'.
@@ -837,7 +837,7 @@ function createExportWrapper(name, func, nargs) {
 var wasmBinaryFile;
 
 function findWasmBinary() {
-  return locateFile('matmul.wasm');
+  return locateFile('dynamic.wasm');
 }
 
 function getBinarySync(file) {
@@ -1057,75 +1057,6 @@ async function createWasm() {
   var onPreRuns = [];
   var addOnPreRun = (cb) => onPreRuns.push(cb);
 
-  var dependenciesPromise = null;
-  var resolveRunDependencies = async () => dependenciesPromise;
-  var runDependencies = 0;
-
-
-  var dependenciesPromiseResolve = null;
-
-  var runDependencyTracking = {
-  };
-
-  var runDependencyWatcher = null;
-  var removeRunDependency = (id) => {
-      runDependencies--;
-
-      Module['monitorRunDependencies']?.(runDependencies);
-
-      assert(id, 'removeRunDependency requires an ID');
-      assert(runDependencyTracking[id]);
-      delete runDependencyTracking[id];
-      if (!runDependencies) {
-        if (runDependencyWatcher !== null) {
-          clearInterval(runDependencyWatcher);
-          runDependencyWatcher = null;
-        }
-        dependenciesPromiseResolve();
-      }
-    };
-
-
-
-
-  var addRunDependency = (id) => {
-      if (!runDependencies) {
-        dependenciesPromise = new Promise((resolve) => dependenciesPromiseResolve = resolve);
-      }
-      runDependencies++;
-
-      Module['monitorRunDependencies']?.(runDependencies);
-
-      assert(id, 'addRunDependency requires an ID')
-      assert(!runDependencyTracking[id]);
-      runDependencyTracking[id] = 1;
-      if (runDependencyWatcher === null && globalThis.setInterval) {
-        // Check for missing dependencies every few seconds
-        runDependencyWatcher = setInterval(() => {
-          if (ABORT) {
-            clearInterval(runDependencyWatcher);
-            runDependencyWatcher = null;
-            return;
-          }
-          var shown = false;
-          for (var dep in runDependencyTracking) {
-            if (!shown) {
-              shown = true;
-              err('still waiting on run dependencies:');
-            }
-            err(`dependency: ${dep}`);
-          }
-          if (shown) {
-            err('(end of list)');
-          }
-        }, 10000);
-        // Prevent this timer from keeping the runtime alive if nothing
-        // else is.
-        runDependencyWatcher.unref?.()
-      }
-    };
-
-
   var spawnThread = (threadParams) => {
       assert(!ENVIRONMENT_IS_PTHREAD, 'spawnThread() should only be called from the main thread');
       assert(threadParams.pthread_ptr, 'spawnThread called with null pthread ptr');
@@ -1284,19 +1215,6 @@ async function createWasm() {
         }
       },
   initMainThread() {
-        var pthreadPoolSize = 8;
-        // Start loading up the Worker pool, if requested.
-        while (pthreadPoolSize--) {
-          PThread.allocateUnusedWorker();
-        }
-        // MINIMAL_RUNTIME takes care of calling loadWasmModuleToAllWorkers
-        // in postamble_minimal.js
-        addOnPreRun(async () => {
-          var pthreadPoolReady = PThread.loadWasmModuleToAllWorkers();
-          addRunDependency('loading-workers');
-          await pthreadPoolReady;
-          removeRunDependency('loading-workers');
-        });
       },
   terminateAllThreads:() => {
         assert(!ENVIRONMENT_IS_PTHREAD, 'terminateAllThreads() should only be called from the main thread');
@@ -1458,17 +1376,6 @@ async function createWasm() {
           workerID: worker.workerID,
         });
       }),
-  async loadWasmModuleToAllWorkers() {
-        // Instantiation is synchronous in pthreads.
-        if (
-          ENVIRONMENT_IS_PTHREAD
-        ) {
-          return;
-        }
-
-        let pthreadPoolReady = Promise.all(PThread.unusedWorkers.map(PThread.loadWasmModuleToWorker));
-        return pthreadPoolReady;
-      },
   allocateUnusedWorker() {
         var worker;
         var pthreadMainJs = _scriptName;
@@ -2378,6 +2285,8 @@ Module['FS_createPreloadedFile'] = FS.createPreloadedFile;
   'mmapAlloc',
   'HandleAllocator',
   'getUniqueRunDependency',
+  'addRunDependency',
+  'removeRunDependency',
   'addOnInit',
   'addOnPostCtor',
   'addOnPreMain',
@@ -2568,8 +2477,6 @@ missingLibrarySymbols.forEach(missingLibrarySymbol)
   'wasmTable',
   'wasmMemory',
   'noExitRuntime',
-  'addRunDependency',
-  'removeRunDependency',
   'addOnPreRun',
   'addOnPostRun',
   'ccall',
@@ -2811,20 +2718,11 @@ function checkIncomingModuleAPI() {
 }
 
 // Imports from the Wasm binary.
-var _worker_probe_checkpoint = Module['_worker_probe_checkpoint'] = makeInvalidEarlyAccess('_worker_probe_checkpoint');
-var _worker_probe_finished = Module['_worker_probe_finished'] = makeInvalidEarlyAccess('_worker_probe_finished');
-var _matmul_join_complete = Module['_matmul_join_complete'] = makeInvalidEarlyAccess('_matmul_join_complete');
-var _init_matrices = Module['_init_matrices'] = makeInvalidEarlyAccess('_init_matrices');
-var _matmul_threaded = Module['_matmul_threaded'] = makeInvalidEarlyAccess('_matmul_threaded');
-var _start_multiply_worker = Module['_start_multiply_worker'] = makeInvalidEarlyAccess('_start_multiply_worker');
-var _start_probe_workers = Module['_start_probe_workers'] = makeInvalidEarlyAccess('_start_probe_workers');
-var _interrupt_spin_worker = Module['_interrupt_spin_worker'] = makeInvalidEarlyAccess('_interrupt_spin_worker');
-var _start_interrupt_workers = Module['_start_interrupt_workers'] = makeInvalidEarlyAccess('_start_interrupt_workers');
-var _interrupt_spin_started = Module['_interrupt_spin_started'] = makeInvalidEarlyAccess('_interrupt_spin_started');
-var _get_probe_completed = Module['_get_probe_completed'] = makeInvalidEarlyAccess('_get_probe_completed');
-var _get_probe_result = Module['_get_probe_result'] = makeInvalidEarlyAccess('_get_probe_result');
-var _get_result = Module['_get_result'] = makeInvalidEarlyAccess('_get_result');
-var _dot_rows_threaded = Module['_dot_rows_threaded'] = makeInvalidEarlyAccess('_dot_rows_threaded');
+var _dynamic_checkpoint = Module['_dynamic_checkpoint'] = makeInvalidEarlyAccess('_dynamic_checkpoint');
+var _dynamic_complete = Module['_dynamic_complete'] = makeInvalidEarlyAccess('_dynamic_complete');
+var _start_dynamic_worker = Module['_start_dynamic_worker'] = makeInvalidEarlyAccess('_start_dynamic_worker');
+var _release_dynamic_worker = Module['_release_dynamic_worker'] = makeInvalidEarlyAccess('_release_dynamic_worker');
+var _get_dynamic_result = Module['_get_dynamic_result'] = makeInvalidEarlyAccess('_get_dynamic_result');
 var __emscripten_tls_init = makeInvalidEarlyAccess('__emscripten_tls_init');
 var _pthread_self = makeInvalidEarlyAccess('_pthread_self');
 var __emscripten_thread_init = makeInvalidEarlyAccess('__emscripten_thread_init');
@@ -2849,20 +2747,11 @@ var __indirect_function_table = makeInvalidEarlyAccess('__indirect_function_tabl
 var wasmTable = makeInvalidEarlyAccess('wasmTable');
 
 function assignWasmExports(wasmExports) {
-  assert(typeof wasmExports['worker_probe_checkpoint'] != 'undefined', 'missing Wasm export: worker_probe_checkpoint');
-  assert(typeof wasmExports['worker_probe_finished'] != 'undefined', 'missing Wasm export: worker_probe_finished');
-  assert(typeof wasmExports['matmul_join_complete'] != 'undefined', 'missing Wasm export: matmul_join_complete');
-  assert(typeof wasmExports['init_matrices'] != 'undefined', 'missing Wasm export: init_matrices');
-  assert(typeof wasmExports['matmul_threaded'] != 'undefined', 'missing Wasm export: matmul_threaded');
-  assert(typeof wasmExports['start_multiply_worker'] != 'undefined', 'missing Wasm export: start_multiply_worker');
-  assert(typeof wasmExports['start_probe_workers'] != 'undefined', 'missing Wasm export: start_probe_workers');
-  assert(typeof wasmExports['interrupt_spin_worker'] != 'undefined', 'missing Wasm export: interrupt_spin_worker');
-  assert(typeof wasmExports['start_interrupt_workers'] != 'undefined', 'missing Wasm export: start_interrupt_workers');
-  assert(typeof wasmExports['interrupt_spin_started'] != 'undefined', 'missing Wasm export: interrupt_spin_started');
-  assert(typeof wasmExports['get_probe_completed'] != 'undefined', 'missing Wasm export: get_probe_completed');
-  assert(typeof wasmExports['get_probe_result'] != 'undefined', 'missing Wasm export: get_probe_result');
-  assert(typeof wasmExports['get_result'] != 'undefined', 'missing Wasm export: get_result');
-  assert(typeof wasmExports['dot_rows_threaded'] != 'undefined', 'missing Wasm export: dot_rows_threaded');
+  assert(typeof wasmExports['dynamic_checkpoint'] != 'undefined', 'missing Wasm export: dynamic_checkpoint');
+  assert(typeof wasmExports['dynamic_complete'] != 'undefined', 'missing Wasm export: dynamic_complete');
+  assert(typeof wasmExports['start_dynamic_worker'] != 'undefined', 'missing Wasm export: start_dynamic_worker');
+  assert(typeof wasmExports['release_dynamic_worker'] != 'undefined', 'missing Wasm export: release_dynamic_worker');
+  assert(typeof wasmExports['get_dynamic_result'] != 'undefined', 'missing Wasm export: get_dynamic_result');
   assert(typeof wasmExports['_emscripten_tls_init'] != 'undefined', 'missing Wasm export: _emscripten_tls_init');
   assert(typeof wasmExports['pthread_self'] != 'undefined', 'missing Wasm export: pthread_self');
   assert(typeof wasmExports['_emscripten_thread_init'] != 'undefined', 'missing Wasm export: _emscripten_thread_init');
@@ -2884,20 +2773,11 @@ function assignWasmExports(wasmExports) {
   assert(typeof wasmExports['_emscripten_stack_alloc'] != 'undefined', 'missing Wasm export: _emscripten_stack_alloc');
   assert(typeof wasmExports['emscripten_stack_get_current'] != 'undefined', 'missing Wasm export: emscripten_stack_get_current');
   assert(typeof wasmExports['__indirect_function_table'] != 'undefined', 'missing Wasm export: __indirect_function_table');
-  _worker_probe_checkpoint = Module['_worker_probe_checkpoint'] = createExportWrapper('worker_probe_checkpoint', wasmExports['worker_probe_checkpoint'], 1);
-  _worker_probe_finished = Module['_worker_probe_finished'] = createExportWrapper('worker_probe_finished', wasmExports['worker_probe_finished'], 1);
-  _matmul_join_complete = Module['_matmul_join_complete'] = createExportWrapper('matmul_join_complete', wasmExports['matmul_join_complete'], 0);
-  _init_matrices = Module['_init_matrices'] = createExportWrapper('init_matrices', wasmExports['init_matrices'], 0);
-  _matmul_threaded = Module['_matmul_threaded'] = createExportWrapper('matmul_threaded', wasmExports['matmul_threaded'], 1);
-  _start_multiply_worker = Module['_start_multiply_worker'] = createExportWrapper('start_multiply_worker', wasmExports['start_multiply_worker'], 0);
-  _start_probe_workers = Module['_start_probe_workers'] = createExportWrapper('start_probe_workers', wasmExports['start_probe_workers'], 2);
-  _interrupt_spin_worker = Module['_interrupt_spin_worker'] = createExportWrapper('interrupt_spin_worker', wasmExports['interrupt_spin_worker'], 1);
-  _start_interrupt_workers = Module['_start_interrupt_workers'] = createExportWrapper('start_interrupt_workers', wasmExports['start_interrupt_workers'], 1);
-  _interrupt_spin_started = Module['_interrupt_spin_started'] = createExportWrapper('interrupt_spin_started', wasmExports['interrupt_spin_started'], 0);
-  _get_probe_completed = Module['_get_probe_completed'] = createExportWrapper('get_probe_completed', wasmExports['get_probe_completed'], 0);
-  _get_probe_result = Module['_get_probe_result'] = createExportWrapper('get_probe_result', wasmExports['get_probe_result'], 1);
-  _get_result = Module['_get_result'] = createExportWrapper('get_result', wasmExports['get_result'], 2);
-  _dot_rows_threaded = Module['_dot_rows_threaded'] = createExportWrapper('dot_rows_threaded', wasmExports['dot_rows_threaded'], 1);
+  _dynamic_checkpoint = Module['_dynamic_checkpoint'] = createExportWrapper('dynamic_checkpoint', wasmExports['dynamic_checkpoint'], 1);
+  _dynamic_complete = Module['_dynamic_complete'] = createExportWrapper('dynamic_complete', wasmExports['dynamic_complete'], 1);
+  _start_dynamic_worker = Module['_start_dynamic_worker'] = createExportWrapper('start_dynamic_worker', wasmExports['start_dynamic_worker'], 2);
+  _release_dynamic_worker = Module['_release_dynamic_worker'] = createExportWrapper('release_dynamic_worker', wasmExports['release_dynamic_worker'], 0);
+  _get_dynamic_result = Module['_get_dynamic_result'] = createExportWrapper('get_dynamic_result', wasmExports['get_dynamic_result'], 1);
   __emscripten_tls_init = createExportWrapper('_emscripten_tls_init', wasmExports['_emscripten_tls_init'], 0);
   _pthread_self = wasmExports['pthread_self'];
   __emscripten_thread_init = createExportWrapper('_emscripten_thread_init', wasmExports['_emscripten_thread_init'], 6);
@@ -2995,10 +2875,6 @@ async function run() {
 
   preRun();
 
-  if (runDependencies) {
-    await resolveRunDependencies();
-  }
-
   var setStatus = Module['setStatus'];
   if (setStatus) {
     setStatus('Running...');
@@ -3093,12 +2969,12 @@ for (const prop of Object.keys(Module)) {
 
 // Export using a UMD style export, or ES6 exports if selected
 if (typeof exports === 'object' && typeof module === 'object') {
-  module.exports = MatMulModule;
+  module.exports = DynamicThreadsModule;
   // This default export looks redundant, but it allows TS to import this
   // commonjs style module.
-  module.exports.default = MatMulModule;
+  module.exports.default = DynamicThreadsModule;
 } else if (typeof define === 'function' && define['amd'])
-  define([], () => MatMulModule);
+  define([], () => DynamicThreadsModule);
 
 // Create code for detecting if we are running in a pthread.
 // Normally this detection is done when the module is itself run but
@@ -3109,4 +2985,4 @@ var isPthread = globalThis.name?.startsWith('em-pthread');
 var isNode = globalThis.process?.versions?.node && globalThis.process?.type != 'renderer';
 if (isNode) isPthread = require('node:worker_threads').workerData === 'em-pthread'
 
-isPthread && MatMulModule();
+isPthread && DynamicThreadsModule();

@@ -353,6 +353,36 @@ export class RdpWasmSession extends EventEmitter {
     return this.#stoppedTid;
   }
 
+  /**
+   * Choose a live thread for a user-requested interrupt. Prefer a running
+   * worker so Ctrl-C taken while pthreads are blocked in wasm reports the
+   * worker's real pause, rather than an idle top-level JS thread.
+   */
+  preferredInterruptTid(): number | undefined {
+    const threads = [...this.#threads.values()];
+    const running = threads.filter((thread) => !this.#pausedTids.has(thread.tid));
+    return (
+      running.find((thread) => !thread.isTopLevel)?.tid ??
+      running[0]?.tid ??
+      threads.find((thread) => !thread.isTopLevel)?.tid ??
+      threads[0]?.tid
+    );
+  }
+
+  /** Currently-paused tids, in the same stopped-thread-first order as listTids(). */
+  pausedTids(): number[] {
+    return this.listTids().filter((tid) => this.#pausedTids.has(tid));
+  }
+
+  /**
+   * Prefer a different paused thread as the user-visible all-stop trigger.
+   * Used after Ctrl-C when the initially interrupted worker has no RDP frames
+   * but another worker caught by the same all-stop has a live wasm stack.
+   */
+  selectStoppedTid(tid: number): void {
+    if (this.#pausedTids.has(tid)) this.#stoppedTid = tid;
+  }
+
   hasThreads(): boolean {
     return this.#threads.size > 0;
   }

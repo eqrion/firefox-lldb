@@ -16,7 +16,9 @@ test("pthread pool survives repeated breakpoint stop/resume cycles", async () =>
     fire: "runMatmul();runMatmul();runMatmul()",
   });
   try {
-    const breakpoint = await s.breakpointByName("matmul_threaded");
+    // Use the source entry, not a name lookup: this test is specifically about
+    // repeated all-stop/resume behavior around pthread_join.
+    const breakpoint = await s.breakpointByLocation("matmul.cpp", 138);
     const breakpointId = Session.parseBreakpointId(breakpoint);
     assert.notEqual(breakpointId, null, breakpoint.output);
 

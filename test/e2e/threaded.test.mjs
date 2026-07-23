@@ -42,12 +42,15 @@ describe("threaded", () => {
   });
 
   test("workers resume and pthread_join completes", async () => {
-    const breakpoint = await s.breakpointByName("get_result");
+    // The initial matmul_threaded name breakpoint has already served its
+    // purpose. Remove it so only the explicit post-join marker is armed.
+    await s.deleteBreakpoint(1);
+    const breakpoint = await s.breakpointByLocation("matmul.cpp", 54);
     assert.notEqual(Session.parseBreakpointId(breakpoint), null, breakpoint.output);
 
     await continueUntilBreakpoint(s);
     const f0 = await s.topFrame();
-    assert.match(f0.function, /get_result/);
+    assert.match(f0.function, /matmul_join_complete/);
     assert.equal(f0.file?.endsWith("matmul.cpp"), true);
   });
 });

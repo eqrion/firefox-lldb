@@ -66,6 +66,33 @@
       mod.cwrap('start_multiply_worker', null, [])();
     }
 
+    function runProbeSequence(count = 4) {
+      mod.cwrap('start_probe_workers', null, ['number', 'number'])(count, 1);
+    }
+
+    function runBlockedProbes(count = 4) {
+      mod.cwrap('start_probe_workers', null, ['number', 'number'])(count, 0);
+    }
+
+    function runInterruptWorkers(blockedCount = 4) {
+      mod.cwrap('start_interrupt_workers', null, ['number'])(blockedCount);
+      const started = mod.cwrap('interrupt_spin_started', 'number', []);
+      const timer = setInterval(() => {
+        if (started()) {
+          clearInterval(timer);
+          console.log('interrupt-spin-ready');
+        }
+      }, 10);
+    }
+
+    function probeCompleted() {
+      return mod.cwrap('get_probe_completed', 'number', [])();
+    }
+
+    function probeResult(id) {
+      return mod.cwrap('get_probe_result', 'number', ['number'])(id);
+    }
+
     function runDot() {
       const n = nthreads();
       const t0 = performance.now();

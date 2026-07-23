@@ -49,6 +49,7 @@ import { EMPTY_WASM_MODULE, RESYNC_GRACE_MS } from "../rdp/constants.js";
 import { containedSourcePath } from "../sourcemap/materialize.js";
 import { sanitizeSourceMapBytes, sourceMapDataUrlBytes } from "../sourcemap/input.js";
 import { noopLogger, type Logger } from "../logging.js";
+import { stripWasmNameSection } from "./wasm-bytecode.js";
 
 function urlBasename(url: string): string {
   try {
@@ -101,10 +102,10 @@ interface StopState {
   // stop; read only by #eventTag(). Only meaningful right after `promise`
   // settles.
   reason: string;
-  // Set when triggerInterrupt() fires before Debuggee.continue has armed
-  // `promise` (the SIGINT handler runs synchronously but dispatch runs on
-  // the drain timer). #armStopped() checks this and resolves immediately.
-  pendingInterrupt: boolean;
+  // Set by the host Ctrl-C handler until Firefox delivers the corresponding
+  // real pause. This can precede Debuggee.continue arming `promise` because
+  // the SIGINT handler runs synchronously while WIT dispatch runs later.
+  hostInterruptPending: boolean;
   // Set just before #scheduleResyncCheck forces a fresh RDP interrupt to
   // manufacture a stop. Firefox reports that pause's why.type as
   // "interrupted", which the component's Event::Interrupted arm treats as
@@ -113,8 +114,8 @@ interface StopState {
   // it lands in the arm that actually consults update_on_stop()'s changed
   // modules and reports MultiThreadStopReason::Library. Cleared wherever
   // `pending` settles or is bypassed (the "stopped" listener, session close,
-  // triggerInterrupt(), or #armStopped's pending-interrupt branch) so it
-  // never survives to mislabel a later, unrelated stop.
+  // triggerInterrupt()) so it never survives to mislabel a later,
+  // unrelated stop.
   forcingResync: boolean;
 }
 
@@ -169,7 +170,7 @@ export class RdpDebuggee {
     promise: Promise.resolve({ tid: 1, pausePacket: {} as PauseEvent }),
     pending: null,
     reason: "breakpoint",
-    pendingInterrupt: false,
+    hostInterruptPending: false,
     forcingResync: false,
   };
 
@@ -201,9 +202,12 @@ export class RdpDebuggee {
       this.#clearResyncTimer();
       const pending = this.#stop.pending;
       if (!pending) return;
-      this.#stop.reason = this.#stop.forcingResync
-        ? "breakpoint"
-        : ((e.pausePacket as { why?: { type?: string } })?.why?.type ?? "breakpoint");
+      this.#stop.reason = this.#stop.hostInterruptPending
+        ? "signal"
+        : this.#stop.forcingResync
+          ? "breakpoint"
+          : ((e.pausePacket as { why?: { type?: string } })?.why?.type ?? "breakpoint");
+      this.#stop.hostInterruptPending = false;
       this.#stop.forcingResync = false;
       pending.resolve(e);
       this.#stop.pending = null;
@@ -215,6 +219,7 @@ export class RdpDebuggee {
       // worker thread doesn't hang when the RDP connection drops mid-session.
       this.#stop.pending?.reject(new Error("session closed"));
       this.#stop.pending = null;
+      this.#stop.hostInterruptPending = false;
       this.#stop.forcingResync = false;
     });
 
@@ -374,7 +379,11 @@ export class RdpDebuggee {
       );
       return bytes;
     }
-    if (info.hasDwarf || !info.sourceMapUrl) return bytes;
+    // Embedded DWARF is authoritative for function names. Hide the wasm name
+    // section from LLDB because its imported-function index handling otherwise
+    // creates bogus duplicate symbols at later functions.
+    if (info.hasDwarf) return stripWasmNameSection(bytes);
+    if (!info.sourceMapUrl) return bytes;
 
     const mapUrl = info.sourceMapUrl;
     let mapBytes: Uint8Array | undefined;
@@ -497,41 +506,60 @@ export class RdpDebuggee {
   async #snapshotAll(): Promise<void> {
     this.#frameInfoById.clear();
     this.#envCacheByActor.clear();
-    const stoppedTid = this.#session.stoppedTid;
-    for (const tid of this.#session.listTids()) {
-      let frames: FrameForm[] = [];
-      // Only fetch frames for the stopped thread. Other threads may be running
-      // or in mid-resume transition in Firefox, and calling frames() on them
-      // causes a "resumed" event response (in EVENT_TYPES) that never resolves
-      // the pending request, leading to 5-second timeouts per thread. Workers
-      // that were interrupted are typically in Atomics.wait (no wasm frames),
-      // so skipping them is equivalent.
-      if (tid === stoppedTid) {
-        try {
-          const rawFrames = (await this.#session.frames(tid)).filter(
-            (f) => (f.type === "wasmcall" || f.type === "call") && f.where
-          );
-          for (const f of rawFrames) {
-            if (f.type === "call") {
-              const actor = f.where!.actor;
-              if (this.#session.urlForSourceActor(actor) === undefined) {
-                // Not yet known — jsSources() populates the session's
-                // actor->url mapping as a side effect.
-                await this.#session.jsSources();
-              }
-              const url = this.#session.urlForSourceActor(actor) ?? actor;
-              const calleeName = f.callee?.displayName || f.callee?.name;
-              await this.#ensureSynthetic(url, actor, calleeName);
-            }
-          }
-          frames = rawFrames;
-        } catch {
-          frames = [];
-        }
+    const tids = this.#session.listTids();
+    const snapshots = new Map<number, FrameForm[]>();
+
+    // Firefox reports an empty frame list for pthread workers parked in
+    // Atomics.wait. A host Ctrl-C initially targets a worker to start the
+    // all-stop, but that worker may be one of those empty pool threads. Since
+    // all-stop has paused every interruptible thread by this point, inspect
+    // those paused workers until we find the live wasm stack the user expects
+    // Ctrl-C to select.
+    const candidates =
+      this.#stop.reason === "signal" ? this.#session.pausedTids() : [this.#session.stoppedTid];
+    let selectedTid = this.#session.stoppedTid;
+    let fallbackTid: number | undefined;
+    for (const tid of candidates) {
+      const frames = await this.#snapshotFrames(tid);
+      snapshots.set(tid, frames);
+      if (frames.length > 0 && fallbackTid === undefined) fallbackTid = tid;
+      if (frames.some((frame) => frame.type === "wasmcall")) {
+        selectedTid = tid;
+        break;
       }
+    }
+    if (!snapshots.get(selectedTid)?.length && fallbackTid !== undefined) selectedTid = fallbackTid;
+    this.#session.selectStoppedTid(selectedTid);
+
+    for (const tid of tids) {
+      const frames = snapshots.get(tid) ?? [];
       this.#framesByTid.set(tid, frames);
       this.#topFrameActorByTid.set(tid, frames.find((f) => f.type === "wasmcall")?.actor ?? null);
     }
+  }
+
+  async #snapshotFrames(tid: number): Promise<FrameForm[]> {
+    let frames: FrameForm[];
+    try {
+      frames = (await this.#session.frames(tid)).filter(
+        (frame) => (frame.type === "wasmcall" || frame.type === "call") && frame.where
+      );
+    } catch {
+      return [];
+    }
+    for (const frame of frames) {
+      if (frame.type !== "call") continue;
+      const actor = frame.where!.actor;
+      if (this.#session.urlForSourceActor(actor) === undefined) {
+        // Not yet known — jsSources() populates the session's actor->url
+        // mapping as a side effect.
+        await this.#session.jsSources();
+      }
+      const url = this.#session.urlForSourceActor(actor) ?? actor;
+      const calleeName = frame.callee?.displayName || frame.callee?.name;
+      await this.#ensureSynthetic(url, actor, calleeName);
+    }
+    return frames;
   }
 
   async #ensureSynthetic(url: string, actor: string, calleeName?: string): Promise<void> {
@@ -777,10 +805,13 @@ export class RdpDebuggee {
   // --- resumption ----------------------------------------------------------
   #doContinue(): Ref {
     this.#armStopped();
-    // #stop.pending is null when a pending interrupt was already consumed.
-    // In that case the stop is immediate — skip the resume so Firefox stays paused.
     if (this.#stop.pending !== null) {
-      if (this.#session.hasUnwitnessedPause()) {
+      if (this.#stop.hostInterruptPending) {
+        // Ctrl-C won the race with WIT dispatch. Establish a genuine RDP
+        // all-stop now and let the real worker pause resolve EventFuture.
+        this.#session.armAllStop();
+        this.#interruptForHost();
+      } else if (this.#session.hasUnwitnessedPause()) {
         // A pause already happened with nothing listening for it — e.g. a
         // buffered breakpoint fired on a newly-navigated page before this
         // continue armed the all-stop machinery (armAllStop's paused:<tid>
@@ -813,11 +844,12 @@ export class RdpDebuggee {
 
   #doSingleStep(tid: number): Ref {
     this.#armStopped();
-    // #stop.pending is null when a pending interrupt was already consumed by
-    // #armStopped() — the stop is immediate; stepping now would run the
-    // thread right past it while LLDB believes it's already stopped.
-    // Skip the step, matching #doContinue's guard.
     if (this.#stop.pending !== null) {
+      if (this.#stop.hostInterruptPending) {
+        this.#session.armAllStop();
+        this.#interruptForHost();
+        return this.#eventFutureRef();
+      }
       // LLDB's own "step off a stale breakpoint before resuming" dance —
       // triggered by its cached, pre-navigation view of where a breakpoint
       // site is — runs as a singleStep BEFORE it ever issues a real continue.
@@ -849,9 +881,6 @@ export class RdpDebuggee {
 
   #doInterrupt(): null {
     this.#armStopped();
-    // Same guard as #doContinue/#doSingleStep: a null #stop.pending here
-    // means the stop was already resolved by a consumed pending interrupt,
-    // so there's nothing live left to interrupt.
     if (this.#stop.pending !== null) {
       this.#session.interrupt(this.#session.stoppedTid);
     }
@@ -886,54 +915,27 @@ export class RdpDebuggee {
     await this.#preloadJsSources();
   }
 
-  /**
-   * Send an RDP interrupt to all running threads, then force-resolve the
-   * pending stop so EventFuture.finish unblocks immediately. Called when the
-   * user presses Ctrl-C while the target is running.
-   *
-   * The RDP interrupt and the "frames" request (from #snapshotAll) both go
-   * into the same socket queue, so Firefox processes them in order: pause
-   * first, then answer "frames" — giving us a real snapshot without waiting.
-   */
+  /** Request a genuine Firefox all-stop when the user presses Ctrl-C. */
   triggerInterrupt(): void {
     // A real interrupt supersedes any in-flight resync check: cancel it so
     // it can't later fire into an unrelated wait this triggerInterrupt() (or
     // whatever comes after it) arms. #clearResyncTimer() is a no-op if
     // nothing is armed.
     this.#clearResyncTimer();
-    for (const tid of this.#session.listTids()) {
-      try {
-        this.#session.interrupt(tid);
-      } catch {
-        /* ignore unknown-tid errors */
-      }
-    }
-    const pending = this.#stop.pending;
-    if (pending) {
-      this.#stop.reason = "signal";
-      this.#stop.forcingResync = false;
-      pending.resolve({ tid: this.#session.stoppedTid, pausePacket: {} as PauseEvent });
-      this.#stop.pending = null;
-    } else {
-      this.#stop.pendingInterrupt = true;
-    }
+    this.#stop.hostInterruptPending = true;
+    this.#stop.forcingResync = false;
+    if (this.#stop.pending) this.#interruptForHost();
   }
 
   #armStopped(): void {
-    if (this.#stop.pendingInterrupt) {
-      this.#stop.pendingInterrupt = false;
-      this.#stop.reason = "signal";
-      this.#stop.forcingResync = false;
-      this.#stop.promise = Promise.resolve({
-        tid: this.#session.stoppedTid,
-        pausePacket: {} as PauseEvent,
-      });
-      this.#stop.pending = null;
-      return;
-    }
     this.#stop.promise = new Promise((resolve, reject) => {
       this.#stop.pending = { resolve, reject };
     });
+  }
+
+  #interruptForHost(): void {
+    const tid = this.#session.preferredInterruptTid();
+    if (tid !== undefined) this.#session.interrupt(tid);
   }
 
   #clearResyncTimer(): void {
@@ -1026,9 +1028,9 @@ export class RdpDebuggee {
       case "interrupted":
         return "interrupted";
       default:
-        // "signal" (triggerInterrupt's Ctrl-C, or #armStopped's consumed
-        // pendingInterrupt) deliberately has no case of its own here and
-        // falls through to "breakpoint". The component's Event::Interrupted
+        // "signal" (triggerInterrupt's Ctrl-C) deliberately has no case of
+        // its own here and falls through to "breakpoint". The component's
+        // Event::Interrupted
         // arm only reports a real stop when its own Rust-side self.interrupt
         // flag is set — i.e. LLDB called the native Debuggee.interrupt WIT
         // method over RSP. A host-manufactured Ctrl-C never sets that, so

@@ -73,8 +73,12 @@ Requires Firefox installed in a standard location (see `findFirefoxBinary` in
 - `js_debugging.test.mjs` — JS file:line breakpoint fires; step-over advances source line.
 - `mixed_js.test.mjs` — mixed JS/wasm: source file discovery (app.js, math.js, math.cpp).
 - `threaded.test.mjs` — multithreaded fixture: thread list, matmul_threaded frame, step.
+- `threaded_dynamic.test.mjs` — breakpoints replay to a pthread target created after attach when no workers are preallocated.
+- `threaded_function_breakpoint.test.mjs` — pthread function-name breakpoints resolve only to their real DWARF location.
+- `threaded_interrupt.test.mjs` — Ctrl-C while workers are futex-blocked snapshots a live worker frame.
 - `threaded_repeated_breakpoint.test.mjs` — repeated pthread workloads survive three breakpoint stop/resume cycles.
 - `threaded_worker_breakpoint.test.mjs` — a first-load cross-origin-isolated page stops inside a pthread worker without losing the RDP session.
+- `threaded_worker_sequence.test.mjs` — four futex-coordinated workers stop in order on distinct tids; worker instruction-step and resume also work.
 - `wasm_trap.test.mjs` — wasm traps (divide-by-zero, unreachable, out-of-bounds, call_indirect mismatch) pause as a signal stop; trapping frame is inspectable.
 - `mcp.test.mjs` — real MCP launch/command flow, including automatic-attach recovery across an initial page reload and the bounded default wait for a command that does not return a prompt.
 

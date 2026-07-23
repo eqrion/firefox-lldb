@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Dynamic pthread debugger test</title>
+</head>
+<body>
+  <h1>Dynamic pthread debugger test</h1>
+  <div id="status">Loading wasm module...</div>
+  <div id="result"></div>
+
+  <script src="dynamic.js"></script>
+  <script>
+    let mod;
+
+    DynamicThreadsModule().then(m => {
+      mod = m;
+      document.getElementById('status').textContent = 'Ready.';
+    });
+
+    function runDynamic(id, value) {
+      mod.cwrap('start_dynamic_worker', null, ['number', 'number'])(id, value);
+      // The worker target and its wasm SourceActor arrive asynchronously.
+      // Keep the worker gated long enough for buffered breakpoint replay.
+      setTimeout(() => {
+        mod.cwrap('release_dynamic_worker', null, [])();
+      }, 5000);
+    }
+
+    function dynamicResult(id) {
+      return mod.cwrap('get_dynamic_result', 'number', ['number'])(id);
+    }
+  </script>
+</body>
+</html>

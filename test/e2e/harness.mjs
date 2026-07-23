@@ -87,6 +87,12 @@ export const FIXTURES = {
     breakFunc: "matmul_threaded",
     file: "matmul.cpp",
   },
+  threaded_dynamic: {
+    pageDir: "test/fixtures/threaded_dynamic",
+    fire: "runDynamic(7, 7007)",
+    breakFunc: "dynamic_checkpoint",
+    file: "dynamic.cpp",
+  },
   mixed_js: {
     pageDir: "test/fixtures/mixed-js",
     fire: "runApp()",
