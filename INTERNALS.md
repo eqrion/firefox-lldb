@@ -260,6 +260,15 @@ frame, TID 2+ = workers). All-stop is implemented by the host: when any thread
 fires a `paused` event, the host sends `interrupt` to all others and awaits their
 acks before emitting a unified `stopped` event to the component.
 
+Threads and source actors are also scoped to a monotonically increasing
+top-level **target generation**. A navigation retires the old generation as one
+unit (page plus workers), while the replacement inherits the page's stable LLDB
+TID. This handles both destroy-before-available and available-before-destroy RDP
+ordering without exposing two page threads or letting late source replies
+repopulate actor caches. Pause ownership is explicit session state rather than
+being inferred from EventEmitter listener counts, and an all-stop interrupt wait
+settles immediately when its target is destroyed.
+
 RDP facts confirmed experimentally:
 
 - `watchTargets("worker")` surfaces emscripten pthread workers as targets.

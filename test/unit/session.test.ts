@@ -279,6 +279,8 @@ test("resources-available-array maps worker source actors to their URLs", async 
   await srv.listen();
   const session = await srv.acceptSession();
 
+  srv.targetAvailable("mainThread", { isTopLevel: true });
+  await sleep(200);
   srv.send({
     from: "workerTarget",
     type: "resources-available-array",
@@ -359,6 +361,42 @@ test("target-destroyed-form with real Firefox payload shape (no threadActor) pru
   srv.close();
 });
 
+test("replacement-before-destroy ordering advances generation and preserves the top-level tid", async () => {
+  const srv = new FakeRdpServer();
+  await srv.listen();
+  const session = await srv.acceptSession();
+
+  srv.targetAvailable("threadA", { isTopLevel: true });
+  srv.targetAvailable("workerA");
+  await sleep(200);
+  const tidA = session.topLevelTid();
+  const generationA = session.topLevelGeneration();
+
+  let navigatedCount = 0;
+  let detachedCount = 0;
+  session.on("navigated", () => navigatedCount++);
+  session.on("detached", () => detachedCount++);
+
+  // Some Firefox process switches announce the replacement before destroying
+  // the old actor. The session must still perform one atomic generation swap.
+  srv.targetAvailable("threadB", { isTopLevel: true });
+  await sleep(200);
+
+  assert.equal(session.topLevelTid(), tidA, "replacement inherits LLDB's stable tid");
+  assert.ok(session.topLevelGeneration() > generationA, "replacement starts a new generation");
+  assert.deepEqual(session.listTids(), [tidA], "old-generation workers retire with their page");
+  assert.equal(navigatedCount, 1);
+
+  // The late old-actor destruction is now stale and must not detach the live B generation.
+  srv.targetDestroyed("threadA");
+  await sleep(400);
+  assert.equal(detachedCount, 0);
+  assert.equal(session.topLevelTid(), tidA);
+
+  session.close();
+  srv.close();
+});
+
 test("hasThreads() reflects thread count", async () => {
   const srv = new FakeRdpServer();
   await srv.listen();
@@ -420,6 +458,80 @@ test("paused event from unknown actor is silently dropped", async () => {
   srv.close();
 });
 
+test("diagnostic pause listeners do not make an uncoordinated pause witnessed", async () => {
+  const srv = new FakeRdpServer();
+  await srv.listen();
+  const session = await srv.acceptSession();
+
+  srv.targetAvailable("threadA", { isTopLevel: true });
+  await sleep(200);
+  session.on("paused:1", () => {
+    // Observer only: it does not coordinate an all-stop.
+  });
+
+  srv.paused("threadA", "breakpoint");
+  await sleep(200);
+  assert.equal(session.hasUnwitnessedPause(), true);
+
+  session.close();
+  srv.close();
+});
+
+test("destroying a paused target discards its unwitnessed-pause marker", async () => {
+  const srv = new FakeRdpServer();
+  await srv.listen();
+  const session = await srv.acceptSession();
+
+  srv.targetAvailable("threadA", { isTopLevel: true });
+  await sleep(200);
+  srv.paused("threadA", "breakpoint");
+  await sleep(200);
+  assert.equal(session.hasUnwitnessedPause(), true);
+
+  srv.targetDestroyed("threadA");
+  await sleep(200);
+  assert.equal(
+    session.hasUnwitnessedPause(),
+    false,
+    "a pause from a dead target cannot be adopted by its replacement"
+  );
+
+  session.close();
+  srv.close();
+});
+
+test("all-stop reuses its pause listener when navigation reuses a tid", async () => {
+  const srv = new FakeRdpServer();
+  await srv.listen();
+  const session = await srv.acceptSession();
+
+  srv.targetAvailable("threadA", { isTopLevel: true });
+  await sleep(200);
+  const tid = session.listTids()[0];
+
+  session.armAllStop();
+  srv.targetDestroyed("threadA");
+  srv.targetAvailable("threadB", { isTopLevel: true });
+  await sleep(200);
+  assert.equal(session.listTids()[0], tid, "replacement must reuse the top-level tid");
+
+  const stopped = new Promise<void>((resolve) => session.once("stopped", () => resolve()));
+  srv.paused("threadB", "breakpoint");
+  await stopped;
+
+  // Replace the target again with no all-stop armed. A leaked, already-fired
+  // listener from the first swap would make this pause look witnessed.
+  srv.targetDestroyed("threadB");
+  srv.targetAvailable("threadC", { isTopLevel: true });
+  await sleep(200);
+  srv.paused("threadC", "breakpoint");
+  await sleep(200);
+  assert.equal(session.hasUnwitnessedPause(), true);
+
+  session.close();
+  srv.close();
+});
+
 test("armAllStop → pause from one thread → interrupt others → stopped emitted", async () => {
   const srv = new FakeRdpServer();
   await srv.listen();
@@ -463,6 +575,38 @@ test("armAllStop → pause from one thread → interrupt others → stopped emit
   // An interrupt request was sent to threadB.
   const interrupts = srv.received.filter((r) => r.type === "interrupt" && r.to === "threadB");
   assert.ok(interrupts.length >= 1, "interrupt sent to threadB");
+
+  session.close();
+  srv.close();
+});
+
+test("all-stop settles immediately when an interrupted target is destroyed", async () => {
+  const srv = new FakeRdpServer();
+  await srv.listen();
+  const session = await srv.acceptSession();
+
+  srv.targetAvailable("threadA", { isTopLevel: true });
+  srv.targetAvailable("threadB");
+  await sleep(200);
+  srv.onAll(
+    (r) => r.to === "threadB" && r.type === "interrupt",
+    () => {
+      setTimeout(() => srv.targetDestroyed("threadB"), 5);
+      return null;
+    }
+  );
+
+  const stopped = new Promise<void>((resolve) => session.once("stopped", () => resolve()));
+  session.armAllStop();
+  srv.paused("threadA", "breakpoint");
+
+  await Promise.race([
+    stopped,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("all-stop waited for the destroyed target timeout")), 500)
+    ),
+  ]);
+  assert.deepEqual(session.listTids(), [session.topLevelTid()]);
 
   session.close();
   srv.close();
@@ -988,6 +1132,35 @@ test("target-destroyed-form followed by a replacement top-level target does not 
   srv.close();
 });
 
+test("a replacement target retires the previous detach grace timer", async () => {
+  const srv = new FakeRdpServer();
+  await srv.listen();
+  const session = await srv.acceptSession();
+
+  srv.targetAvailable("mainThreadA", { isTopLevel: true });
+  await sleep(200);
+
+  let detachCount = 0;
+  session.on("detached", () => detachCount++);
+
+  srv.targetDestroyed("mainThreadA");
+  await sleep(50);
+  srv.targetAvailable("mainThreadB", { isTopLevel: true });
+  await sleep(100);
+  srv.targetDestroyed("mainThreadB");
+
+  // The first target's original 250 ms timer would expire in this window, but
+  // B has only just disappeared and must receive its own full grace period.
+  await sleep(150);
+  assert.equal(detachCount, 0, "an obsolete timer must not report B's swap as a close");
+
+  await sleep(200);
+  assert.equal(detachCount, 1, "only B's grace timer should report the eventual close");
+
+  session.close();
+  srv.close();
+});
+
 test("session emits 'close' when the RDP connection drops", async () => {
   const srv = new FakeRdpServer();
   await srv.listen();
@@ -1028,6 +1201,38 @@ test("navigate() rejects when the session closes before the new target arrives",
   await assert.rejects(navP, /session closed during navigate/, "navigate should reject on close");
 
   session.close();
+});
+
+test("navigate() rejection preserves the current target generation", async () => {
+  const srv = new FakeRdpServer();
+  await srv.listen();
+  const session = await srv.acceptSession();
+
+  srv.targetAvailable("threadV0", {
+    isTopLevel: true,
+    url: "http://example.com/original.html",
+  });
+  await sleep(200);
+  const tid = session.topLevelTid();
+  const generation = session.topLevelGeneration();
+
+  srv.onNext(
+    (r) => r.type === "navigateTo",
+    () => ({
+      from: "tab1",
+      error: "navigationRejected",
+      message: "fixture rejection",
+    })
+  );
+
+  await assert.rejects(session.navigate("http://example.com/rejected.html"), /navigationRejected/);
+  assert.equal(session.topLevelTid(), tid);
+  assert.equal(session.topLevelGeneration(), generation);
+  assert.equal(session.topLevelUrl(), "http://example.com/original.html");
+  assert.equal(session.hasThreads(), true);
+
+  session.close();
+  srv.close();
 });
 
 test("navigate() resolves when the resulting page URL differs from the requested one (redirect)", async () => {
@@ -1275,6 +1480,40 @@ test("uncontrolled top-level target swap (no navigate()) invalidates stale wasm 
     sources.some((s) => s.actor === "wasmActorNew"),
     "new actor should be registered after the uncontrolled swap"
   );
+
+  session.close();
+  srv.close();
+});
+
+test("a late source reply from a retired generation cannot repopulate actor caches", async () => {
+  const srv = new FakeRdpServer();
+  await srv.listen();
+  const session = await srv.acceptSession();
+
+  srv.targetAvailable("thread1", { isTopLevel: true });
+  await sleep(200);
+  srv.onNext(
+    (r) => r.to === "thread1" && r.type === "sources",
+    () => null
+  );
+  const oldSources = session.wasmSources();
+
+  // Replace the page before its pending sources request replies.
+  srv.targetAvailable("thread2", { isTopLevel: true });
+  await sleep(50);
+  srv.send({
+    from: "thread1",
+    sources: [
+      {
+        actor: "retiredWasmActor",
+        url: "http://example.com/old.wasm",
+        introductionType: "wasm",
+      },
+    ],
+  });
+
+  assert.deepEqual(await oldSources, []);
+  assert.equal(session.urlForSourceActor("retiredWasmActor"), undefined);
 
   session.close();
   srv.close();

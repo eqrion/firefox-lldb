@@ -380,6 +380,27 @@ export class Session {
     return this.#staticServer?.debuggerFetchCount() ?? 0;
   }
 
+  // Whether Firefox paused before LLDB armed its next all-stop wait. Navigation
+  // regressions use this to make the otherwise timing-sensitive stale-pause
+  // scenario deterministic before replacing that target again.
+  hasUnwitnessedPause() {
+    if (!this.#rdpSession)
+      throw new Error("hasUnwitnessedPause() requires onSession wiring — not available");
+    return this.#rdpSession.hasUnwitnessedPause();
+  }
+
+  topLevelGeneration() {
+    if (!this.#rdpSession)
+      throw new Error("topLevelGeneration() requires onSession wiring — not available");
+    return this.#rdpSession.topLevelGeneration();
+  }
+
+  topLevelTid() {
+    if (!this.#rdpSession)
+      throw new Error("topLevelTid() requires onSession wiring — not available");
+    return this.#rdpSession.topLevelTid();
+  }
+
   // An absolute URL for another file served by this fixture's static server
   // — session.navigate() takes a real URL, not a page-relative path.
   pageUrl(rel) {

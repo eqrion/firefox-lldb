@@ -90,6 +90,8 @@ Requires Firefox installed in a standard location (see `findFirefoxBinary` in
 - `nav_location_assign.test.mjs` — navigation via the page's own `location.href = ...`.
 - `nav_reload.test.mjs` — same-URL `location.reload()`; module bytecode is re-fetched, not served stale.
 - `nav_module_unload.test.mjs` — navigating to a different wasm URL unloads the old module from `image list`.
+- `nav_consecutive.test.mjs` — replacing a target that paused before LLDB listened discards that target's stale pause state.
+- `nav_while_running.test.mjs` — a target swap during `continue` does not leak the reused tid's all-stop listener.
 
 A genuine tab close (as opposed to a navigation) still correctly emits
 `detached` — covered at the unit level in `test/unit/session.test.ts`

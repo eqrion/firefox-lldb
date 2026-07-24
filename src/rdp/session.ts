@@ -250,6 +250,8 @@ export async function watchAndPrimeFirefoxTabs(
 
 export interface ThreadInfo {
   tid: number;
+  /** Top-level target incarnation this thread belongs to. */
+  generation: number;
   targetActor: string;
   threadActor: string;
   consoleActor: string;
@@ -267,6 +269,8 @@ export class RdpWasmSession extends EventEmitter {
   // tid -> ThreadInfo (including the top-level frame target)
   #threads = new Map<number, ThreadInfo>();
   #nextTid = 1;
+  #nextGeneration = 1;
+  #activeGeneration = 0;
 
   // tid of the thread that triggered the most recent all-stop pause
   #stoppedTid = 1;
@@ -283,21 +287,30 @@ export class RdpWasmSession extends EventEmitter {
   // report the actual why.type instead of a synthetic empty packet that
   // always defaults to "breakpoint" downstream in RdpDebuggee.
   #pausePacketByTid = new Map<number, PauseEvent>();
+  // Explicit pause-coordination ownership. EventEmitter listener counts are
+  // observable plumbing, not debugger state: diagnostic listeners and leaked
+  // callbacks must not change whether a pause is considered witnessed.
+  #pauseWitnessCountByTid = new Map<number, number>();
 
   // breakpoints buffered so new workers inherit them
   #breakpoints = new Map<string, Set<number>>(); // sourceUrl -> set of offsets
 
-  #wasmActorByUrl = new Map<string, string>(); // url -> source actor (any thread)
+  #wasmActorByUrl = new Map<string, { actor: string; generation: number }>();
   #breakpointPositionCache = new Map<string, Promise<number[]>>(); // actor -> positions
-  #jsActorByUrl = new Map<string, string>(); // url -> JS source actor (any thread)
+  #jsActorByUrl = new Map<string, { actor: string; generation: number }>();
   // Reverse of the two maps above (wasm + JS actors share one namespace).
   // The single owner of actor->url lookups — RdpDebuggee reads it via
   // urlForSourceActor() instead of keeping its own copy.
-  #sourceUrlByActor = new Map<string, string>();
+  #sourceUrlByActor = new Map<string, { url: string; generation: number }>();
 
   // Pending "is this top-level destroy a real close?" checks (see DETACH_GRACE_MS).
   #pendingDetachChecks = new Set<ReturnType<typeof setTimeout>>();
   #closed = false;
+
+  #clearPendingDetachChecks(): void {
+    for (const timer of this.#pendingDetachChecks) clearTimeout(timer);
+    this.#pendingDetachChecks.clear();
+  }
 
   // tid to hand to the next top-level target, reused from the one a
   // navigation just destroyed rather than minted fresh. LLDB has no RSP
@@ -309,6 +322,34 @@ export class RdpWasmSession extends EventEmitter {
   // stale-looking reference is actually still valid, pointed at the new
   // page's thread.
   #pendingTopLevelTid: number | undefined;
+
+  #watchPause(tid: number): void {
+    this.#pauseWitnessCountByTid.set(tid, (this.#pauseWitnessCountByTid.get(tid) ?? 0) + 1);
+  }
+
+  #unwatchPause(tid: number): void {
+    const count = this.#pauseWitnessCountByTid.get(tid) ?? 0;
+    if (count <= 1) this.#pauseWitnessCountByTid.delete(tid);
+    else this.#pauseWitnessCountByTid.set(tid, count - 1);
+  }
+
+  #removeThread(info: ThreadInfo): void {
+    // A replacement top-level target can already own the same stable tid.
+    // Only delete the map entry if it still describes this actor.
+    if (this.#threads.get(info.tid)?.targetActor === info.targetActor) {
+      this.#threads.delete(info.tid);
+    }
+    this.#pausedTids.delete(info.tid);
+    this.#unwitnessedPausedTids.delete(info.tid);
+    this.#pausePacketByTid.delete(info.tid);
+    this.emit(`target-destroyed:${info.targetActor}`, info);
+  }
+
+  #retireGeneration(generation: number): void {
+    for (const info of [...this.#threads.values()]) {
+      if (info.generation === generation) this.#removeThread(info);
+    }
+  }
 
   // Source actors are scoped to an RDP connection and become invalid whenever
   // the top-level target goes away — whether that's a navigate() we drove or
@@ -342,6 +383,7 @@ export class RdpWasmSession extends EventEmitter {
     // Forward transport close so consumers can unblock pending promises.
     client.on("close", () => {
       this.#closed = true;
+      this.#clearPendingDetachChecks();
       this.emit("close");
     });
     client.on("error", (err: Error) => this.#logger.error(`[rdp] transport error: ${err.message}`));
@@ -412,6 +454,16 @@ export class RdpWasmSession extends EventEmitter {
   /** URL of the top-level (page) target, if one is connected. */
   topLevelUrl(): string | undefined {
     return [...this.#threads.values()].find((t) => t.isTopLevel)?.url;
+  }
+
+  /** Current top-level target incarnation, or 0 while no top-level target exists. */
+  topLevelGeneration(): number {
+    return [...this.#threads.values()].find((t) => t.isTopLevel)?.generation ?? 0;
+  }
+
+  /** Stable debugger tid assigned to the current top-level target. */
+  topLevelTid(): number | undefined {
+    return [...this.#threads.values()].find((t) => t.isTopLevel)?.tid;
   }
 
   /** Connect, enable wasm observation, and start watching targets. */
@@ -501,14 +553,38 @@ export class RdpWasmSession extends EventEmitter {
 
         const isTopLevel = target.isTopLevelTarget ?? false;
         let tid: number;
-        if (isTopLevel && this.#pendingTopLevelTid !== undefined) {
-          tid = this.#pendingTopLevelTid;
+        let generation = this.#activeGeneration;
+        if (isTopLevel) {
+          // A top-level arrival starts a new target incarnation. Firefox
+          // normally sends destroy-then-available, but some process switches
+          // announce the replacement first. Retire the old generation here in
+          // that ordering so two top-level targets never coexist and the
+          // replacement still inherits LLDB's stable tid.
+          const currentTop = [...this.#threads.values()].find((t) => t.isTopLevel);
+          this.#clearPendingDetachChecks();
+          if (currentTop) {
+            tid = currentTop.tid;
+            this.#retireGeneration(currentTop.generation);
+            this.#onTopLevelGone(currentTop);
+          } else if (this.#pendingTopLevelTid !== undefined) {
+            tid = this.#pendingTopLevelTid;
+          } else {
+            tid = this.#nextTid++;
+          }
           this.#pendingTopLevelTid = undefined;
+          generation = this.#nextGeneration++;
+          this.#activeGeneration = generation;
+          // Workers can be announced in the destroy/available gap. Adopt them
+          // into the new incarnation once its top-level target identifies it.
+          for (const thread of this.#threads.values()) {
+            if (thread.generation === 0) thread.generation = generation;
+          }
         } else {
           tid = this.#nextTid++;
         }
         const info: ThreadInfo = {
           tid,
+          generation,
           targetActor,
           threadActor,
           consoleActor: target.consoleActor ?? "",
@@ -540,15 +616,17 @@ export class RdpWasmSession extends EventEmitter {
         if (!targetActor) break;
         const entry = [...this.#threads.entries()].find(([, t]) => t.targetActor === targetActor);
         if (entry) {
-          const [tid, info] = entry;
-          this.#threads.delete(tid);
-          this.#pausedTids.delete(tid);
-          this.#pausePacketByTid.delete(tid);
+          const [, info] = entry;
           // The page's tab was closed or navigated away; let consumers react
           // (e.g. firefox-lldb detaches the lldb process). Give a Fission
           // process-swap replacement (see DETACH_GRACE_MS) a chance to arrive
           // first, so a swap isn't mistaken for a real close.
           if (info.isTopLevel) {
+            // Retire the entire incarnation, including workers whose own
+            // destroyed events may arrive later. They cannot remain valid once
+            // their owning page target is gone.
+            this.#retireGeneration(info.generation);
+            if (this.#activeGeneration === info.generation) this.#activeGeneration = 0;
             // Whether this was a navigate() we drove or the page navigating
             // on its own, every source actor scoped to the old top-level
             // target is now dead.
@@ -556,7 +634,7 @@ export class RdpWasmSession extends EventEmitter {
             // Offer this tid to whatever top-level target replaces this one
             // (see #pendingTopLevelTid). If nothing does — a genuine close —
             // the timeout below clears it; nothing will ever ask for it again.
-            this.#pendingTopLevelTid = tid;
+            this.#pendingTopLevelTid = info.tid;
             const timer = setTimeout(() => {
               this.#pendingDetachChecks.delete(timer);
               const hasTopLevel = [...this.#threads.values()].some((t) => t.isTopLevel);
@@ -566,6 +644,8 @@ export class RdpWasmSession extends EventEmitter {
               }
             }, DETACH_GRACE_MS);
             this.#pendingDetachChecks.add(timer);
+          } else {
+            this.#removeThread(info);
           }
         }
         break;
@@ -581,11 +661,13 @@ export class RdpWasmSession extends EventEmitter {
           if (!Array.isArray(group) || group[0] !== "source" || !Array.isArray(group[1])) continue;
           for (const source of group[1] as SourceForm[]) {
             if (!source.actor || !source.url) continue;
-            this.#sourceUrlByActor.set(source.actor, source.url);
+            const generation = this.#activeGeneration;
+            if (generation === 0) continue;
+            this.#sourceUrlByActor.set(source.actor, { url: source.url, generation });
             if (source.introductionType === "wasm") {
-              this.#wasmActorByUrl.set(source.url, source.actor);
+              this.#wasmActorByUrl.set(source.url, { actor: source.actor, generation });
             } else {
-              this.#jsActorByUrl.set(source.url, source.actor);
+              this.#jsActorByUrl.set(source.url, { actor: source.actor, generation });
             }
           }
         }
@@ -598,13 +680,15 @@ export class RdpWasmSession extends EventEmitter {
         const [tid] = entry;
         this.#pausedTids.add(tid);
         this.#pausePacketByTid.set(tid, p as PauseEvent);
-        // No one is listening for this specific pause right now (armAllStop
-        // isn't currently coordinating it) — e.g. a newly-navigated page's
+        // No all-stop coordinator owns this pause right now — e.g. a
+        // newly-navigated page's
         // buffered breakpoint fires before the next Debuggee.continue arms
         // the all-stop machinery. Remember it as unwitnessed so the next
         // continue adopts it instead of blindly resuming past it (see
         // hasUnwitnessedPause() and its caller in rdp-debuggee.ts).
-        if (this.listenerCount(`paused:${tid}`) === 0) this.#unwitnessedPausedTids.add(tid);
+        if ((this.#pauseWitnessCountByTid.get(tid) ?? 0) === 0) {
+          this.#unwitnessedPausedTids.add(tid);
+        }
         this.emit(`paused:${tid}`, p as PauseEvent);
         break;
       }
@@ -622,36 +706,12 @@ export class RdpWasmSession extends EventEmitter {
     }
   }
 
-  /** Navigate the tab; resolves once a top-level target with the given URL arrives. */
+  /** Navigate the tab; resolves once a replacement top-level generation arrives. */
   async navigate(url: string): Promise<void> {
-    // Remove all top-level targets before navigating. Workers are managed
-    // by Firefox's own target-destroyed-form events. We must remove the
-    // current top-level target regardless of its URL — if we only remove
-    // targets with a different URL, a same-URL reload leaves the old target
-    // in #threads, so target-destroyed-form for it would emit "detached" and
-    // incorrectly trigger a process-detach in the consumer.
-    let removed: ThreadInfo | undefined;
-    for (const [tid, t] of this.#threads) {
-      if (t.isTopLevel) {
-        this.#threads.delete(tid);
-        this.#pausedTids.delete(tid);
-        this.#pausePacketByTid.delete(tid);
-        removed = t;
-        // Firefox's own target-destroyed-form for this target won't find it
-        // in #threads anymore (we just removed it above) to offer this tid
-        // to its replacement itself — do it here instead.
-        this.#pendingTopLevelTid = tid;
-      }
-    }
-    // Clear source-actor caches — actors are scoped to an RDP connection and
-    // become invalid after navigation. Stale actors cause breakpoint-position
-    // queries (#snapJsLocation, wasmBreakpointOffsets) to fail silently and
-    // fall back to un-snapped positions, which Firefox may ignore. Also lets
-    // a live LLDB attachment know to re-sync.
-    this.#onTopLevelGone(removed);
-
-    // Keep a reference to the cleanup function so we can call it if navigateTo
-    // throws before we reach `await target` (otherwise the listeners leak).
+    // Do not mutate live target state before Firefox accepts the request. The
+    // watcher events perform the generation swap transactionally; if navigateTo
+    // is rejected, the existing generation remains usable.
+    const startingGeneration = this.topLevelGeneration();
     const cleanupRef = { fn: null as (() => void) | null };
     const target = new Promise<void>((resolve, reject) => {
       const cleanup = () => {
@@ -660,14 +720,9 @@ export class RdpWasmSession extends EventEmitter {
         this.off("close", onClose);
       };
       cleanupRef.fn = cleanup;
-      // Any top-level target arriving after the targets above were cleared is
-      // the result of this navigation — do not require its URL to match the
-      // requested one: a server-side redirect (bare domain -> www, http ->
-      // https, trailing slash, etc.) means the resulting page's URL often
-      // differs from what was requested, and requiring an exact match here
-      // means navigate() never resolves.
+      // Do not require the URL to match: redirects routinely change it.
       const onTarget = (t: ThreadInfo) => {
-        if (t.isTopLevel) {
+        if (t.isTopLevel && t.generation !== startingGeneration) {
           cleanup();
           resolve();
         }
@@ -699,6 +754,10 @@ export class RdpWasmSession extends EventEmitter {
     return info;
   }
 
+  #isCurrentThread(info: ThreadInfo): boolean {
+    return this.#threads.get(info.tid)?.targetActor === info.targetActor;
+  }
+
   /** Send a raw request to an actor (escape hatch for actor-specific packets). */
   request(actor: string, packet: Record<string, unknown>): Promise<RdpPacket> {
     return this.#client.request(actor, packet);
@@ -708,13 +767,18 @@ export class RdpWasmSession extends EventEmitter {
 
   /** Wasm sources from the given thread. */
   async wasmSourcesForTid(tid: number): Promise<SourceForm[]> {
-    const { sources } = (await this.#client.request(this.#info(tid).threadActor, {
+    return this.#wasmSourcesForInfo(this.#info(tid));
+  }
+
+  async #wasmSourcesForInfo(info: ThreadInfo): Promise<SourceForm[]> {
+    const { sources } = (await this.#client.request(info.threadActor, {
       type: REQUESTS.sources,
     })) as SourcesResponse;
+    if (!this.#isCurrentThread(info)) return [];
     const wasm = (sources ?? []).filter((s) => s.introductionType === "wasm");
     for (const s of wasm) {
-      this.#wasmActorByUrl.set(s.url, s.actor);
-      this.#sourceUrlByActor.set(s.actor, s.url);
+      this.#wasmActorByUrl.set(s.url, { actor: s.actor, generation: info.generation });
+      this.#sourceUrlByActor.set(s.actor, { url: s.url, generation: info.generation });
     }
     return wasm;
   }
@@ -739,11 +803,13 @@ export class RdpWasmSession extends EventEmitter {
 
   /** URL for a wasm or JS source actor, if known (populated by wasmSourcesForTid/jsSources). */
   urlForSourceActor(actor: string): string | undefined {
-    return this.#sourceUrlByActor.get(actor);
+    const entry = this.#sourceUrlByActor.get(actor);
+    return entry?.generation === this.#activeGeneration ? entry.url : undefined;
   }
 
   async fetchModuleBytes(url: string): Promise<Uint8Array> {
-    const actor = this.#wasmActorByUrl.get(url);
+    const actorEntry = this.#wasmActorByUrl.get(url);
+    const actor = actorEntry?.generation === this.#activeGeneration ? actorEntry.actor : undefined;
     if (url.startsWith("http://") || url.startsWith("https://")) {
       try {
         return await this.#moduleByteProvider.fetch(url);
@@ -894,7 +960,8 @@ export class RdpWasmSession extends EventEmitter {
     sourceUrl: string,
     line: number
   ): Promise<{ line: number; column?: number }> {
-    const actor = this.#jsActorByUrl.get(sourceUrl);
+    const actorEntry = this.#jsActorByUrl.get(sourceUrl);
+    const actor = actorEntry?.generation === this.#activeGeneration ? actorEntry.actor : undefined;
     if (!actor) return { line };
     let positions: Record<string, number[]>;
     try {
@@ -925,9 +992,10 @@ export class RdpWasmSession extends EventEmitter {
         type: REQUESTS.sources,
       })) as SourcesResponse;
       const js = (sources ?? []).filter((s) => s.url && s.introductionType !== "wasm");
+      if (!this.#isCurrentThread(info)) return [];
       for (const s of js) {
-        this.#jsActorByUrl.set(s.url, s.actor);
-        this.#sourceUrlByActor.set(s.actor, s.url);
+        this.#jsActorByUrl.set(s.url, { actor: s.actor, generation: info.generation });
+        this.#sourceUrlByActor.set(s.actor, { url: s.url, generation: info.generation });
       }
       return js;
     } catch {
@@ -1018,7 +1086,8 @@ export class RdpWasmSession extends EventEmitter {
   }
 
   async #snapOffset(sourceUrl: string, offset: number): Promise<number> {
-    const actor = this.#wasmActorByUrl.get(sourceUrl);
+    const actorEntry = this.#wasmActorByUrl.get(sourceUrl);
+    const actor = actorEntry?.generation === this.#activeGeneration ? actorEntry.actor : undefined;
     if (!actor) return offset;
     const positions = await this.wasmBreakpointOffsets(actor).catch((): number[] => []);
     if (!positions.length || positions.includes(offset)) return offset;
@@ -1030,6 +1099,7 @@ export class RdpWasmSession extends EventEmitter {
 
   /** Apply all buffered breakpoints to a newly-arrived thread. */
   async #applyBreakpoints(info: ThreadInfo): Promise<void> {
+    if (!this.#isCurrentThread(info)) return;
     // A brand new target (post-navigation, or a fresh worker) hasn't
     // necessarily discovered its wasm sources yet — the page's script needs
     // a moment to load and instantiate the module. #wasmActorByUrl starts
@@ -1040,11 +1110,12 @@ export class RdpWasmSession extends EventEmitter {
     // target. Poll briefly for the sources to appear before snapping.
     if (this.#breakpoints.size > 0) {
       for (let i = 0; i < 10; i++) {
+        if (!this.#isCurrentThread(info)) return;
         // Cap each attempt: if the actor never replies (a stale/dead thread,
         // or simply no wasm on this target), this poll must still progress
         // and eventually give up rather than hang on the very first await.
         const sources = await Promise.race([
-          this.wasmSourcesForTid(info.tid).catch((): SourceForm[] => []),
+          this.#wasmSourcesForInfo(info).catch((): SourceForm[] => []),
           new Promise<SourceForm[]>((resolve) => setTimeout(() => resolve([]), 200)),
         ]);
         if (sources.length > 0) break;
@@ -1053,7 +1124,9 @@ export class RdpWasmSession extends EventEmitter {
     }
     for (const [sourceUrl, offsets] of this.#breakpoints) {
       for (const offset of offsets) {
+        if (!this.#isCurrentThread(info)) return;
         const snapped = await this.#snapOffset(sourceUrl, offset);
+        if (!this.#isCurrentThread(info)) return;
         await this.#client
           .request(info.threadActor, {
             type: REQUESTS.setBreakpoint,
@@ -1116,7 +1189,10 @@ export class RdpWasmSession extends EventEmitter {
     let onNewTarget: ((info: ThreadInfo) => void) | null = null;
 
     const cleanup = () => {
-      for (const [tid, h] of perTidHandlers) this.off(`paused:${tid}`, h);
+      for (const [tid, h] of perTidHandlers) {
+        this.off(`paused:${tid}`, h);
+        this.#unwatchPause(tid);
+      }
       perTidHandlers.clear();
       if (onNewTarget) {
         this.off("target", onNewTarget);
@@ -1147,8 +1223,16 @@ export class RdpWasmSession extends EventEmitter {
 
     const addTid = (tid: number) => {
       if (fired) return;
+      // A navigation reuses the old top-level tid for the replacement target.
+      // The existing event listener is keyed by tid rather than actor, so it
+      // already covers the replacement. Installing another one would overwrite
+      // the Map entry without removing the first listener; that orphan would
+      // leak until session close and could invoke stale coordination logic on
+      // later pauses.
+      if (perTidHandlers.has(tid)) return;
       const h = (p: PauseEvent) => onPaused(tid, p);
       perTidHandlers.set(tid, h);
+      this.#watchPause(tid);
       this.on(`paused:${tid}`, h);
     };
 
@@ -1179,13 +1263,18 @@ export class RdpWasmSession extends EventEmitter {
           const done = () => {
             clearTimeout(timer);
             this.off(`paused:${tid}`, onPaused);
+            this.off(`target-destroyed:${info.targetActor}`, onDestroyed);
             this.off("close", onClose);
+            this.#unwatchPause(tid);
             resolve();
           };
           const timer = setTimeout(done, 3000);
           const onPaused = done;
+          const onDestroyed = done;
           const onClose = done;
+          this.#watchPause(tid);
           this.once(`paused:${tid}`, onPaused);
+          this.once(`target-destroyed:${info.targetActor}`, onDestroyed);
           this.once("close", onClose);
         });
         this.#client.send(info.threadActor, { type: REQUESTS.interrupt, when: {} });
@@ -1370,8 +1459,7 @@ export class RdpWasmSession extends EventEmitter {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
-    for (const timer of this.#pendingDetachChecks) clearTimeout(timer);
-    this.#pendingDetachChecks.clear();
+    this.#clearPendingDetachChecks();
     this.#client.close();
   }
 }

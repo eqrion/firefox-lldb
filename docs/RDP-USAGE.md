@@ -19,7 +19,9 @@ All RDP wire traffic is confined to [`src/rdp/`](../src/rdp/):
   instead.
 - [`session.ts`](../src/rdp/session.ts) — the wasm-debugging session: actor
   discovery, thread-config bring-up, breakpoints, stepping, all-stop
-  coordination, console/eval.
+  coordination, console/eval. Top-level target incarnations receive explicit
+  generation numbers; workers, source actors, pauses, and cached breakpoint
+  positions are retired with their owning generation across navigation.
 
 No other module in the codebase builds or parses an RDP packet.
 

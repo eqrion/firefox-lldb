@@ -126,11 +126,7 @@ test("MCP: launch survives a page reload racing automatic attach (#46)", async (
     "factorial",
     async (client, fx, banner) => {
       assert.match(banner, /page navigating; re-syncing/i, `launch banner: ${banner}`);
-      assert.match(
-        banner,
-        /automatic attach attempt 1 was interrupted/i,
-        `launch banner: ${banner}`
-      );
+      assert.match(banner, /Process 1 stopped/i, `launch banner: ${banner}`);
       assert.doesNotMatch(banner, /attach failed/i, `launch banner: ${banner}`);
       const bp = await send(client, "lldb_send", { command: `breakpoint set -n ${fx.breakFunc}` });
       assert.match(bp, /Breakpoint 1/, `breakpoint set output: ${bp}`);
