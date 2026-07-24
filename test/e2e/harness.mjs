@@ -416,13 +416,13 @@ export class Session {
   // return a Session. `fire` overrides the fixture's default fire expression
   // (used by JS tests that need a second deferred call, e.g.
   // "runFactorial(); setTimeout(...)").
-  static async attach(fxName, { headless = true, fire } = {}) {
+  static async attach(fxName, { headless = true, fire, channel = "release" } = {}) {
     const fx = FIXTURES[fxName];
     if (!fx) throw new Error(`unknown fixture: ${fxName}`);
-    return retrySessionSetup(() => Session.#attachOnce(fx, { headless, fire }));
+    return retrySessionSetup(() => Session.#attachOnce(fx, { headless, fire, channel }));
   }
 
-  static async #attachOnce(fx, { headless, fire }) {
+  static async #attachOnce(fx, { headless, fire, channel }) {
     const staticServer = await startStaticServer(fx.pageDir, { requireAuth: fx.requireAuth });
     const url = `http://127.0.0.1:${staticServer.port}/index.html`;
 
@@ -435,6 +435,7 @@ export class Session {
         const rdpPort = await freePort();
         const args = parseCliArgs([
           "--launch",
+          ...(channel === "nightly" ? ["--nightly"] : channel === "beta" ? ["--beta"] : []),
           ...(headless ? ["--headless"] : []),
           ...(process.env.E2E_VERBOSE ? ["--verbose"] : []),
           "--port",

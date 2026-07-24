@@ -160,7 +160,7 @@ export class Module {
    */
   private constructor();
   bytecode(): Uint8Array | undefined;
-  addBreakpoint(d: Debuggee, pc: number): void;
+  addBreakpoint(d: Debuggee, pc: number): number;
   removeBreakpoint(d: Debuggee, pc: number): void;
   clone(): Module;
   uniqueId(): bigint;

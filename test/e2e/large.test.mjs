@@ -14,24 +14,21 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { Session } from "./harness.mjs";
+import { findFirefoxBinary } from "../../src/rdp/firefox.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WASM = path.join(HERE, "..", "fixtures", "large", "large.wasm");
 const BUILT = existsSync(WASM);
+const NIGHTLY = Boolean(findFirefoxBinary("nightly"));
 
 let s;
 before(async () => {
   if (!BUILT) return;
-  s = await Session.attach("large");
+  s = await Session.attach("large", { channel: NIGHTLY ? "nightly" : "release" });
 });
 after(async () => {
   await s?.shutdown();
 });
-
-// Large-module tests verify attach performance and symbol resolution. They do
-// NOT test breakpoint firing because wasmBreakpointOffsets currently maps source
-// line numbers (keys) instead of wasm byte offsets (values), causing
-// Z0-address→snappedOffset mismatches in large symbol-rich modules.
 
 test(
   "large module attaches without hanging",
@@ -61,5 +58,50 @@ test(
   async () => {
     const r = await s.command("image lookup -n run_query");
     assert.match(r.output + r.error, /large\.cpp/, `image lookup: ${r.output}`);
+  }
+);
+
+test(
+  "snapped source breakpoint is credited after an instruction step and removes cleanly",
+  {
+    skip: !BUILT
+      ? "large fixture not built"
+      : !NIGHTLY
+        ? "Firefox Nightly is not installed"
+        : false,
+  },
+  async () => {
+    const run = await s.breakpointByName("run_query");
+    const line = await s.breakpointByLocation("large.cpp", 17);
+    const sentinel = await s.breakpointByName("sqlite3VdbeExec");
+    const lineId = Session.parseBreakpointId(line);
+    assert.ok(Session.parseBreakpointId(run), `run_query breakpoint: ${run.output}`);
+    assert.ok(lineId, `line breakpoint: ${line.output}`);
+    assert.ok(Session.parseBreakpointId(sentinel), `sentinel breakpoint: ${sentinel.output}`);
+
+    const first = await s.continue();
+    assert.match(first.output, /stop reason = breakpoint 1\.1/, first.output);
+    assert.match(first.output, /run_query/, first.output);
+    assert.match(first.output, /large\.cpp:15/, first.output);
+
+    const stepped = await s.stepInstruction();
+    assert.match(stepped.output, /stop reason = breakpoint 2\.1/, stepped.output);
+    assert.match(stepped.output, /large\.cpp:17/, stepped.output);
+
+    const listed = await s.command("breakpoint list");
+    assert.match(
+      listed.output,
+      /2: file = 'large\.cpp', line = 17,[\s\S]*?hit count = 1/,
+      listed.output
+    );
+
+    await s.deleteBreakpoint(lineId);
+    const afterDelete = await s.continue();
+    assert.match(afterDelete.output, /stop reason = wasm step/, afterDelete.output);
+    assert.doesNotMatch(afterDelete.output, /breakpoint 2\.1/, afterDelete.output);
+
+    const atSentinel = await s.continue();
+    assert.match(atSentinel.output, /stop reason = breakpoint 3\.1/, atSentinel.output);
+    assert.match(atSentinel.output, /sqlite3VdbeExec/, atSentinel.output);
   }
 );

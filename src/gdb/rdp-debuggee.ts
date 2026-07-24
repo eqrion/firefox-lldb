@@ -458,16 +458,16 @@ export class RdpDebuggee {
     return syn ? syn.bytecode : this.#wasmBytecode(entry.url);
   }
 
-  async #moduleAddBreakpoint(id: number, pc: number): Promise<null> {
+  async #moduleAddBreakpoint(id: number, pc: number): Promise<number> {
     const entry = this.#requireModule(id);
-    if (!entry) return null;
+    if (!entry) return pc;
     const syn = this.#syntheticByUrl.get(entry.url);
     if (syn) {
       await this.#session.setJsBreakpoint(entry.url, pc - syn.codeOffset);
+      return pc;
     } else {
-      await this.#session.setWasmBreakpoint(entry.url, pc);
+      return this.#session.setWasmBreakpoint(entry.url, pc);
     }
-    return null;
   }
 
   async #moduleRemoveBreakpoint(id: number, pc: number): Promise<null> {

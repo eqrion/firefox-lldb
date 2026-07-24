@@ -294,6 +294,9 @@ export class RdpWasmSession extends EventEmitter {
 
   // breakpoints buffered so new workers inherit them
   #breakpoints = new Map<string, Set<number>>(); // sourceUrl -> set of offsets
+  // Exact RDP location selected for each LLDB-requested wasm PC. Firefox only
+  // accepts valid instruction boundaries, so insertion may snap the PC.
+  #snappedBreakpointByUrl = new Map<string, Map<number, number>>();
 
   #wasmActorByUrl = new Map<string, { actor: string; generation: number }>();
   #breakpointPositionCache = new Map<string, Promise<number[]>>(); // actor -> positions
@@ -1028,12 +1031,18 @@ export class RdpWasmSession extends EventEmitter {
 
   // --- breakpoints ---
 
-  async setWasmBreakpoint(sourceUrl: string, offset: number): Promise<void> {
+  async setWasmBreakpoint(sourceUrl: string, offset: number): Promise<number> {
     // Buffer so new workers inherit it.
     if (!this.#breakpoints.has(sourceUrl)) this.#breakpoints.set(sourceUrl, new Set());
     this.#breakpoints.get(sourceUrl)!.add(offset);
 
     const snappedOffset = await this.#snapOffset(sourceUrl, offset);
+    let snappedByOffset = this.#snappedBreakpointByUrl.get(sourceUrl);
+    if (!snappedByOffset) {
+      snappedByOffset = new Map();
+      this.#snappedBreakpointByUrl.set(sourceUrl, snappedByOffset);
+    }
+    snappedByOffset.set(offset, snappedOffset);
     await Promise.all(
       [...this.#threads.values()].map(
         (t) =>
@@ -1046,13 +1055,18 @@ export class RdpWasmSession extends EventEmitter {
             .catch(() => {}) // ignore stale actors
       )
     );
+    return snappedOffset;
   }
 
   async removeWasmBreakpoint(sourceUrl: string, offset: number): Promise<void> {
     this.#breakpoints.get(sourceUrl)?.delete(offset);
-    // Snap to the same offset that setWasmBreakpoint used; removing the
-    // original offset would be a no-op if it was adjusted on set.
-    const snappedOffset = await this.#snapOffset(sourceUrl, offset);
+    const snappedByOffset = this.#snappedBreakpointByUrl.get(sourceUrl);
+    // Re-snapping after an actor/cache change can choose a different offset
+    // and leave the original Firefox breakpoint armed.
+    const snappedOffset =
+      snappedByOffset?.get(offset) ?? (await this.#snapOffset(sourceUrl, offset));
+    snappedByOffset?.delete(offset);
+    if (snappedByOffset?.size === 0) this.#snappedBreakpointByUrl.delete(sourceUrl);
     await Promise.all(
       [...this.#threads.values()].map((t) =>
         this.#client
@@ -1067,7 +1081,9 @@ export class RdpWasmSession extends EventEmitter {
 
   async wasmBreakpointOffsets(sourceActor: string): Promise<number[]> {
     // Cache per actor: for large modules the RDP round-trip for all positions
-    // can be expensive. Subsequent Z0 packets reuse the same list.
+    // can be expensive. For a wasm source the compressed response is
+    // { <wasm byte offset>: [1] }; the keys, not the column arrays, are the
+    // valid Z0 locations. Subsequent packets reuse the same list.
     let p = this.#breakpointPositionCache.get(sourceActor);
     if (!p) {
       p = (async () => {
@@ -1126,6 +1142,12 @@ export class RdpWasmSession extends EventEmitter {
       for (const offset of offsets) {
         if (!this.#isCurrentThread(info)) return;
         const snapped = await this.#snapOffset(sourceUrl, offset);
+        let snappedByOffset = this.#snappedBreakpointByUrl.get(sourceUrl);
+        if (!snappedByOffset) {
+          snappedByOffset = new Map();
+          this.#snappedBreakpointByUrl.set(sourceUrl, snappedByOffset);
+        }
+        snappedByOffset.set(offset, snapped);
         if (!this.#isCurrentThread(info)) return;
         await this.#client
           .request(info.threadActor, {

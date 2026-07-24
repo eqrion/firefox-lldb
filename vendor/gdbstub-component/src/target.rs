@@ -274,6 +274,7 @@ impl<'a> MultiThreadResume for Debugger<'a> {
         _tid: Tid,
         _signal: Option<Signal>,
     ) -> Result<(), Self::Error> {
+        self.stepping_origin_pc = None;
         Ok(())
     }
 
@@ -293,6 +294,9 @@ impl<'a> MultiThreadSingleStep for Debugger<'a> {
         _signal: Option<Signal>,
     ) -> Result<(), Self::Error> {
         self.stepping_tid = Some(tid);
+        if self.stepping_origin_pc.is_none() {
+            self.stepping_origin_pc = self.threads.get(&tid).map(|ts| ts.current_pc);
+        }
         Ok(())
     }
 }
@@ -320,10 +324,16 @@ impl<'a> SwBreakpoint for Debugger<'a> {
         let debuggee = self.debuggee;
         if let AddrSpaceLookup::Module { module, .. } = self.addr_space.lookup(wasm_addr, debuggee)
         {
-            module
+            let snapped_offset = module
                 .add_breakpoint(debuggee, wasm_addr.offset())
                 .map_err(|_| TargetError::NonFatal)?;
-            self.sw_breakpoints.insert(wasm_addr);
+            let snapped_addr = WasmAddr::new(
+                wasm_addr.addr_type(),
+                wasm_addr.module_index(),
+                snapped_offset,
+            )
+            .ok_or(TargetError::NonFatal)?;
+            self.sw_breakpoints.insert(wasm_addr, snapped_addr);
             Ok(true)
         } else {
             Ok(false)
@@ -435,12 +445,12 @@ impl<'a> Wasm for Debugger<'a> {
             // instruction's PC. This matches the standard debugger
             // convention and is needed for LLDB's `finish` command
             // to set a breakpoint at the right address.
-            let pc = if i > 0 {
+            let pc = if i == 0 {
+                ts.current_pc
+            } else {
                 self.addr_space
                     .frame_to_return_addr(f, debuggee)
                     .unwrap_or_else(|| self.addr_space.frame_to_pc(f, debuggee))
-            } else {
-                self.addr_space.frame_to_pc(f, debuggee)
             };
             callback(pc.as_raw());
         }

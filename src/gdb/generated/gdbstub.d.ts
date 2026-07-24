@@ -11,10 +11,13 @@ import type * as WasiCliTerminalStderr from './interfaces/wasi-cli-terminal-stde
 import type * as WasiCliTerminalStdin from './interfaces/wasi-cli-terminal-stdin.js'; // wasi:cli/terminal-stdin@0.2.12
 import type * as WasiCliTerminalStdout from './interfaces/wasi-cli-terminal-stdout.js'; // wasi:cli/terminal-stdout@0.2.12
 import type * as WasiClocksMonotonicClock from './interfaces/wasi-clocks-monotonic-clock.js'; // wasi:clocks/monotonic-clock@0.2.12
+import type * as WasiClocksWallClock from './interfaces/wasi-clocks-wall-clock.js'; // wasi:clocks/wall-clock@0.2.12
+import type * as WasiFilesystemPreopens from './interfaces/wasi-filesystem-preopens.js'; // wasi:filesystem/preopens@0.2.12
+import type * as WasiFilesystemTypes from './interfaces/wasi-filesystem-types.js'; // wasi:filesystem/types@0.2.12
 import type * as WasiIoError from './interfaces/wasi-io-error.js'; // wasi:io/error@0.2.12
 import type * as WasiIoPoll from './interfaces/wasi-io-poll.js'; // wasi:io/poll@0.2.12
 import type * as WasiIoStreams from './interfaces/wasi-io-streams.js'; // wasi:io/streams@0.2.12
-import type * as WasiRandomInsecureSeed from './interfaces/wasi-random-insecure-seed.js'; // wasi:random/insecure-seed@0.2.12
+import type * as WasiRandomRandom from './interfaces/wasi-random-random.js'; // wasi:random/random@0.2.12
 import type * as WasiSocketsInstanceNetwork from './interfaces/wasi-sockets-instance-network.js'; // wasi:sockets/instance-network@0.2.12
 import type * as WasiSocketsNetwork from './interfaces/wasi-sockets-network.js'; // wasi:sockets/network@0.2.12
 import type * as WasiSocketsTcpCreateSocket from './interfaces/wasi-sockets-tcp-create-socket.js'; // wasi:sockets/tcp-create-socket@0.2.12
@@ -39,10 +42,13 @@ export interface ImportObject {
   'wasi:cli/terminal-stdin@0.2.12': typeof WasiCliTerminalStdin,
   'wasi:cli/terminal-stdout@0.2.12': typeof WasiCliTerminalStdout,
   'wasi:clocks/monotonic-clock@0.2.12': typeof WasiClocksMonotonicClock,
+  'wasi:clocks/wall-clock@0.2.12': typeof WasiClocksWallClock,
+  'wasi:filesystem/preopens@0.2.12': typeof WasiFilesystemPreopens,
+  'wasi:filesystem/types@0.2.12': typeof WasiFilesystemTypes,
   'wasi:io/error@0.2.12': typeof WasiIoError,
   'wasi:io/poll@0.2.12': typeof WasiIoPoll,
   'wasi:io/streams@0.2.12': typeof WasiIoStreams,
-  'wasi:random/insecure-seed@0.2.12': typeof WasiRandomInsecureSeed,
+  'wasi:random/random@0.2.12': typeof WasiRandomRandom,
   'wasi:sockets/instance-network@0.2.12': typeof WasiSocketsInstanceNetwork,
   'wasi:sockets/network@0.2.12': typeof WasiSocketsNetwork,
   'wasi:sockets/tcp-create-socket@0.2.12': typeof WasiSocketsTcpCreateSocket,

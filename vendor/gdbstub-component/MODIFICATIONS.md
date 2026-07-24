@@ -35,6 +35,11 @@ wasmtime, which is a manual, rare action. Each edit is commented in place.
   if new modules appeared, the stop reply uses `MultiThreadStopReason::Library`
   instead of `SwBreak`, emitting `library:;` in the T packet so LLDB re-reads
   `qXfer:libraries` and loads the newly registered synthetic JS modules.
+- `wit/world.wit`, `src/lib.rs`, and `src/target.rs` (snapped breakpoints) —
+  `module.add-breakpoint` returns the effective PC armed by the host. The
+  component retains the exact requested-to-armed mapping, uses it to identify
+  stops without a distance-based guess, and reports the logical LLDB PC
+  consistently through T05, registers, and the innermost wasm call-stack frame.
 - `src/addr.rs` — `AddrSpace::update()` now returns `bool` when the module set
   *changes* (added or removed), not just grows — a page navigation drops the
   old page's modules from `all_modules()`, and that needs to surface as a

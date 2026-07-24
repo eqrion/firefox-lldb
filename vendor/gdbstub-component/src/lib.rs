@@ -20,7 +20,7 @@ use gdbstub::{
 };
 use gdbstub_arch::wasm::addr::WasmAddr;
 use log::trace;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use wstd::{
     io::{AsyncRead, AsyncWrite},
     iter::AsyncIterator,
@@ -78,7 +78,8 @@ impl api::exports::bytecodealliance::wasmtime::debugger::Guest for Component {
             running: None,
             interrupt: false,
             stepping_tid: None,
-            sw_breakpoints: HashSet::new(),
+            stepping_origin_pc: None,
+            sw_breakpoints: HashMap::new(),
             addr_space: AddrSpace::new(),
         };
         wstd::runtime::block_on(async {
@@ -103,7 +104,12 @@ struct Debugger<'a> {
     addr_space: AddrSpace,
     interrupt: bool,
     stepping_tid: Option<Tid>,
-    sw_breakpoints: HashSet<WasmAddr>,
+    // Logical PC at which the current uninterrupted sequence of LLDB
+    // single-step packets began. Higher-level plans such as step-out issue
+    // many packets; keep their original PC across those packets.
+    stepping_origin_pc: Option<WasmAddr>,
+    // LLDB's requested address -> the exact address armed by Firefox.
+    sw_breakpoints: HashMap<WasmAddr, WasmAddr>,
 }
 
 impl<'a> Debugger<'a> {
@@ -274,7 +280,10 @@ impl<'a> Debugger<'a> {
                 )?)
             }
             api::Event::Breakpoint => {
-                trace!("Event::Breakpoint; stepping_tid = {:?}", self.stepping_tid);
+                trace!(
+                    "Event::Breakpoint; stepping_tid = {:?}; stepping_origin_pc = {:?}",
+                    self.stepping_tid, self.stepping_origin_pc
+                );
                 let new_modules = self.update_on_stop();
                 // stopped_pc is the snapped address Firefox actually fired at.
                 let stopped_pc = self
@@ -283,42 +292,54 @@ impl<'a> Debugger<'a> {
                     .map(|ts| ts.current_pc)
                     .unwrap_or_else(|| WasmAddr::from_raw(0).unwrap());
 
-                // Firefox snaps breakpoints to the nearest valid wasm instruction
-                // boundary -- in either direction (see firefox-lldb's #snapOffset,
-                // which picks whichever valid position is numerically closest) --
-                // so the stopped PC may be a few bytes before *or* after the DWARF
-                // low_pc that LLDB used when it registered its BreakpointSite. Use
-                // the registered pre-snap address in the T05 stop reply so LLDB's
-                // BreakpointSite lookup matches and reports eStopReasonBreakpoint.
-                // We keep current_pc = stopped_pc (snapped) for register reads and
-                // qWasmCallStack so LLDB's DWARF line table lookup (which has
-                // entries at snapped positions) returns the correct source location.
-                //
-                // Only do this when not stepping: DoPlanExplainsStop in the wasm
-                // step plan returns false for eStopReasonBreakpoint, handing off to
-                // the breakpoint handler. During a step we always use stopped_pc
-                // so the step plan can check the call-stack depth and complete.
-                let (is_sw_break, t05_pc) = if self.stepping_tid.is_none() {
-                    let nearest = self.sw_breakpoints.iter().copied().find(|&bp| {
-                        bp.addr_type() == stopped_pc.addr_type()
-                            && bp.module_index() == stopped_pc.module_index()
-                            && {
-                                let delta = (stopped_pc.offset() as i64) - (bp.offset() as i64);
-                                delta.abs() <= 8
-                            }
-                    });
-                    (nearest.is_some(), nearest.unwrap_or(stopped_pc))
+                // Match against the exact effective PC returned when the
+                // breakpoint was inserted. A distance-based search is
+                // ambiguous when two nearby LLDB locations snap close together.
+                let logical_pc = self
+                    .sw_breakpoints
+                    .iter()
+                    .filter_map(|(&requested, &armed)| (armed == stopped_pc).then_some(requested))
+                    // Multiple DWARF locations can snap to one instruction.
+                    // Prefer an exact/closest logical site deterministically.
+                    .min_by_key(|requested| stopped_pc.offset().abs_diff(requested.offset()));
+                // A source/instruction step that reaches a *different* armed
+                // location should be credited as that breakpoint. A higher-level
+                // step plan (notably step-out through recursion) can encounter
+                // the same function breakpoint repeatedly; keep reporting those
+                // as step completions so LLDB can continue its plan.
+                let is_sw_break = logical_pc.is_some()
+                    && (self.stepping_tid.is_none() || logical_pc != self.stepping_origin_pc);
+                if is_sw_break {
+                    // This breakpoint is being surfaced to LLDB/the user, so
+                    // the next explicit step starts a fresh sequence.
+                    self.stepping_origin_pc = None;
+                }
+                trace!(
+                    "breakpoint match: stopped_pc = {:?}; logical_pc = {:?}; is_sw_break = {}",
+                    stopped_pc, logical_pc, is_sw_break
+                );
+                let reported_pc = if is_sw_break {
+                    logical_pc.unwrap()
                 } else {
-                    (false, stopped_pc)
+                    stopped_pc
                 };
+                if is_sw_break {
+                    // Keep T05, later register reads, and the innermost
+                    // qWasmCallStack frame coherent. If a step landed here,
+                    // LLDB can now perform its normal breakpoint step-off.
+                    if let Some(ts) = self.threads.get_mut(&self.stopped_tid) {
+                        ts.current_pc = reported_pc;
+                    }
+                }
 
                 // When new synthetic JS modules were registered, signal a
                 // library change so LLDB re-reads qXfer:libraries and loads
                 // the new modules before symbolidating the call stack.
                 let stop_reason = if new_modules {
                     MultiThreadStopReason::Library(self.stopped_tid)
-                } else if self.stepping_tid.is_some() {
-                    // Step completion. is_sw_break is always false here (see above).
+                } else if self.stepping_tid.is_some() && !is_sw_break {
+                    // Ordinary step completion. A step that lands on an armed
+                    // breakpoint is reported as SwBreak below so LLDB credits it.
                     MultiThreadStopReason::SignalWithThread {
                         tid: self.stopped_tid,
                         signal: Signal::SIGTRAP,
@@ -327,7 +348,7 @@ impl<'a> Debugger<'a> {
                     // Breakpoint hit.
                     MultiThreadStopReason::SwBreak(self.stopped_tid)
                 };
-                let pc_bytes = t05_pc.as_raw().to_le_bytes();
+                let pc_bytes = reported_pc.as_raw().to_le_bytes();
                 let mut regs = core::iter::once((
                     gdbstub_arch::wasm::reg::id::WasmRegId::Pc,
                     pc_bytes.as_slice(),

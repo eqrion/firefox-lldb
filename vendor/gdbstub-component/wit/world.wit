@@ -216,8 +216,8 @@ interface debuggee {
     /// Get the original Wasm bytecode for this module, if available.
     bytecode: func() -> option<list<u8>>;
 
-    /// Add a breakpoint.
-    add-breakpoint: func(d: borrow<debuggee>, pc: u32) -> result<_, error>;
+    /// Add a breakpoint and return the effective PC armed by the host.
+    add-breakpoint: func(d: borrow<debuggee>, pc: u32) -> result<u32, error>;
 
     /// Remove a breakpoint.
     remove-breakpoint: func(d: borrow<debuggee>, pc: u32) -> result<_, error>;
