@@ -49,7 +49,7 @@ import { EMPTY_WASM_MODULE, RESYNC_GRACE_MS } from "../rdp/constants.js";
 import { containedSourcePath } from "../sourcemap/materialize.js";
 import { sanitizeSourceMapBytes, sourceMapDataUrlBytes } from "../sourcemap/input.js";
 import { noopLogger, type Logger } from "../logging.js";
-import { stripWasmNameSection } from "./wasm-bytecode.js";
+import { stripWasmNameSection, wasmFunctionRange } from "./wasm-bytecode.js";
 
 function urlBasename(url: string): string {
   try {
@@ -466,7 +466,13 @@ export class RdpDebuggee {
       await this.#session.setJsBreakpoint(entry.url, pc - syn.codeOffset);
       return pc;
     } else {
-      return this.#session.setWasmBreakpoint(entry.url, pc);
+      const bytes = await this.#moduleBytecode(id);
+      const snapped = await this.#session.setWasmBreakpoint(
+        entry.url,
+        pc,
+        wasmFunctionRange(bytes, pc)
+      );
+      return snapped;
     }
   }
 

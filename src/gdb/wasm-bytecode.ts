@@ -32,6 +32,60 @@ function isNameSection(bytes: Uint8Array, payloadStart: number, payloadEnd: numb
   return NAME_BYTES.every((byte, i) => bytes[nameLength.next + i] === byte);
 }
 
+export interface WasmFunctionRange {
+  /** Offset of the function body's size field in the module bytecode. */
+  start: number;
+  /** Offset immediately after the encoded function body. */
+  end: number;
+}
+
+/**
+ * Return the encoded code-body range containing `offset`.
+ *
+ * Breakpoint addresses use module-file offsets. Keeping a snapped position in
+ * this range prevents a function-entry breakpoint in a body header from moving
+ * backward to the preceding function's final opcode.
+ */
+export function wasmFunctionRange(
+  bytes: Uint8Array,
+  targetOffset: number
+): WasmFunctionRange | undefined {
+  if (bytes.length < WASM_HEADER.length || !WASM_HEADER.every((byte, i) => bytes[i] === byte)) {
+    return undefined;
+  }
+
+  let offset = WASM_HEADER.length;
+  while (offset < bytes.length) {
+    const sectionId = bytes[offset++];
+    const size = readU32(bytes, offset);
+    if (!size) return undefined;
+    const payloadStart = size.next;
+    const payloadEnd = payloadStart + size.value;
+    if (payloadEnd > bytes.length) return undefined;
+
+    if (sectionId === 10) {
+      const count = readU32(bytes, payloadStart, payloadEnd);
+      if (!count) return undefined;
+      let bodyOffset = count.next;
+      for (let i = 0; i < count.value; i++) {
+        const bodyStart = bodyOffset;
+        const bodySize = readU32(bytes, bodyOffset, payloadEnd);
+        if (!bodySize) return undefined;
+        const bodyEnd = bodySize.next + bodySize.value;
+        if (bodyEnd > payloadEnd) return undefined;
+        if (targetOffset >= bodyStart && targetOffset < bodyEnd) {
+          return { start: bodyStart, end: bodyEnd };
+        }
+        bodyOffset = bodyEnd;
+      }
+      return undefined;
+    }
+
+    offset = payloadEnd;
+  }
+  return undefined;
+}
+
 export function stripWasmNameSection(bytes: Uint8Array): Uint8Array {
   if (bytes.length < WASM_HEADER.length || !WASM_HEADER.every((byte, i) => bytes[i] === byte)) {
     return bytes;

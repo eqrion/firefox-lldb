@@ -816,6 +816,43 @@ test("setWasmBreakpoint sends to all existing threads at call time", async () =>
   srv.close();
 });
 
+test("setWasmBreakpoint keeps nearest snapping inside the containing function", async () => {
+  const srv = new FakeRdpServer();
+  await srv.listen();
+  const session = await srv.acceptSession();
+  const wasmUrl = "http://host/mod.wasm";
+
+  srv.targetAvailable("threadA", { isTopLevel: true });
+  await sleep(200);
+  srv.onNext(
+    (r) => r.type === "sources",
+    () => ({
+      from: "threadA",
+      sources: [{ actor: "wasmActor", url: wasmUrl, introductionType: "wasm" }],
+    })
+  );
+  await session.wasmSources();
+
+  srv.onNext(
+    (r) => r.type === "getBreakpointPositionsCompressed",
+    () => ({ from: "wasmActor", positions: { 10: [], 20: [], 30: [] } })
+  );
+  let setLine: number | undefined;
+  srv.onNext(
+    (r) => r.type === "setBreakpoint",
+    (r) => {
+      setLine = (r.location as { line: number }).line;
+      return { from: "threadA" };
+    }
+  );
+
+  await session.setWasmBreakpoint(wasmUrl, 12, { start: 11, end: 25 });
+  assert.equal(setLine, 20, "position 10 belongs to the preceding function");
+
+  session.close();
+  srv.close();
+});
+
 test("removeWasmBreakpoint uses same offset wire as setWasmBreakpoint", async () => {
   const srv = new FakeRdpServer();
   await srv.listen();

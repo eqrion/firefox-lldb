@@ -62,7 +62,7 @@ test(
 );
 
 test(
-  "snapped source breakpoint is credited after an instruction step and removes cleanly",
+  "snapped breakpoints preserve stepping attribution and function arguments",
   {
     skip: !BUILT
       ? "large fixture not built"
@@ -103,5 +103,17 @@ test(
     const atSentinel = await s.continue();
     assert.match(atSentinel.output, /stop reason = breakpoint 3\.1/, atSentinel.output);
     assert.match(atSentinel.output, /sqlite3VdbeExec/, atSentinel.output);
+
+    const column = await s.breakpointByName("sqlite3_column_int");
+    const columnId = Session.parseBreakpointId(column);
+    assert.ok(columnId, `sqlite3_column_int breakpoint: ${column.output}`);
+    const atColumn = await s.continue();
+    assert.match(atColumn.output, /stop reason = breakpoint 4\.1/, atColumn.output);
+    const pStmt = await s.variable(0, "pStmt");
+    const i = await s.variable(0, "i");
+    assert.equal(pStmt.valid, true);
+    assert.notEqual(pStmt.unsigned, 0);
+    assert.equal(i.valid, true);
+    assert.equal(i.signed, 0);
   }
 );

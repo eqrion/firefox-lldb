@@ -58,6 +58,7 @@ import {
   type PageErrorEvent,
 } from "./protocol.js";
 import { EventEmitter } from "node:events";
+import type { WasmFunctionRange } from "../gdb/wasm-bytecode.js";
 import { LAUNCH_TOKEN_PREF } from "./firefox.js";
 import { EMPTY_WASM_MODULE, DETACH_GRACE_MS } from "./constants.js";
 import { noopLogger, type Logger } from "../logging.js";
@@ -294,6 +295,9 @@ export class RdpWasmSession extends EventEmitter {
 
   // breakpoints buffered so new workers inherit them
   #breakpoints = new Map<string, Set<number>>(); // sourceUrl -> set of offsets
+  // Function-body bounds for breakpoint requests whose module bytecode was
+  // available. Used to keep nearest-position snapping inside the same body.
+  #breakpointRangeByUrl = new Map<string, Map<number, WasmFunctionRange>>();
   // Exact RDP location selected for each LLDB-requested wasm PC. Firefox only
   // accepts valid instruction boundaries, so insertion may snap the PC.
   #snappedBreakpointByUrl = new Map<string, Map<number, number>>();
@@ -1031,12 +1035,24 @@ export class RdpWasmSession extends EventEmitter {
 
   // --- breakpoints ---
 
-  async setWasmBreakpoint(sourceUrl: string, offset: number): Promise<number> {
+  async setWasmBreakpoint(
+    sourceUrl: string,
+    offset: number,
+    functionRange?: WasmFunctionRange
+  ): Promise<number> {
     // Buffer so new workers inherit it.
     if (!this.#breakpoints.has(sourceUrl)) this.#breakpoints.set(sourceUrl, new Set());
     this.#breakpoints.get(sourceUrl)!.add(offset);
+    if (functionRange) {
+      let ranges = this.#breakpointRangeByUrl.get(sourceUrl);
+      if (!ranges) {
+        ranges = new Map();
+        this.#breakpointRangeByUrl.set(sourceUrl, ranges);
+      }
+      ranges.set(offset, functionRange);
+    }
 
-    const snappedOffset = await this.#snapOffset(sourceUrl, offset);
+    const snappedOffset = await this.#snapOffset(sourceUrl, offset, functionRange);
     let snappedByOffset = this.#snappedBreakpointByUrl.get(sourceUrl);
     if (!snappedByOffset) {
       snappedByOffset = new Map();
@@ -1060,6 +1076,9 @@ export class RdpWasmSession extends EventEmitter {
 
   async removeWasmBreakpoint(sourceUrl: string, offset: number): Promise<void> {
     this.#breakpoints.get(sourceUrl)?.delete(offset);
+    const ranges = this.#breakpointRangeByUrl.get(sourceUrl);
+    ranges?.delete(offset);
+    if (ranges?.size === 0) this.#breakpointRangeByUrl.delete(sourceUrl);
     const snappedByOffset = this.#snappedBreakpointByUrl.get(sourceUrl);
     // Re-snapping after an actor/cache change can choose a different offset
     // and leave the original Firefox breakpoint armed.
@@ -1101,15 +1120,27 @@ export class RdpWasmSession extends EventEmitter {
     return p;
   }
 
-  async #snapOffset(sourceUrl: string, offset: number): Promise<number> {
+  async #snapOffset(
+    sourceUrl: string,
+    offset: number,
+    functionRange?: WasmFunctionRange
+  ): Promise<number> {
     const actorEntry = this.#wasmActorByUrl.get(sourceUrl);
     const actor = actorEntry?.generation === this.#activeGeneration ? actorEntry.actor : undefined;
     if (!actor) return offset;
     const positions = await this.wasmBreakpointOffsets(actor).catch((): number[] => []);
     if (!positions.length || positions.includes(offset)) return offset;
-    return positions.reduce(
+    const candidates = functionRange
+      ? positions.filter((p) => p >= functionRange.start && p < functionRange.end)
+      : positions;
+    if (!candidates.length) return offset;
+    // Keep the established nearest-position behavior for source breakpoints,
+    // but never let it escape the containing function. A function low_pc can
+    // sit in its encoded body header; without the range constraint its closest
+    // position may be the preceding function's final opcode.
+    return candidates.reduce(
       (best, p) => (Math.abs(p - offset) < Math.abs(best - offset) ? p : best),
-      positions[0]
+      candidates[0]
     );
   }
 
@@ -1141,7 +1172,8 @@ export class RdpWasmSession extends EventEmitter {
     for (const [sourceUrl, offsets] of this.#breakpoints) {
       for (const offset of offsets) {
         if (!this.#isCurrentThread(info)) return;
-        const snapped = await this.#snapOffset(sourceUrl, offset);
+        const range = this.#breakpointRangeByUrl.get(sourceUrl)?.get(offset);
+        const snapped = await this.#snapOffset(sourceUrl, offset, range);
         let snappedByOffset = this.#snappedBreakpointByUrl.get(sourceUrl);
         if (!snappedByOffset) {
           snappedByOffset = new Map();

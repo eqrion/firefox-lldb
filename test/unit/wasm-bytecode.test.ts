@@ -4,7 +4,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { stripWasmNameSection } from "../../src/gdb/wasm-bytecode.js";
+import { stripWasmNameSection, wasmFunctionRange } from "../../src/gdb/wasm-bytecode.js";
 
 const header = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
 
@@ -22,4 +22,14 @@ test("stripWasmNameSection leaves malformed or name-free modules unchanged", () 
   const malformed = new Uint8Array([...header, 0x00, 0x7f]);
   assert.strictEqual(stripWasmNameSection(nameFree), nameFree);
   assert.strictEqual(stripWasmNameSection(malformed), malformed);
+});
+
+test("wasmFunctionRange finds encoded bodies including their size fields", () => {
+  const code = [0x0a, 0x08, 0x02, 0x02, 0x00, 0x0b, 0x03, 0x00, 0x01, 0x0b];
+  const module = new Uint8Array([...header, ...code]);
+
+  assert.deepEqual(wasmFunctionRange(module, 12), { start: 11, end: 14 });
+  assert.deepEqual(wasmFunctionRange(module, 16), { start: 14, end: 18 });
+  assert.equal(wasmFunctionRange(module, 10), undefined);
+  assert.equal(wasmFunctionRange(new Uint8Array([...header, 0x0a, 0x7f]), 12), undefined);
 });
