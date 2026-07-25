@@ -35,7 +35,7 @@ jobs:
           printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' \
             | sudo tee /etc/apt/preferences.d/mozilla > /dev/null
           sudo apt-get update
-          sudo apt-get install -y "firefox=$FIREFOX_VERSION"
+          sudo apt-get install -y --allow-downgrades "firefox=$FIREFOX_VERSION"
 
       - name: Run Node e2e tests
         env:
@@ -48,6 +48,7 @@ jobs:
       - name: Dump captured Firefox process output (diagnostic, on failure)
         if: failure()
         run: |
+          shopt -s nullglob
           for f in /tmp/firefox-logs/*; do
             echo "=== $f ==="
             cat "$f"
