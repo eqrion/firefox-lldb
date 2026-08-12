@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // Production-path proof: spawn the real firefox-lldb executable in a PTY and
-// ask it to construct two isolated LLDB SourceDebuggerComponents itself.
+// ask it to construct isolated LLDB SourceDebuggerComponents itself.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -11,7 +11,7 @@ import { PtyRepl } from "../../src/mcp/pty-repl.ts";
 import { freePort } from "../../src/platform/gdb-server-spawner.ts";
 import { startStaticServer } from "./harness.mjs";
 
-test("the CLI loads and drives two routed SourceDebuggerComponents", async () => {
+test("the CLI coordinates three routed SourceDebuggerComponents", async () => {
   const staticServer = await startStaticServer("test/fixtures/two-components");
   const url = `http://127.0.0.1:${staticServer.port}/index.html`;
   let repl;
@@ -25,17 +25,23 @@ test("the CLI loads and drives two routed SourceDebuggerComponents", async () =>
       rdpPort,
       marionettePort,
       fire: "runA()",
-      components: ["lldb-a=component=a", "lldb-b=component=b"],
+      // C deliberately owns no module. It proves that a passive third
+      // observer also converges when B preempts A's active source plan.
+      components: ["lldb-a=component=a", "lldb-b=component=b", "lldb-c=component=c"],
       startupTimeoutMs: 120_000,
     });
 
     const components = await repl.send("components");
     assert.equal(components.prompt, true);
-    assert.match(components.output, /lldb-a\s+LLDB \(lldb-a\).*lldb-b\s+LLDB \(lldb-b\)/s);
+    assert.match(
+      components.output,
+      /lldb-a\s+LLDB \(lldb-a\).*lldb-b\s+LLDB \(lldb-b\).*lldb-c\s+LLDB \(lldb-c\)/s
+    );
 
     const modules = await repl.send("modules");
     assert.match(modules.output, /component=a\s+\[lldb-a\]/);
     assert.match(modules.output, /component=b\s+\[lldb-b\]/);
+    assert.doesNotMatch(modules.output, /\[lldb-c\]/);
     assert.match((await repl.send("break lldb-a::compute_factorial")).output, /lldb-a:1/);
     assert.match((await repl.send("break lldb-a::call_other_factorial")).output, /lldb-a:2/);
 

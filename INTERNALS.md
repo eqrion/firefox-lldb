@@ -65,7 +65,16 @@ recognizes, stops the active plan without resuming Firefox, and leaves the
 session free to publish the observer's real reason and compose its top frame
 over the driver's suspended caller. Without a foreign breakpoint, LLDB's normal
 step-over plan suppresses the foreign activation and returns to its next owned
-source line.
+source line. The production e2e keeps a third, module-less LLDB armed throughout
+the same sequence to verify that preemption converges every non-owning observer,
+not just one driver/observer pair.
+
+The CLI presents those adapters to `SourceDebuggerSession` through
+`src/source-debugger/rpc.ts`, a concurrent request/response transport over
+`MessagePort`. This exercises structured cloning and keeps a pending
+`waitForStop` from blocking a sibling `abortRun` or `cancelRun` call. The server
+endpoint still lives in the CLI realm; moving it into the component's isolation
+worker is the next containment step.
 
 ### Embedded wasm LLDB (`firefox-lldb`)
 

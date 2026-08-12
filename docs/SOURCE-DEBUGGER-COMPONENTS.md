@@ -32,6 +32,9 @@ The first implementation lives under `src/source-debugger/`:
 - `lldb-component.ts` adapts the real wasm-compiled LLDB and its public API.
 - `lldb-runtime.ts` owns one isolated LLDB worker, pthread pool, in-process
   channels, and the sockets bridging them to its RSP endpoints.
+- `rpc.ts` exposes an instance over concurrent request/response calls on a
+  `MessagePort`, preserving optional operations, errors, and configurable call
+  deadlines.
 - `session.ts` composes component frame projections, routes frame/value work,
   owns module assignments and logical breakpoint IDs, invalidates stop-scoped
   handles, and implements the driver/observer run and stop barriers.
@@ -101,7 +104,12 @@ the observer preempts before A can resume again. A private synthetic abort
 breakpoint stabilizes LLDB-A at its first owned caller without moving the
 physical target; the session then publishes B's real breakpoint and composes
 the logical B-over-A backtrace. The abort breakpoint is internal and does not
-install a Firefox breakpoint.
+install a Firefox breakpoint. The production proof also attaches a passive
+third LLDB with no owned module. It must converge on the same preempting stop,
+which exercises the coordinator as an N-component barrier rather than a
+two-party handoff. Every generic call in that proof crosses the `MessagePort`
+RPC adapter, including concurrent `waitForStop` and abort calls; the session no
+longer depends on direct in-realm calls to an LLDB adapter.
 
 LLDB scopes currently select and materialize frames through the public command
 interpreter. The bulk SB wrapper runs on a different wasm pthread, cannot
@@ -139,11 +147,14 @@ adapter.
    can step into B through opaque JavaScript without a destination breakpoint,
    step over B while suppressing its foreign activation, stop at a real B
    breakpoint encountered during A's active plan, and step out while preserving
-   A's foreign caller. Generalize the preemption proof beyond the current
-   two-component, single-thread fixture.
-8. **Worker RPC and failure containment.** Put each component behind a
-   `MessagePort`, enforce deadlines/cancellation, and recover from one component
-   failing without wedging the target.
+   A's foreign caller. A passive third LLDB proves N-component preemption;
+   repeat the sequence with multiple Firefox threads.
+8. **Worker RPC and failure containment (transport prototype complete).** The
+   production CLI now puts each component behind a `MessagePort` with
+   structured-cloned records, concurrent calls, optional operations, remote
+   errors, and opt-in deadlines. Move the server endpoint into the component's
+   isolation worker and define session recovery when a deadline expires or a
+   worker exits.
 9. **Activation-ID hardening.** Add stable physical activation identities to
    the debuggee/RSP/LLDB path for identical-PC recursion, non-top-frame
    step-out, tail calls, exception unwinding, and frame selection across stops.
