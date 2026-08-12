@@ -14,11 +14,11 @@ import type {
   LldbIsolateWorkerData,
   LldbIsolateWorkerMessage,
 } from "./lldb-isolate-protocol.js";
-import { serveSourceDebuggerComponent } from "./rpc.js";
+import { serveSourceDebuggerComponent, serveSourceDebuggerComponentDefinition } from "./rpc.js";
 import { connectRspByteChannel } from "./rsp-byte-channel.js";
 
 const data = workerData as LldbIsolateWorkerData;
-const { componentPort, controlPort, options } = data;
+const { definitionPort, componentPort, controlPort, options } = data;
 
 function post(message: LldbIsolateHostMessage): void {
   controlPort.postMessage(message);
@@ -92,6 +92,10 @@ void (async () => {
     observerResumesTarget: options.observerResumesTarget,
     exclusiveModules: options.exclusiveModules,
   });
+  const definitionEndpoint = serveSourceDebuggerComponentDefinition(
+    definitionPort,
+    runtime.definition
+  );
   const componentEndpoint = serveSourceDebuggerComponent(componentPort, runtime.component);
   runtime.runControl.installSynchronizeStop?.((tid) =>
     post({ type: "lldb-isolate-synchronize-stop", ...(tid === undefined ? {} : { tid }) })
@@ -116,6 +120,7 @@ void (async () => {
       (result) => {
         post({ type: "lldb-isolate-control-response", id: message.id, result });
         if (message.method === "close") {
+          definitionEndpoint.close();
           componentEndpoint.close();
           host.close(new Error("source debugger component host closed"));
           controlPort.off("message", onMessage);
@@ -137,6 +142,7 @@ void (async () => {
 })().catch((error) => {
   host.close(toError(error));
   post({ type: "lldb-isolate-initialization-error", error: serializeError(error) });
+  definitionPort.close();
   componentPort.close();
   controlPort.close();
 });
@@ -150,8 +156,6 @@ async function handleControlRequest(
       return runtime.bridgeRspEndpoint(request.args[0] as GdbRspEndpoint);
     case "connect-platform":
       return runtime.connectPlatform(request.args[0] as GdbRspEndpoint);
-    case "probe-module":
-      return runtime.probeModule(request.args[0] as Parameters<typeof runtime.probeModule>[0]);
     case "attach":
       return runtime.attach(request.args[0] as number, { attempts: request.args[1] as number });
     case "command":

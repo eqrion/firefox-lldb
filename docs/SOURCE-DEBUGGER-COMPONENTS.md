@@ -42,8 +42,9 @@ The first implementation lives under `src/source-debugger/`:
   owns the LLDB adapter, its runtime, and the nested `lldb-wasm` worker; the
   host owns TCP bridges, component proxies, and physical run-lease proxies.
 - `rpc.ts` exposes an instance over concurrent request/response calls on a
-  `MessagePort`, preserving optional operations, errors, and configurable call
-  deadlines.
+  `MessagePort`, and separately exposes a definition's discovery methods over
+  the same generic transport. Both preserve structured records, errors, and
+  configurable call deadlines.
 - `session.ts` composes component frame projections, routes frame/value work,
   owns module assignments and logical breakpoint IDs, invalidates stop-scoped
   handles, and implements the driver/observer run and stop barriers.
@@ -73,6 +74,16 @@ host-inspected `dwarf`/`source-map` hints. Raw browser-owned module bytes do not
 fan out to candidates. Ecosystems that need to validate custom-section payloads
 will eventually need a bounded module-inspection resource or richer normalized
 host metadata.
+
+The outer worker now has separate generic definition and instance ports. The
+host calls `describe()` and `probeModule()` through the definition port; the
+session calls target-specific operations through the instance port. LLDB's
+remaining control channel contains only runtime/bootstrap work such as RSP
+bridging, platform connection, attach, native commands, and shutdown. A new
+debugger ecosystem therefore does not need to speak an LLDB-named discovery
+protocol. `instantiate(host)` still runs locally inside the worker because that
+is where the imported host-resource proxy lives; making worker creation itself
+a generic loader is the next boundary to extract.
 
 The `firefox-lldb` CLI now presents a language-generic `(sdb)` prompt. Its core
 commands call only `SourceDebuggerSession`:

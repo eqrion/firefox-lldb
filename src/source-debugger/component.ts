@@ -51,9 +51,12 @@ export interface SourceDebuggerComponentHost {
   connectGdbRsp(endpoint: GdbRspEndpoint): Promise<GdbRspConnection>;
 }
 
-export interface SourceDebuggerComponent {
+export interface SourceDebuggerComponentDefinition {
   describe(): Promise<SourceDebuggerComponentDescriptor>;
   probeModule(module: Omit<ModuleDescriptor, "owner">): Promise<ModuleClaim>;
+}
+
+export interface SourceDebuggerComponent extends SourceDebuggerComponentDefinition {
   instantiate(host: SourceDebuggerComponentHost): Promise<SourceDebuggerComponentInstance>;
 }
 

@@ -97,7 +97,10 @@ when diagnosing these handoffs, without enabling the full RDP/RSP wire trace.
 
 The CLI presents those adapters to `SourceDebuggerSession` through
 `src/source-debugger/rpc.ts`, a concurrent request/response transport over
-`MessagePort`. This exercises structured cloning and keeps a pending
+`MessagePort`. Separate definition and instance ports keep discovery
+(`describe`/`probeModule`) independent from target-specific operations; the
+LLDB control channel no longer carries component API calls. This exercises
+structured cloning and keeps a pending
 `waitForStop` from blocking a sibling `abortRun` or `cancelRun` call. The LLDB
 adapter, runtime, and nested `lldb-wasm` worker live inside a per-component
 outer worker (`lldb-isolate-worker.ts`). The host-side proxy retains TCP

@@ -5,11 +5,16 @@
 import { MessageChannel } from "node:worker_threads";
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { SourceDebuggerComponentInstance } from "../../src/source-debugger/component.js";
+import type {
+  SourceDebuggerComponentDefinition,
+  SourceDebuggerComponentInstance,
+} from "../../src/source-debugger/component.js";
 import {
   connectSourceDebuggerComponent,
+  connectSourceDebuggerComponentDefinition,
   SourceDebuggerRpcTransportError,
   serveSourceDebuggerComponent,
+  serveSourceDebuggerComponentDefinition,
 } from "../../src/source-debugger/rpc.js";
 import type { ComponentStop } from "../../src/source-debugger/types.js";
 
@@ -58,6 +63,51 @@ function fakeComponent(
     ...overrides,
   };
 }
+
+test("component definition RPC exposes discovery without an instance", async () => {
+  let probed: unknown;
+  const definition: SourceDebuggerComponentDefinition = {
+    describe: async () => await fakeComponent().describe(),
+    probeModule: async (module) => {
+      probed = module;
+      return { supported: true, confidence: 87, reason: "fixture metadata" };
+    },
+  };
+  const { port1, port2 } = new MessageChannel();
+  const endpoint = serveSourceDebuggerComponentDefinition(port1, definition);
+  const remote = connectSourceDebuggerComponentDefinition(port2, { requestTimeoutMs: 100 });
+
+  assert.equal((await remote.describe()).id, "fake");
+  const module = { id: "fixture", url: "fixture.wasm", debugInfo: ["fixture"] };
+  assert.deepEqual(await remote.probeModule(module), {
+    supported: true,
+    confidence: 87,
+    reason: "fixture metadata",
+  });
+  assert.deepEqual(probed, module);
+  assert.notEqual(probed, module);
+
+  remote.close();
+  endpoint.close();
+});
+
+test("component definition RPC bounds a hung discovery call", async () => {
+  const definition: SourceDebuggerComponentDefinition = {
+    describe: async () => await fakeComponent().describe(),
+    probeModule: async () => new Promise(() => {}),
+  };
+  const { port1, port2 } = new MessageChannel();
+  const endpoint = serveSourceDebuggerComponentDefinition(port1, definition);
+  const remote = connectSourceDebuggerComponentDefinition(port2, { requestTimeoutMs: 10 });
+
+  await assert.rejects(
+    remote.probeModule({ id: "fixture", url: "fixture.wasm" }),
+    /probeModule timed out after 10ms/
+  );
+  await assert.rejects(remote.describe(), /RPC is closed/);
+
+  endpoint.close();
+});
 
 test("component RPC structured-clones results and preserves optional exports", async () => {
   const scope = {

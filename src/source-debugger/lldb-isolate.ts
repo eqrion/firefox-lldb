@@ -5,7 +5,12 @@
 import { MessageChannel, type MessagePort, Worker } from "node:worker_threads";
 import type { RdpDebuggeeResumeAction, RdpDebuggeeRunControl } from "../gdb/rdp-debuggee.js";
 import { noopLogger, type Logger } from "../logging.js";
-import type { GdbRspEndpoint, ModuleClaim, SourceDebuggerComponentInstance } from "./component.js";
+import type {
+  GdbRspEndpoint,
+  ModuleClaim,
+  SourceDebuggerComponentDefinition,
+  SourceDebuggerComponentInstance,
+} from "./component.js";
 import type {
   LldbIsolateControlMethod,
   LldbIsolateControlRequest,
@@ -13,7 +18,11 @@ import type {
   LldbIsolateHostMessage,
   LldbIsolateWorkerData,
 } from "./lldb-isolate-protocol.js";
-import { connectSourceDebuggerComponent } from "./rpc.js";
+import {
+  connectSourceDebuggerComponent,
+  connectSourceDebuggerComponentDefinition,
+  type SourceDebuggerRpcEndpoint,
+} from "./rpc.js";
 import type { SourceDebuggerComponentProbe } from "./ownership.js";
 import { openTcpRspByteChannel, type HostRspByteChannel } from "./rsp-byte-channel.js";
 import type { CommandResult, ModuleDescriptor } from "./types.js";
@@ -93,12 +102,18 @@ class IsolatedLldbRunControl implements RdpDebuggeeRunControl {
 }
 
 export class IsolatedLldbComponentRuntime implements SourceDebuggerComponentProbe {
+  readonly definition: SourceDebuggerComponentDefinition & SourceDebuggerRpcEndpoint;
   readonly component: SourceDebuggerComponentInstance;
   readonly runControl: RdpDebuggeeRunControl;
   readonly #channel: LldbIsolateChannel;
   #closePromise: Promise<void> | undefined;
 
-  private constructor(component: SourceDebuggerComponentInstance, channel: LldbIsolateChannel) {
+  private constructor(
+    definition: SourceDebuggerComponentDefinition & SourceDebuggerRpcEndpoint,
+    component: SourceDebuggerComponentInstance,
+    channel: LldbIsolateChannel
+  ) {
+    this.definition = definition;
     this.component = component;
     this.runControl = channel.runControl;
     this.#channel = channel;
@@ -111,10 +126,12 @@ export class IsolatedLldbComponentRuntime implements SourceDebuggerComponentProb
   static async create(
     options: IsolatedLldbComponentRuntimeOptions = {}
   ): Promise<IsolatedLldbComponentRuntime> {
+    const definitionChannel = new MessageChannel();
     const componentChannel = new MessageChannel();
     const controlChannel = new MessageChannel();
     const logger = options.logger ?? noopLogger;
     const workerData: LldbIsolateWorkerData = {
+      definitionPort: definitionChannel.port2,
       componentPort: componentChannel.port2,
       controlPort: controlChannel.port2,
       options: {
@@ -130,7 +147,7 @@ export class IsolatedLldbComponentRuntime implements SourceDebuggerComponentProb
       : new URL("./lldb-isolate-worker.js", import.meta.url);
     const worker = new Worker(workerEntry, {
       workerData,
-      transferList: [componentChannel.port2, controlChannel.port2],
+      transferList: [definitionChannel.port2, componentChannel.port2, controlChannel.port2],
     });
     const channel = new LldbIsolateChannel(
       worker,
@@ -138,17 +155,31 @@ export class IsolatedLldbComponentRuntime implements SourceDebuggerComponentProb
       logger,
       options.exclusiveModules ?? false
     );
+    let definition: (SourceDebuggerComponentDefinition & SourceDebuggerRpcEndpoint) | undefined;
     try {
       await channel.ready;
+      const onTransportFailure = (error: Error) => {
+        logger.error(`[${options.id ?? "lldb"}] ${error.message}; terminating isolate`);
+        void channel.terminate();
+      };
+      definition = connectSourceDebuggerComponentDefinition(definitionChannel.port1, {
+        requestTimeoutMs: options.requestTimeoutMs ?? 30_000,
+        onTransportFailure,
+      });
       const component = await connectSourceDebuggerComponent(componentChannel.port1, {
         requestTimeoutMs: options.requestTimeoutMs ?? 30_000,
-        onTransportFailure: (error) => {
-          logger.error(`[${options.id ?? "lldb"}] ${error.message}; terminating isolate`);
-          void channel.terminate();
-        },
+        onTransportFailure,
       });
-      return new IsolatedLldbComponentRuntime(component, channel);
+      const descriptor = await definition.describe();
+      if (descriptor.id !== component.id) {
+        throw new Error(
+          `SourceDebuggerComponent definition id ${descriptor.id} does not match instance id ${component.id}`
+        );
+      }
+      return new IsolatedLldbComponentRuntime(definition, component, channel);
     } catch (error) {
+      definition?.close();
+      definitionChannel.port1.close();
       componentChannel.port1.close();
       await channel.close().catch(() => {});
       throw error;
@@ -177,7 +208,7 @@ export class IsolatedLldbComponentRuntime implements SourceDebuggerComponentProb
   }
 
   probeModule(module: Omit<ModuleDescriptor, "owner">): Promise<ModuleClaim> {
-    return this.#channel.call("probe-module", module);
+    return this.definition.probeModule(module);
   }
 
   async attach(
@@ -205,14 +236,20 @@ export class IsolatedLldbComponentRuntime implements SourceDebuggerComponentProb
   }
 
   close(): Promise<void> {
-    return (this.#closePromise ??= this.#channel.close());
+    return (this.#closePromise ??= this.#close(false));
   }
 
   /** Force the isolation worker down. Normal cleanup uses close(); this is the
    * containment path for an unresponsive component. Its RPC peer immediately
    * rejects outstanding and subsequent calls when the port closes. */
   terminate(): Promise<void> {
-    return (this.#closePromise ??= this.#channel.terminate());
+    return (this.#closePromise ??= this.#close(true));
+  }
+
+  async #close(force: boolean): Promise<void> {
+    this.definition.close();
+    if (force) await this.#channel.terminate();
+    else await this.#channel.close();
   }
 }
 

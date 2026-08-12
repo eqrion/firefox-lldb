@@ -9,13 +9,8 @@ import {
   type RdpDebuggeeResumeAction,
   type RdpDebuggeeRunControl,
 } from "../gdb/rdp-debuggee.js";
-import type {
-  GdbRspConnection,
-  GdbRspEndpoint,
-  ModuleClaim,
-  SourceDebuggerComponentHost,
-} from "./component.js";
-import type { ComponentRunRequest, ModuleDescriptor, RunId } from "./types.js";
+import type { GdbRspConnection, GdbRspEndpoint, SourceDebuggerComponentHost } from "./component.js";
+import type { ComponentRunRequest, RunId } from "./types.js";
 import {
   LldbSourceDebuggerComponent,
   LldbSourceDebuggerComponentInstance,
@@ -187,10 +182,10 @@ export interface EmbeddedLldbComponentRuntimeOptions extends LldbSourceDebuggerC
 // and in-process channels. TCP/RDP resources stay in the component host; this
 // runtime imports only transferred GDB RSP byte streams.
 export class EmbeddedLldbComponentRuntime {
+  readonly definition: LldbSourceDebuggerComponent;
   readonly component: LldbSourceDebuggerComponentInstance;
   readonly runControl: RdpDebuggeeRunControl;
   readonly #client: LLDBClient;
-  readonly #definition: LldbSourceDebuggerComponent;
   readonly #host: SourceDebuggerComponentHost;
   readonly #logger: Logger;
   readonly #rspChannels = new Map<
@@ -207,7 +202,7 @@ export class EmbeddedLldbComponentRuntime {
     component: LldbSourceDebuggerComponentInstance
   ) {
     this.#client = client;
-    this.#definition = definition;
+    this.definition = definition;
     this.#host = options.host;
     this.#logger = options.logger ?? noopLogger;
     this.runControl = runtimeRunControl;
@@ -254,10 +249,6 @@ export class EmbeddedLldbComponentRuntime {
       await client.destroy();
       throw error;
     }
-  }
-
-  probeModule(module: Omit<ModuleDescriptor, "owner">): Promise<ModuleClaim> {
-    return this.#definition.probeModule(module);
   }
 
   /** Import an already-connected GDB RSP byte stream from the component host.

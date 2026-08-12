@@ -58,6 +58,7 @@ test("an exited LLDB isolate is quarantined without losing its sibling", async (
 
     await runtime.terminate();
     await assert.rejects(runtime.component.describe(), /SourceDebuggerComponent RPC.*closed/);
+    await assert.rejects(runtime.definition.describe(), /SourceDebuggerComponent RPC.*closed/);
 
     const statuses = await session.componentStatuses();
     assert.equal(statuses[0].status, "quarantined");

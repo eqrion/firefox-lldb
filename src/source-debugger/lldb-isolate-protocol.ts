@@ -4,10 +4,11 @@
 
 import type { MessagePort } from "node:worker_threads";
 import type { RdpDebuggeeResumeAction } from "../gdb/rdp-debuggee.js";
-import type { GdbRspEndpoint, ModuleClaim } from "./component.js";
+import type { GdbRspEndpoint } from "./component.js";
 import type { CommandResult } from "./types.js";
 
 export interface LldbIsolateWorkerData {
+  definitionPort: MessagePort;
   componentPort: MessagePort;
   controlPort: MessagePort;
   options: {
@@ -22,7 +23,6 @@ export interface LldbIsolateWorkerData {
 export type LldbIsolateControlMethod =
   | "bridge-rsp"
   | "connect-platform"
-  | "probe-module"
   | "attach"
   | "command"
   | "close";
@@ -109,7 +109,6 @@ export type LldbIsolateWorkerMessage =
 export interface LldbIsolateControlResults {
   "bridge-rsp": number;
   "connect-platform": void;
-  "probe-module": ModuleClaim;
   attach: string;
   command: CommandResult;
   close: void;
