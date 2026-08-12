@@ -9,8 +9,13 @@ import {
   type RdpDebuggeeResumeAction,
   type RdpDebuggeeRunControl,
 } from "../gdb/rdp-debuggee.js";
-import type { GdbRspConnection, GdbRspEndpoint, SourceDebuggerComponentHost } from "./component.js";
-import type { ComponentRunRequest, RunId } from "./types.js";
+import type {
+  GdbRspConnection,
+  GdbRspEndpoint,
+  ModuleClaim,
+  SourceDebuggerComponentHost,
+} from "./component.js";
+import type { ComponentRunRequest, ModuleDescriptor, RunId } from "./types.js";
 import {
   LldbSourceDebuggerComponent,
   LldbSourceDebuggerComponentInstance,
@@ -185,6 +190,7 @@ export class EmbeddedLldbComponentRuntime {
   readonly component: LldbSourceDebuggerComponentInstance;
   readonly runControl: RdpDebuggeeRunControl;
   readonly #client: LLDBClient;
+  readonly #definition: LldbSourceDebuggerComponent;
   readonly #host: SourceDebuggerComponentHost;
   readonly #logger: Logger;
   readonly #rspChannels = new Map<
@@ -197,9 +203,11 @@ export class EmbeddedLldbComponentRuntime {
     client: LLDBClient,
     options: EmbeddedLldbComponentRuntimeOptions,
     runtimeRunControl: LldbRuntimeRunControl,
+    definition: LldbSourceDebuggerComponent,
     component: LldbSourceDebuggerComponentInstance
   ) {
     this.#client = client;
+    this.#definition = definition;
     this.#host = options.host;
     this.#logger = options.logger ?? noopLogger;
     this.runControl = runtimeRunControl;
@@ -234,12 +242,22 @@ export class EmbeddedLldbComponentRuntime {
       const component: LldbSourceDebuggerComponentInstance = await definition.instantiate(
         options.host
       );
-      runtime = new EmbeddedLldbComponentRuntime(client, options, runtimeRunControl, component);
+      runtime = new EmbeddedLldbComponentRuntime(
+        client,
+        options,
+        runtimeRunControl,
+        definition,
+        component
+      );
       return runtime;
     } catch (error) {
       await client.destroy();
       throw error;
     }
+  }
+
+  probeModule(module: Omit<ModuleDescriptor, "owner">): Promise<ModuleClaim> {
+    return this.#definition.probeModule(module);
   }
 
   /** Import an already-connected GDB RSP byte stream from the component host.

@@ -29,6 +29,8 @@ The first implementation lives under `src/source-debugger/`:
 
 - `types.ts` defines structured-cloneable protocol records and opaque IDs.
 - `component.ts` defines the imported/exported component contracts.
+- `ownership.ts` probes installed component definitions and selects the unique
+  highest-confidence owner for each newly loaded module.
 - `rsp-byte-channel.ts` adapts host-owned TCP endpoints to transferable RSP
   streams without exposing sockets to debugger isolates.
 - `lldb-component.ts` adapts the real wasm-compiled LLDB and its public API.
@@ -43,6 +45,30 @@ The first implementation lives under `src/source-debugger/`:
 - `session.ts` composes component frame projections, routes frame/value work,
   owns module assignments and logical breakpoint IDs, invalidates stop-scoped
   handles, and implements the driver/observer run and stop barriers.
+
+Component definitions expose `describe()`, `probeModule()`, and
+`instantiate(host)` independently of their target-specific instance API. A
+probe returns whether it supports a module, a confidence from 0 through 100,
+and an optional reason.
+The unique highest-confidence supported claim wins. No claims, equal winning
+claims, invalid confidence values, and failed probes all stop assignment with
+diagnostics; registration order is never a tie-breaker. Each probe has an
+independent host-side deadline, so one unresponsive component cannot leave
+module refresh pending forever. Once assigned, an owner remains fixed until
+that module unloads, including if its component is quarantined. This preserves
+the one-owner invariant instead of silently asking a different debugger to
+interpret foreign debug information.
+
+The current CLI's `ID=URL_SUBSTRING` syntax is a compatibility constraint for
+running several otherwise identical LLDB components. It first selects the one
+eligible route, then still calls that isolated component definition's real
+`probeModule()` before committing ownership. Artifact-driven discovery can use
+the same resolver without routes once installed ecosystems return distinct
+claims. The prototype eagerly instantiates every observer so it can participate
+in physical stop barriers, but discovery remains a definition-side operation.
+The metadata available to probes is currently the module ID, URL, and optional
+debug-info hints; importing browser-owned module bytes/custom-section metadata
+into the discovery phase remains a follow-up.
 
 The `firefox-lldb` CLI now presents a language-generic `(sdb)` prompt. Its core
 commands call only `SourceDebuggerSession`:
@@ -174,9 +200,12 @@ adapter.
    outer host and each LLDB isolate imports only a `GdbRspConnection`. Extract
    endpoint creation into the component factory's first-class session-owned
    host rather than the current platform/bootstrap options.
-3. **Make module assignment explicit (prototype complete).** Probe components when modules arrive,
-   assign one owner, expose foreign frames opaquely, and reject breakpoint
-   mutations outside the owner's module set.
+3. **Make module assignment explicit (probe arbitration complete).** Components are probed
+   asynchronously when modules arrive; a unique best claim gets sticky
+   ownership, while ties and unsupported modules fail closed. The production
+   CLI invokes the real LLDB definition's probe across its outer worker, with
+   URL routes temporarily constraining identical LLDB instances. Rich module
+   bytes/custom-section metadata and route-free ecosystem discovery remain.
 4. **Instantiate two LLDB components (prototype complete).** Each gets a separate LLDB worker,
    gdbstub, RSP endpoint, pthread pool, and disjoint module set. Both observe
    the same physical Firefox process.

@@ -150,6 +150,8 @@ async function handleControlRequest(
       return runtime.bridgeRspEndpoint(request.args[0] as GdbRspEndpoint);
     case "connect-platform":
       return runtime.connectPlatform(request.args[0] as GdbRspEndpoint);
+    case "probe-module":
+      return runtime.probeModule(request.args[0] as Parameters<typeof runtime.probeModule>[0]);
     case "attach":
       return runtime.attach(request.args[0] as number, { attempts: request.args[1] as number });
     case "command":

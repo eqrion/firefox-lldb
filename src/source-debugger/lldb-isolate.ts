@@ -5,7 +5,7 @@
 import { MessageChannel, type MessagePort, Worker } from "node:worker_threads";
 import type { RdpDebuggeeResumeAction, RdpDebuggeeRunControl } from "../gdb/rdp-debuggee.js";
 import { noopLogger, type Logger } from "../logging.js";
-import type { GdbRspEndpoint, SourceDebuggerComponentInstance } from "./component.js";
+import type { GdbRspEndpoint, ModuleClaim, SourceDebuggerComponentInstance } from "./component.js";
 import type {
   LldbIsolateControlMethod,
   LldbIsolateControlRequest,
@@ -14,8 +14,9 @@ import type {
   LldbIsolateWorkerData,
 } from "./lldb-isolate-protocol.js";
 import { connectSourceDebuggerComponent } from "./rpc.js";
+import type { SourceDebuggerComponentProbe } from "./ownership.js";
 import { openTcpRspByteChannel, type HostRspByteChannel } from "./rsp-byte-channel.js";
-import type { CommandResult } from "./types.js";
+import type { CommandResult, ModuleDescriptor } from "./types.js";
 
 interface PendingControl {
   resolve: (value: unknown) => void;
@@ -91,7 +92,7 @@ class IsolatedLldbRunControl implements RdpDebuggeeRunControl {
   }
 }
 
-export class IsolatedLldbComponentRuntime {
+export class IsolatedLldbComponentRuntime implements SourceDebuggerComponentProbe {
   readonly component: SourceDebuggerComponentInstance;
   readonly runControl: RdpDebuggeeRunControl;
   readonly #channel: LldbIsolateChannel;
@@ -101,6 +102,10 @@ export class IsolatedLldbComponentRuntime {
     this.component = component;
     this.runControl = channel.runControl;
     this.#channel = channel;
+  }
+
+  get id(): string {
+    return this.component.id;
   }
 
   static async create(
@@ -169,6 +174,10 @@ export class IsolatedLldbComponentRuntime {
       this.#channel.discardRspEndpoint(endpoint.id);
       throw error;
     }
+  }
+
+  probeModule(module: Omit<ModuleDescriptor, "owner">): Promise<ModuleClaim> {
+    return this.#channel.call("probe-module", module);
   }
 
   async attach(

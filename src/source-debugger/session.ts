@@ -5,6 +5,7 @@
 import type { RdpWasmSession } from "../rdp/session.js";
 import { noopLogger, type Logger } from "../logging.js";
 import type { SourceDebuggerComponentInstance } from "./component.js";
+import type { ModuleOwnerResolver } from "./ownership.js";
 import { isSourceDebuggerRpcTransportError } from "./rpc.js";
 import type {
   BreakpointId,
@@ -31,7 +32,7 @@ import type {
 export interface SourceDebuggerSessionOptions {
   components: SourceDebuggerComponentInstance[];
   getRdpSession?: () => RdpWasmSession | undefined;
-  selectModuleOwner?: (module: Omit<ModuleDescriptor, "owner">) => ComponentId;
+  resolveModuleOwner?: ModuleOwnerResolver;
   logger?: Logger;
 }
 
@@ -56,7 +57,7 @@ export class SourceDebuggerSession {
   readonly #components: SourceDebuggerComponentInstance[];
   readonly #componentById: Map<ComponentId, SourceDebuggerComponentInstance>;
   readonly #getRdpSession: () => RdpWasmSession | undefined;
-  readonly #selectModuleOwner: (module: Omit<ModuleDescriptor, "owner">) => ComponentId;
+  readonly #resolveModuleOwner: ModuleOwnerResolver;
   readonly #logger: Logger;
   readonly #frames = new Map<LogicalFrameId, LogicalFrame>();
   readonly #breakpointRoutes = new Map<BreakpointId, BreakpointRoute>();
@@ -80,7 +81,7 @@ export class SourceDebuggerSession {
       throw new Error("SourceDebuggerComponent ids must be unique within a session");
     }
     this.#getRdpSession = options.getRdpSession ?? (() => undefined);
-    this.#selectModuleOwner = options.selectModuleOwner ?? (() => this.#components[0].id);
+    this.#resolveModuleOwner = options.resolveModuleOwner ?? (async () => this.#components[0].id);
     this.#logger = options.logger ?? noopLogger;
     this.#stateComponentId = this.#components[0].id;
   }
@@ -360,7 +361,13 @@ export class SourceDebuggerSession {
     const next = new Map<string, ModuleDescriptor>();
     for (const source of sources ?? []) {
       const module = { id: source.url, url: source.url };
-      const owner = this.#selectModuleOwner(module);
+      // Ownership is sticky for the lifetime of a loaded module. Re-running
+      // discovery on every refresh could silently move it between debuggers if
+      // a component is installed, removed, or changes its probe result.
+      const owner =
+        next.get(module.id)?.owner ??
+        this.#moduleById.get(module.id)?.owner ??
+        (await this.#resolveModuleOwner(module));
       this.#knownComponent(owner);
       next.set(module.id, { ...module, owner });
     }

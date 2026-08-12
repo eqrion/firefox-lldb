@@ -174,7 +174,8 @@ test("two isolated LLDB components compose an interleaved stack over one Firefox
     session = new SourceDebuggerSession({
       components: [primary.component, secondary.component],
       getRdpSession: () => primaryRdpSession,
-      selectModuleOwner: (module) => (module.url.includes("component=b") ? "lldb-b" : "lldb-a"),
+      resolveModuleOwner: async (module) =>
+        module.url.includes("component=b") ? "lldb-b" : "lldb-a",
     });
     repl = startRepl(session);
 

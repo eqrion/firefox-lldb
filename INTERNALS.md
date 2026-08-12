@@ -49,6 +49,14 @@ may release that shared Firefox run lease. Observer LLDBs still execute their
 own state-machine transitions and consume the same stop notification, so an
 LLDB-internal step-off cannot race a second RDP controller.
 
+When a Wasm module first appears, `SourceDebuggerSession` resolves its owner
+asynchronously. Installed component definitions are probed concurrently and a
+unique highest-confidence supported claim wins; ambiguity, no support, or a
+probe failure aborts assignment. Ownership remains pinned until unload. The
+CLI's explicit URL routes currently narrow this process for multiple identical
+LLDB definitions, but the selected definition's probe still runs across the
+outer isolation boundary.
+
 With multiple Firefox threads, an observer may be locally stepping a stale
 breakpoint on a worker when a sibling stops the main thread. The debuggee WIT
 interface carries an internal `synchronized(tid)` event for this case. The

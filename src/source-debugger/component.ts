@@ -24,6 +24,8 @@ import type {
 
 export interface ModuleClaim {
   supported: boolean;
+  /** Relative ownership confidence from 0 through 100. A unique highest
+   * supported claim wins; equal top claims are deliberately ambiguous. */
   confidence: number;
   reason?: string;
 }

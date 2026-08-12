@@ -82,7 +82,11 @@ firefox-lldb --url http://localhost:8080/index.html \
 `ID=TEXT` means that component owns module URLs containing `TEXT`; use one
 `ID=*` route as an optional fallback. Every Wasm module must match exactly one
 route. This prototype currently instantiates LLDB for every route and requires
-`--url` for automatic multi-component attach.
+`--url` for automatic multi-component attach. The URL match only constrains
+which of these otherwise identical LLDB definitions may claim the module; its
+real asynchronous `probeModule()` still has to accept it. Future Dart/.NET/etc.
+components can instead be selected directly by unique artifact-driven probe
+confidence, without URL routes.
 
 At the `(sdb)` prompt, qualify ambiguous commands with the component ID:
 

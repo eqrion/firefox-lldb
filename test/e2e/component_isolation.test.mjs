@@ -7,6 +7,7 @@ import test from "node:test";
 import { parseCliArgs, startPlatformServer } from "../../src/core/platform-session.ts";
 import { freePort } from "../../src/platform/gdb-server-spawner.ts";
 import { IsolatedLldbComponentRuntime } from "../../src/source-debugger/lldb-isolate.ts";
+import { createProbeModuleOwnerResolver } from "../../src/source-debugger/ownership.ts";
 import { SourceDebuggerSession } from "../../src/source-debugger/session.ts";
 
 test("an isolated LLDB imports its platform RSP connection from the host", async () => {
@@ -15,6 +16,11 @@ test("an isolated LLDB imports its platform RSP connection from the host", async
     parseCliArgs(["--connect", "--port", "0", "--rdp-port", String(await freePort())])
   );
   try {
+    const resolveOwner = createProbeModuleOwnerResolver([runtime]);
+    assert.equal(
+      await resolveOwner({ id: "fixture", url: "https://example.test/fixture.wasm" }),
+      "rsp-import"
+    );
     await runtime.connectPlatform(handle.port);
     const status = await runtime.command("platform status");
     assert.ok(status.status < 6, status.error || status.output);
@@ -32,6 +38,11 @@ test("an exited LLDB isolate is quarantined without losing its sibling", async (
     components: [runtime.component, sibling.component],
   });
   try {
+    const resolveOwner = createProbeModuleOwnerResolver([runtime, sibling]);
+    await assert.rejects(
+      resolveOwner({ id: "fixture", url: "https://example.test/fixture.wasm" }),
+      /ambiguous SourceDebuggerComponent claims.*isolated-lldb.*surviving-lldb/
+    );
     assert.deepEqual(
       (await session.components()).map(({ id }) => id),
       ["isolated-lldb", "surviving-lldb"]

@@ -20,7 +20,11 @@ import type { RdpWasmSession } from "../rdp/session.js";
 import { debugEnvEnabled, sourceDebuggerTraceEnabled } from "../config.js";
 import { IsolatedLldbComponentRuntime } from "../source-debugger/lldb-isolate.js";
 import { SourceDebuggerSession } from "../source-debugger/session.js";
-import { componentForModuleUrl, parseComponentRoutes } from "../source-debugger/config.js";
+import {
+  componentForModuleUrl,
+  createRoutedModuleOwnerResolver,
+  parseComponentRoutes,
+} from "../source-debugger/config.js";
 
 async function main(): Promise<void> {
   const args = parseCliArgs(process.argv.slice(2));
@@ -56,7 +60,7 @@ async function main(): Promise<void> {
   const sourceDebuggerSession = new SourceDebuggerSession({
     components: runtimes.map(({ component }) => component),
     getRdpSession: () => session,
-    selectModuleOwner: (module) => componentForModuleUrl(routes, module.url).id,
+    resolveModuleOwner: createRoutedModuleOwnerResolver(routes, runtimes),
     logger: sourceLogger,
   });
 
