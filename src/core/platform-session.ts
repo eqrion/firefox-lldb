@@ -56,6 +56,9 @@ Options:
                       profile is already running elsewhere.
   --headless          Run Firefox headlessly.
   --fire <js>         Evaluate JS after the first breakpoint arms (test use).
+  --component <ID=TEXT>  Load an isolated source debugger for Wasm module URLs
+                      containing TEXT. Repeat to configure multiple components
+                      (embedded firefox-lldb only; currently LLDB-backed).
   -v, --verbose       Log debug output (may include page/protocol data).
   -h, --help          Show this message.
 
@@ -77,6 +80,7 @@ export interface Args {
   channel: FirefoxChannel;
   defaultProfile: boolean;
   fire?: string;
+  components: string[];
   verbose: boolean;
 }
 
@@ -99,6 +103,7 @@ export function parseCliArgs(argv: string[]): Args {
         nightly: { type: "boolean" },
         "default-profile": { type: "boolean" },
         fire: { type: "string" },
+        component: { type: "string", multiple: true },
         verbose: { type: "boolean", short: "v" },
         help: { type: "boolean", short: "h" },
       },
@@ -158,6 +163,7 @@ export function parseCliArgs(argv: string[]): Args {
     channel,
     defaultProfile: !!values["default-profile"],
     fire: values.fire,
+    components: values.component ?? [],
     verbose: !!values.verbose,
   };
 }
@@ -219,7 +225,7 @@ export interface StartOptions {
   /** Optional physical run-control gate for a multi-component debugger. */
   runControl?: RdpDebuggeeRunControl;
   /** Restrict the modules projected through this debugger endpoint. */
-  moduleFilter?: (url: string) => boolean;
+  moduleFilter?: (url: string, kind: "wasm" | "javascript") => boolean;
   /** Reuse one already-paused physical debuggee connection for another
    * debugger component. The platform server borrows rather than closes it. */
   sharedRdpSession?: RdpWasmSession;

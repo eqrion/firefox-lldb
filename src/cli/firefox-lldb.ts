@@ -21,30 +21,56 @@ import type { RdpWasmSession } from "../rdp/session.js";
 import { debugEnvEnabled } from "../config.js";
 import { EmbeddedLldbComponentRuntime } from "../source-debugger/lldb-runtime.js";
 import { SourceDebuggerSession } from "../source-debugger/session.js";
+import { componentForModuleUrl, parseComponentRoutes } from "../source-debugger/config.js";
 
 async function main(): Promise<void> {
   const args = parseCliArgs(process.argv.slice(2));
   const verbose = args.verbose || debugEnvEnabled();
   const logger = quietLogger(verbose);
+  const routes = parseComponentRoutes(args.components);
+  const routedComponents = args.components.length > 0;
+  if (routes.length > 1 && !args.url) {
+    throw new Error("multiple --component routes currently require --url for automatic attach");
+  }
 
-  const runtime = await EmbeddedLldbComponentRuntime.create({
-    logger,
-    fileProvider: (path) => readFile(path).catch(() => null),
-  });
+  const runtimes: EmbeddedLldbComponentRuntime[] = [];
+  try {
+    for (const route of routes) {
+      runtimes.push(
+        await EmbeddedLldbComponentRuntime.create({
+          id: route.id,
+          name: routes.length === 1 && route.id === "lldb" ? "LLDB" : `LLDB (${route.id})`,
+          logger,
+          fileProvider: (path) => readFile(path).catch(() => null),
+          observerResumesTarget: routes.length === 1,
+          exclusiveModules: routedComponents,
+        })
+      );
+    }
+  } catch (error) {
+    await Promise.allSettled(runtimes.map((runtime) => runtime.close()));
+    throw error;
+  }
   let session: RdpWasmSession | undefined;
   const sourceDebuggerSession = new SourceDebuggerSession({
-    components: [runtime.component],
+    components: runtimes.map(({ component }) => component),
     getRdpSession: () => session,
+    selectModuleOwner: (module) => componentForModuleUrl(routes, module.url).id,
   });
 
-  let handle: Awaited<ReturnType<typeof startPlatformServer>> | undefined;
+  const handles: Awaited<ReturnType<typeof startPlatformServer>>[] = [];
   let exiting = false;
   const cleanup = async (code = 0) => {
     if (exiting) return;
     exiting = true;
-    for (const work of [sourceDebuggerSession.close(), handle?.shutdown(), runtime.close()]) {
+    const work = [
+      () => sourceDebuggerSession.close(),
+      ...[...handles].reverse().map((handle) => () => handle.shutdown()),
+      ...runtimes.map((runtime) => () => runtime.close()),
+    ];
+    for (const run of work) {
       try {
-        await work;
+        await run();
       } catch (err) {
         logger.error(`[cleanup] ${err instanceof Error ? err.message : String(err)}`);
         code = code || 1;
@@ -70,7 +96,7 @@ async function main(): Promise<void> {
     session: sourceDebuggerSession,
     onExit: () => void cleanup(0),
     onTargetResume: () => {
-      if (handle?.firefoxPid !== undefined) focusFirefoxWindow(handle.firefoxPid);
+      if (handles[0]?.firefoxPid !== undefined) focusFirefoxWindow(handles[0].firefoxPid);
     },
     onTargetInterrupt: () => triggerInterrupt?.(),
   });
@@ -79,9 +105,17 @@ async function main(): Promise<void> {
   // platform server returns the channel ID as the connection "port" and the
   // wasm LLDB connects to inprocess://<id> (PlatformWasmRemoteGDBServer::MakeUrl).
   try {
-    handle = await startPlatformServer(args, {
-      wrapConnectPort: runtime.bridgeTcp,
-      runControl: runtime.runControl,
+    const primary = runtimes[0];
+    const primaryRoute = routes[0];
+    const handle = await startPlatformServer(args, {
+      wrapConnectPort: primary.bridgeTcp,
+      runControl: primary.runControl,
+      ...(routedComponents
+        ? {
+            moduleFilter: (url: string, kind: "wasm" | "javascript") =>
+              kind === "wasm" && componentForModuleUrl(routes, url).id === primaryRoute.id,
+          }
+        : {}),
       logger,
       onTab: (tab, pid) => repl.print(`tab available: ${tab.url}\n  attach --pid ${pid}`),
       onSession: (s, interrupt) => {
@@ -106,12 +140,15 @@ async function main(): Promise<void> {
           repl.print("the attached tab was closed; detaching.");
           session = undefined;
           triggerInterrupt = undefined;
-          void runtime
-            .command("process detach")
-            .catch((err) => logger.debug(`[cleanup] LLDB detach failed: ${String(err)}`));
+          for (const runtime of runtimes) {
+            void runtime
+              .command("process detach")
+              .catch((err) => logger.debug(`[cleanup] LLDB detach failed: ${String(err)}`));
+          }
         });
       },
     });
+    handles.push(handle);
 
     // Quit when a launched Firefox goes away (#24).
     void handle.firefoxExited?.then(() => {
@@ -122,19 +159,56 @@ async function main(): Promise<void> {
     // Bridge the platform connection itself, then drive the platform setup the
     // native wrapper used to pass via `-o`. These produce noisy connect chatter,
     // so we run them quietly and only surface the attach / tab list.
-    await runtime.connectPlatform(handle.port);
-    await runtime.command("command alias attach process attach --plugin wasm");
+    await primary.connectPlatform(handle.port);
+    await primary.command("command alias attach process attach --plugin wasm");
 
     let intro =
       "firefox-lldb source debugger — `attach --pid N` to attach, `help` for generic commands.";
     if (args.url) {
       repl.print(intro + "\nattaching...");
-      intro = await runtime.attach(1, {
+      intro = await primary.attach(1, {
         onRetry: (attempt) =>
           repl.print(`automatic attach attempt ${attempt} was interrupted; retrying...`),
       });
+
+      if (runtimes.length > 1 && !session) {
+        throw new Error("primary component attached without publishing its RDP session");
+      }
+      for (let index = 1; index < runtimes.length; index++) {
+        const runtime = runtimes[index];
+        const route = routes[index];
+        repl.print(`attaching ${route.id}...`);
+        const secondaryHandle = await startPlatformServer(
+          {
+            ...args,
+            connect: true,
+            port: 0,
+            url: undefined,
+            fire: undefined,
+          },
+          {
+            wrapConnectPort: runtime.bridgeTcp,
+            sharedRdpSession: session,
+            runControl: runtime.runControl,
+            moduleFilter: (url, kind) =>
+              kind === "wasm" && componentForModuleUrl(routes, url).id === route.id,
+            logger,
+          }
+        );
+        handles.push(secondaryHandle);
+        await runtime.connectPlatform(secondaryHandle.port);
+        await runtime.command("command alias attach process attach --plugin wasm");
+        // Let the connect-mode tab watcher populate its stable PID map before
+        // the attach handshake asks it to launch the per-tab RSP server.
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        await runtime.command("platform process list");
+        await runtime.attach(1, {
+          onRetry: (attempt) =>
+            repl.print(`${route.id} attach attempt ${attempt} was interrupted; retrying...`),
+        });
+      }
     } else {
-      const res = await runtime.command("platform process list");
+      const res = await primary.command("platform process list");
       intro += "\n" + res.output.trimEnd();
     }
     repl.start(intro);

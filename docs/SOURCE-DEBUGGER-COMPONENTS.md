@@ -110,11 +110,12 @@ adapter.
 5. **Synchronize stops and continues (handoff prototype complete).** Arm every observer,
    let one component hold the physical run-control lease, fan out stops, and
    synchronize debugger-internal resume sequences before committing the stop.
-6. **Compose the real mixed stack in the TUI (REPL prototype complete).** Merge
+6. **Compose the real mixed stack in the TUI (CLI prototype complete).** Merge
    projections by physical frame position and route scopes/evaluation back
-   through the selected logical frame's component. The e2e proves the real
-   generic REPL over two components; making the production CLI discover and
-   instantiate multiple component implementations remains.
+   through the selected logical frame's component. The production CLI accepts
+   repeatable `--component ID=URL_SUBSTRING` routes, instantiates an isolated
+   wasm LLDB for each, and exposes them through the real generic REPL. Replacing
+   explicit routes with artifact-driven component discovery remains.
 7. **Cross-component stepping (step-out prototype complete).** The session can
    step out from B through JavaScript while preserving A's foreign caller.
    Implement step-in ownership handoff, step-over suppression of foreign

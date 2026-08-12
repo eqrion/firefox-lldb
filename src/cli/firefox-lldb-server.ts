@@ -13,6 +13,9 @@ import { exitWhenOrphaned } from "../config.js";
 
 async function main(): Promise<void> {
   const args = parseCliArgs(process.argv.slice(2));
+  if (args.components.length) {
+    throw new Error("--component is only supported by the embedded firefox-lldb CLI");
+  }
   const handle = await startPlatformServer(args);
   // Stdout is the control channel for the firefox-lldb wrapper; stderr carries logs.
   process.stdout.write(`platform server ready on connect://localhost:${handle.port}\n`);

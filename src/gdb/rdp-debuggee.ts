@@ -143,7 +143,7 @@ export class RdpDebuggee {
   #session: RdpWasmSession;
   #logger: Logger;
   #runControl: RdpDebuggeeRunControl | undefined;
-  #acceptModule: (url: string) => boolean;
+  #acceptModule: (url: string, kind: "wasm" | "javascript") => boolean;
   #nextId = 1;
 
   // Stable module identity per source URL.
@@ -249,7 +249,7 @@ export class RdpDebuggee {
       onFirstContinue?: () => void;
       logger?: Logger;
       runControl?: RdpDebuggeeRunControl;
-      moduleFilter?: (url: string) => boolean;
+      moduleFilter?: (url: string, kind: "wasm" | "javascript") => boolean;
     }
   ) {
     this.#session = session;
@@ -352,7 +352,7 @@ export class RdpDebuggee {
   async #allModules(): Promise<Ref[]> {
     // wasmSources() also keeps the session's actor->url mapping current.
     const wasmSources = await this.#session.wasmSources();
-    for (const s of wasmSources.filter((source) => this.#acceptModule(source.url))) {
+    for (const s of wasmSources.filter((source) => this.#acceptModule(source.url, "wasm"))) {
       this.#moduleRef(s.url);
     }
     // Return refs for all registered modules — wasm plus synthetic JS modules
@@ -532,7 +532,7 @@ export class RdpDebuggee {
   // --- instances -----------------------------------------------------------
   async #allInstances(): Promise<Ref[]> {
     const sources = await this.#session.wasmSources();
-    const source = sources.find(({ url }) => this.#acceptModule(url));
+    const source = sources.find(({ url }) => this.#acceptModule(url, "wasm"));
     return source ? [this.#instanceRef(source.url)] : [];
   }
 
@@ -612,7 +612,7 @@ export class RdpDebuggee {
         await this.#session.jsSources();
       }
       const url = this.#session.urlForSourceActor(actor) ?? actor;
-      if (!this.#acceptModule(url)) {
+      if (!this.#acceptModule(url, frame.type === "call" ? "javascript" : "wasm")) {
         this.#ensureOpaqueForeignFrame(url, actor);
         frames.push(frame);
         continue;
@@ -687,7 +687,7 @@ export class RdpDebuggee {
   // current JS sources before the component performs its initial module scan.
   async #preloadJsSources(): Promise<void> {
     for (const source of (await this.#session.jsSources()).filter(({ url }) =>
-      this.#acceptModule(url)
+      this.#acceptModule(url, "javascript")
     )) {
       await this.#ensureSynthetic(source.url, source.actor);
     }

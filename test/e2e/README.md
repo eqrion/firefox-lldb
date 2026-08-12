@@ -86,6 +86,7 @@ Requires Firefox installed in a standard location (see `findFirefoxBinary` in
 - `mcp.test.mjs` — real MCP launch/command flow, including automatic-attach recovery across an initial page reload and the bounded default wait for a command that does not return a prompt.
 - `source_debugger_session.test.mjs` — language-generic `(sdb)` commands routed through one real LLDB SourceDebuggerComponent.
 - `two_lldb_components.test.mjs` — the real generic `(sdb)` REPL drives two isolated LLDB workers over one shared physical RDP session: component-qualified breakpoints and driver handoff, a composed B/JavaScript/A stack, locals through both owners, and step-out from B while preserving A's suspended caller.
+- `multi_component_cli.test.mjs` — spawns the production `firefox-lldb` executable in a PTY with two `--component` routes and proves the same mixed-stack workflow through the user-facing CLI bootstrap.
 - `large.test.mjs` — large SQLite module symbols plus snapped source/function breakpoint attribution and argument availability.
 
 ### Navigation (survival, re-sync, and ergonomics across a top-level target swap)

@@ -37,6 +37,9 @@ export interface LaunchOptions {
   /** JS to evaluate in the page on the first continue (auto-trigger a workload
    * without a separate page driver). Maps to the CLI's --fire. */
   fire?: string;
+  /** Experimental SourceDebuggerComponent routes forwarded as repeatable
+   * `--component ID=URL_SUBSTRING` arguments. */
+  components?: string[];
   /** Time to wait for the first prompt after attach (ms). */
   startupTimeoutMs?: number;
 }
@@ -90,6 +93,7 @@ export class PtyRepl {
       "--marionette-port",
       String(opts.marionettePort),
       ...(opts.fire ? ["--fire", opts.fire] : []),
+      ...(opts.components ?? []).flatMap((component) => ["--component", component]),
       "--url",
       opts.url,
     ];

@@ -67,6 +67,34 @@ then attach:
 
 (`attach` is a shortcut for `process attach --plugin wasm`)
 
+### Experimental source debugger components
+
+The embedded CLI can construct multiple isolated `SourceDebuggerComponents`
+over one Firefox tab. Each repeated `--component` assigns matching Wasm module
+URLs to a separate wasm LLDB runtime:
+
+```sh
+firefox-lldb --url http://localhost:8080/index.html \
+  --component lldb-a=component=a \
+  --component lldb-b=component=b
+```
+
+`ID=TEXT` means that component owns module URLs containing `TEXT`; use one
+`ID=*` route as an optional fallback. Every Wasm module must match exactly one
+route. This prototype currently instantiates LLDB for every route and requires
+`--url` for automatic multi-component attach.
+
+At the `(sdb)` prompt, qualify ambiguous commands with the component ID:
+
+```text
+(sdb) break lldb-b::compute_factorial
+(sdb) continue lldb-b
+(sdb) lldb lldb-b::thread list
+```
+
+Frame-relative commands such as `locals`, `p`, `step`, `next`, and `finish`
+route through the selected frame's component automatically.
+
 ### Preparing your wasm
 
 Your module needs debug info for source-level debugging to work:
