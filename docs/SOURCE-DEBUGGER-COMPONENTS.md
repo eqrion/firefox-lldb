@@ -67,18 +67,20 @@ and LLDB-B; both resolve independent breakpoint 1, observers arm before the
 driver releases the shared run lease, stops fan out to both LLDBs, and each
 source backtrace excludes opaque foreign activations.
 
-The proof performs three consecutive continues with driver handoffs from A to
-B and back to A. This is significant because the previous driver internally
-single-steps off its old breakpoint before it issues its semantic observer
-continue. The shared RDP host lets it arm those local waits without physically
-resuming Firefox; the new driver alone holds the run lease and its breakpoint
-stop brings both LLDBs to a consistent state. The stopped frames and locals
-(`n = 10`, then `8`, then `10`) are read through the generic session API.
+The proof first stops in A, then hands the run-control driver to B. During the
+second run, A calls a JavaScript import which enters B, leaving a real
+Wasm-B/JavaScript/Wasm-A activation chain stopped at B's breakpoint. The
+generic session composes B above A by physical frame position and routes
+`n = 6` to LLDB-B and the non-top `n = 7` to LLDB-A. The previous driver also
+performs LLDB's internal step-off without stealing the shared physical run
+lease.
 
-LLDB scopes use the structured public variable API. Expression evaluation
-retains a narrow command-output adapter because the current SB wrapper cannot
-materialize wasm locals which the session command interpreter evaluates
-correctly.
+Top-frame LLDB scopes use the structured public variable API. The current SB
+wrapper enumerates non-top wasm variables but cannot materialize their
+`DW_OP_WASM_location`; selecting that frame through LLDB's public command
+interpreter works. Non-top scopes therefore retain a narrow presentation
+adapter until lldb-wasm exposes the corrected structured path. Expression
+evaluation has the same temporary interpreter adapter.
 
 ## Staged path to two isolated LLDBs
 
@@ -98,9 +100,10 @@ correctly.
 5. **Synchronize stops and continues (handoff prototype complete).** Arm every observer,
    let one component hold the physical run-control lease, fan out stops, and
    synchronize debugger-internal resume sequences before committing the stop.
-6. **Compose the real mixed stack in the TUI.** Merge projections by physical
-   frame position and route scopes/evaluation back through the selected
-   logical frame's component.
+6. **Compose the real mixed stack in the TUI (API prototype complete).** Merge
+   projections by physical frame position and route scopes/evaluation back
+   through the selected logical frame's component. The e2e proves the session
+   API; exposing two configured components in the interactive CLI remains.
 7. **Cross-component stepping.** Implement step-in ownership handoff,
    step-over suppression of foreign activations, step-out to a foreign caller,
    and foreign-breakpoint preemption of an active thread plan.
@@ -116,11 +119,20 @@ prototype. Stop-scoped IDs built from `(stop, thread, physical frame position,
 inline position, component)` are sufficient for the TUI, frame selection,
 variables, and the initial cross-component control experiments.
 
-The next milestone is a genuinely interleaved stack: make module A call module
-B (with JavaScript frames between them), verify physical-frame ordering across
-both projections, and drive step-in/step-out ownership handoff from the generic
-REPL. The current two-module fixture invokes A and B separately, which proves
-consecutive run-control handoff but not cross-component stack composition.
+The next milestone is cross-component stepping from the interleaved stop:
+step-out from B through JavaScript to A, then define the step-over behavior
+when a foreign activation or breakpoint appears. An initial step-out experiment
+showed the missing protocol state: B's LLDB thread plan emits intermediate
+physical instruction stops, while A's observer `continue` completes at the
+first one. The current first-stop barrier then synchronizes B and aborts its
+still-active plan. Components therefore need to report stop candidates, the
+session must let the driver accept or reject them, and completed observers must
+be re-armed until a candidate is committed globally.
+
+Repeated continuation from an LLDB-owned breakpoint also needs a
+debugger-native readiness signal: in some runs LLDB times out internally before
+reaching the debuggee resume callback, which the session's existing arm barrier
+cannot observe or repair.
 
 ## Proof target
 

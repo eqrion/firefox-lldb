@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Two Wasm Components</title>
+</head>
+<body>
+  <script src="math.js"></script>
+  <script>
+    let factorialA;
+    let factorialB;
+    let interleavedA;
+
+    Promise.all([
+      MathModule({ locateFile: path => `${path}?component=a` }),
+      MathModule({ locateFile: path => `${path}?component=b` }),
+    ]).then(([a, b]) => {
+      factorialA = a.cwrap('compute_factorial', 'number', ['number']);
+      factorialB = b.cwrap('compute_factorial', 'number', ['number']);
+      globalThis.factorialBForDebugger = factorialB;
+      interleavedA = a.cwrap('call_other_factorial', 'number', ['number']);
+    });
+
+    function runA() {
+      return factorialA(10);
+    }
+
+    function runInterleaved() {
+      return interleavedA(7);
+    }
+  </script>
+</body>
+</html>

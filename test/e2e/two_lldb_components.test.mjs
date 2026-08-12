@@ -47,9 +47,9 @@ async function deadline(promise, ms, message) {
   }
 }
 
-test("two isolated LLDB components own separate modules in one Firefox tab", async () => {
-  const staticServer = await startStaticServer("test/fixtures/simple");
-  const url = `http://127.0.0.1:${staticServer.port}/two-modules.html`;
+test("two isolated LLDB components compose an interleaved stack over one Firefox tab", async () => {
+  const staticServer = await startStaticServer("test/fixtures/two-components");
+  const url = `http://127.0.0.1:${staticServer.port}/index.html`;
   const rdpPort = await freePort();
   const primary = await EmbeddedLldbComponentRuntime.create({
     id: "lldb-a",
@@ -178,11 +178,12 @@ test("two isolated LLDB components own separate modules in one Firefox tab", asy
 
     // Hand the next run to B while A is stopped on its own breakpoint. LLDB-A
     // internally single-steps off that site before issuing its observer
-    // continue; only B owns the shared physical resume lease.
+    // continue; only B owns the shared physical resume lease. The next call
+    // leaves A live beneath a JavaScript import which enters B.
     // Schedule rather than invoke synchronously: RDP console evaluation can
     // run page code while Firefox is paused, before the next all-stop listener
     // and physical resume have been armed.
-    await primaryRdpSession.evaluate("setTimeout(() => runB(), 100)");
+    await primaryRdpSession.evaluate("setTimeout(() => runInterleaved(), 100)");
     const secondStop = await deadline(
       session.continue("lldb-b"),
       30_000,
@@ -191,35 +192,27 @@ test("two isolated LLDB components own separate modules in one Firefox tab", asy
     assert.equal(secondStop.reason.kind, "breakpoint");
     assert.match(secondStop.output ?? "", /compute_factorial/);
 
-    const secondFrames = await session.frames();
-    assert.equal(secondFrames.filter(({ componentId }) => componentId === "lldb-a").length, 0);
-    assert.equal(secondFrames.filter(({ componentId }) => componentId === "lldb-b").length, 1);
-    assert.match(secondFrames[0].functionName, /compute_factorial/);
-    const locals = await session.scopes(secondFrames[0].id);
-    assert.equal(
-      locals.flatMap(({ values }) => values).find(({ name }) => name === "n")?.value.display,
-      "8"
+    // Each LLDB sees the same physical stack but only exports source frames
+    // for its owned module; SourceDebuggerSession merges them by physical
+    // frame position and routes variables back to the appropriate LLDB.
+    const mixedFrames = await session.frames();
+    assert.deepEqual(
+      mixedFrames.map(({ componentId }) => componentId),
+      ["lldb-b", "lldb-a"]
     );
+    assert.match(mixedFrames[0].functionName, /compute_factorial/);
+    assert.match(mixedFrames[1].functionName, /call_other_factorial/);
+    assert.ok(mixedFrames[0].physicalFrameIndex < mixedFrames[1].physicalFrameIndex);
 
-    // Repeat the handoff in the other direction. This makes both LLDBs take
-    // turns as the stopped observer which must retire its previous breakpoint
-    // plan without stealing the shared physical resume lease.
-    await primaryRdpSession.evaluate("setTimeout(() => runA(), 100)");
-    const thirdStop = await deadline(
-      session.continue("lldb-a"),
-      30_000,
-      "return two-component continue timed out"
-    );
-    assert.equal(thirdStop.reason.kind, "breakpoint");
-    assert.match(thirdStop.output ?? "", /compute_factorial/);
-
-    const thirdFrames = await session.frames();
-    assert.equal(thirdFrames.filter(({ componentId }) => componentId === "lldb-a").length, 1);
-    assert.equal(thirdFrames.filter(({ componentId }) => componentId === "lldb-b").length, 0);
-    const thirdLocals = await session.scopes(thirdFrames[0].id);
+    const bLocals = await session.scopes(mixedFrames[0].id);
+    const aLocals = await session.scopes(mixedFrames[1].id);
     assert.equal(
-      thirdLocals.flatMap(({ values }) => values).find(({ name }) => name === "n")?.value.display,
-      "10"
+      bLocals.flatMap(({ values }) => values).find(({ name }) => name === "n")?.value.display,
+      "6"
+    );
+    assert.equal(
+      aLocals.flatMap(({ values }) => values).find(({ name }) => name === "n")?.value.display,
+      "7"
     );
   } finally {
     await session?.close().catch(() => {});

@@ -197,20 +197,40 @@ export class LldbSourceDebuggerComponentInstance implements SourceDebuggerCompon
 
   async scopes(_stopId: StopId, frameId: string): Promise<SourceScope[]> {
     const index = parseFrameIndex(frameId);
+    if (index > 0) {
+      // Calling the current bulk SBValue wrapper first can poison evaluation of
+      // DW_OP_WASM_location in a non-top frame. Select/materialize through the
+      // interpreter before touching that wrapper.
+      const fallback = await this.#commandFrameVariables(index);
+      if (fallback.size) return [sourceScope([...fallback])];
+    }
+
     const variables = await this.#client.getVariables(index);
+    let fallback = new Map<string, { type: string; display: string }>();
+    if (variables.some(({ value }) => value === "")) {
+      // The current SB wrapper can enumerate non-top wasm variables while
+      // returning empty value text. LLDB's command interpreter selects and
+      // materializes the same frame correctly. Keep this narrow compatibility
+      // adapter until lldb-wasm exposes the fixed structured SBValue path.
+      fallback = await this.#commandFrameVariables(index);
+    }
     return [
       {
         name: "Locals",
         kind: "locals",
-        values: variables.map((variable) => ({
-          name: variable.name,
-          value: {
+        values: variables.map((variable) => {
+          const materialized = fallback.get(variable.name);
+          const display = materialized?.display ?? variable.value;
+          return {
             name: variable.name,
-            type: variable.type,
-            display: variable.value,
-            hasChildren: /^(?:\{|\[)/.test(variable.value),
-          },
-        })),
+            value: {
+              name: variable.name,
+              type: materialized?.type ?? variable.type,
+              display,
+              hasChildren: /^(?:\{|\[)/.test(display),
+            },
+          };
+        }),
       },
     ];
   }
@@ -316,6 +336,17 @@ export class LldbSourceDebuggerComponentInstance implements SourceDebuggerCompon
     return this.#client.sessionCommand(command);
   }
 
+  async #commandFrameVariables(
+    index: number
+  ): Promise<Map<string, { type: string; display: string }>> {
+    const selected = await this.command(`frame select ${index}`);
+    if (selected.status >= LLDB_FAILED_STATUS) return new Map();
+    const result = await this.command("frame variable");
+    return result.status < LLDB_FAILED_STATUS || result.output
+      ? parseFrameVariables(result.output)
+      : new Map();
+  }
+
   async dispose(): Promise<void> {
     this.#runs.clear();
     this.#breakpoints.clear();
@@ -363,6 +394,31 @@ function parseExpressionResult(output: string): SourceValue | null {
     type: match[1],
     display: match[2],
     hasChildren: /^(?:\{|\[)/.test(match[2]),
+  };
+}
+
+function parseFrameVariables(output: string): Map<string, { type: string; display: string }> {
+  const values = new Map<string, { type: string; display: string }>();
+  for (const line of output.split("\n")) {
+    const match = line.match(/^\s*\((.+)\)\s+([^\s=]+)\s*=\s*(.*)$/);
+    if (match) values.set(match[2], { type: match[1], display: match[3] });
+  }
+  return values;
+}
+
+function sourceScope(values: Array<[string, { type: string; display: string }]>): SourceScope {
+  return {
+    name: "Locals",
+    kind: "locals",
+    values: values.map(([name, { type, display }]) => ({
+      name,
+      value: {
+        name,
+        type,
+        display,
+        hasChildren: /^(?:\{|\[)/.test(display),
+      },
+    })),
   };
 }
 
