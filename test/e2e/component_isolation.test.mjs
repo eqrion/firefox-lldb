@@ -5,23 +5,34 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { IsolatedLldbComponentRuntime } from "../../src/source-debugger/lldb-isolate.ts";
+import { SourceDebuggerSession } from "../../src/source-debugger/session.ts";
 
-test("an LLDB SourceDebuggerComponent is contained by its outer worker", async () => {
+test("an exited LLDB isolate is quarantined without losing its sibling", async () => {
   const runtime = await IsolatedLldbComponentRuntime.create({ id: "isolated-lldb" });
-  assert.deepEqual(await runtime.component.describe(), {
-    protocolVersion: "0.1",
-    id: "isolated-lldb",
-    name: "LLDB",
-    capabilities: {
-      breakpoints: true,
-      conditionalBreakpoints: true,
-      evaluate: true,
-      stepInto: true,
-      stepOver: true,
-      stepOut: true,
-    },
+  const sibling = await IsolatedLldbComponentRuntime.create({ id: "surviving-lldb" });
+  const session = new SourceDebuggerSession({
+    components: [runtime.component, sibling.component],
   });
+  try {
+    assert.deepEqual(
+      (await session.components()).map(({ id }) => id),
+      ["isolated-lldb", "surviving-lldb"]
+    );
 
-  await runtime.terminate();
-  await assert.rejects(runtime.component.describe(), /SourceDebuggerComponent RPC.*closed/);
+    await runtime.terminate();
+    await assert.rejects(runtime.component.describe(), /SourceDebuggerComponent RPC.*closed/);
+
+    const statuses = await session.componentStatuses();
+    assert.equal(statuses[0].status, "quarantined");
+    assert.match(statuses[0].message, /SourceDebuggerComponent RPC.*closed/);
+    assert.equal(statuses[1].status, "ready");
+    assert.deepEqual(
+      (await session.components()).map(({ id }) => id),
+      ["surviving-lldb"]
+    );
+  } finally {
+    await session.close();
+    await runtime.close();
+    await sibling.close();
+  }
 });

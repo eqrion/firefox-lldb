@@ -32,6 +32,9 @@ const CLI = join(__dirname, "..", "cli", IS_TS ? "firefox-lldb.ts" : "firefox-ll
 export interface LaunchOptions {
   url: string;
   headless?: boolean;
+  /** Platform RSP listener. Tests which run multiple CLI processes in parallel
+   * should allocate this explicitly instead of sharing the CLI default. */
+  platformPort?: number;
   rdpPort: number;
   marionettePort: number;
   /** JS to evaluate in the page on the first continue (auto-trigger a workload
@@ -88,6 +91,7 @@ export class PtyRepl {
       CLI,
       "--launch",
       ...(opts.headless ? ["--headless"] : []),
+      ...(opts.platformPort !== undefined ? ["--port", String(opts.platformPort)] : []),
       "--rdp-port",
       String(opts.rdpPort),
       "--marionette-port",

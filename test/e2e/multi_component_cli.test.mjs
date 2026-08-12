@@ -20,9 +20,14 @@ test("the CLI coordinates three routed SourceDebuggerComponents", async () => {
     const rdpPort = await freePort();
     let marionettePort = await freePort();
     while (marionettePort === rdpPort) marionettePort = await freePort();
+    let platformPort = await freePort();
+    while (platformPort === rdpPort || platformPort === marionettePort) {
+      platformPort = await freePort();
+    }
     repl = await PtyRepl.launch({
       url,
       headless: true,
+      platformPort,
       rdpPort,
       marionettePort,
       fire: "runA()",

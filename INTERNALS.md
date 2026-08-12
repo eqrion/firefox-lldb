@@ -78,7 +78,14 @@ inside a per-component outer worker (`lldb-isolate-worker.ts`). The host-side
 proxy retains Firefox's physical resume closures; the worker returns only a
 refined resume action and permission to release one. Worker exit closes the
 component port, rejects pending calls, and drops unreleased closures so failure
-is biased toward leaving Firefox paused.
+is biased toward leaving Firefox paused. Bounded component calls have a
+30-second watchdog (run waits and debugger-native commands are intentionally
+unbounded); a timeout is terminal for that RPC connection and tears down its
+outer worker. `SourceDebuggerSession` quarantines a component on either timeout
+or peer exit, invalidates its logical frames and breakpoint routes, and omits it
+from later fan-out barriers. Surviving components remain available for stack
+inspection and subsequent runs, while `components` reports the failed route and
+its reason.
 
 ### Embedded wasm LLDB (`firefox-lldb`)
 

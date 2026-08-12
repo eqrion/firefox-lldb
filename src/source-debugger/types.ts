@@ -33,6 +33,19 @@ export interface SourceDebuggerComponentDescriptor {
   };
 }
 
+export type SessionComponentStatus =
+  | {
+      id: ComponentId;
+      status: "ready";
+      descriptor: SourceDebuggerComponentDescriptor;
+    }
+  | {
+      id: ComponentId;
+      status: "quarantined";
+      message: string;
+      descriptor?: SourceDebuggerComponentDescriptor;
+    };
+
 export interface ModuleDescriptor {
   id: ModuleId;
   url: string;

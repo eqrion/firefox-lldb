@@ -115,7 +115,21 @@ two-party handoff. Every generic call in that proof crosses the outer worker's
 the session no longer depends on direct in-realm calls to an LLDB adapter. If
 the worker exits, its component port closes and outstanding calls reject. An
 unreleased physical resume lease is dropped rather than executed, leaving
-Firefox paused while the failure propagates.
+Firefox paused while the failure propagates. Bounded component operations also
+have an isolation watchdog; timeout closes the RPC client and terminates the
+worker. Run waits and debugger-native commands remain unbounded because waiting
+for the debuggee is part of their contract.
+
+`SourceDebuggerSession` treats either transport failure as terminal for only
+that component. It quarantines the route, invalidates its stop-scoped frames and
+logical breakpoint IDs, excludes it from future inspection and run barriers,
+and reports the reason through the generic `components` command. Healthy
+siblings continue to provide state, stacks, breakpoint operations, and run
+control. If a failure happens during a run, the session interrupts/cancels the
+surviving debugger plans and advances the stop scope before returning the
+failure; a later command can inspect or continue with the remaining components.
+Modules keep their original owner rather than being silently reassigned to a
+debugger that may interpret their debug information incorrectly.
 
 LLDB scopes currently select and materialize frames through the public command
 interpreter. The bulk SB wrapper runs on a different wasm pthread, cannot
@@ -155,13 +169,14 @@ adapter.
    breakpoint encountered during A's active plan, and step out while preserving
    A's foreign caller. A passive third LLDB proves N-component preemption;
    repeat the sequence with multiple Firefox threads.
-8. **Worker RPC and failure containment (isolation prototype complete).** The
+8. **Worker RPC and failure containment (quarantine prototype complete).** The
    production CLI now puts each component adapter and runtime in an outer
    worker, behind a `MessagePort` with structured-cloned records, concurrent
-   calls, optional operations, remote errors, and opt-in deadlines. Abrupt
+   calls, optional operations, remote errors, and configurable deadlines. Abrupt
    worker exit rejects the remote component and fails closed on physical resume.
-   Define session recovery or quarantine when a deadline expires or a worker
-   exits.
+   Bounded-call timeouts terminate that isolate; the session quarantines its
+   routes and continues with healthy siblings. Automatic component restart and
+   breakpoint restoration remain future recovery work.
 9. **Activation-ID hardening.** Add stable physical activation identities to
    the debuggee/RSP/LLDB path for identical-PC recursion, non-top-frame
    step-out, tail calls, exception unwinding, and frame selection across stops.

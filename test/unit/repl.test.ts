@@ -44,6 +44,13 @@ function harness(client: FakeClient, session?: Partial<RdpWasmSession>, extra?: 
     command: (command: string) => client.sessionCommand(command),
     cancelActiveRun: () => client.pause(),
     components: async () => [{ id: "lldb", name: "LLDB", protocolVersion: "0.1" }],
+    componentStatuses: async () => [
+      {
+        id: "lldb",
+        status: "ready",
+        descriptor: { id: "lldb", name: "LLDB", protocolVersion: "0.1" },
+      },
+    ],
     modules: async () => [],
     threads: async () => [{ id: "1", stopped: true }],
     frames: async () => [],
@@ -126,6 +133,35 @@ test("command error text is surfaced", async () => {
   await h.start();
   const out = await h.type("bogus");
   assert.match(out, /no such command/);
+});
+
+test("components reports healthy and quarantined debugger isolates", async () => {
+  const h = harness(
+    okClient(() => ({ output: "", error: "", status: 0 })),
+    undefined,
+    {
+      sourceSession: {
+        componentStatuses: async () => [
+          {
+            id: "lldb-a",
+            status: "ready",
+            descriptor: { id: "lldb-a", name: "LLDB A", protocolVersion: "0.1" },
+          },
+          {
+            id: "lldb-b",
+            status: "quarantined",
+            descriptor: { id: "lldb-b", name: "LLDB B", protocolVersion: "0.1" },
+            message: "SourceDebuggerComponent RPC peer closed",
+          },
+        ],
+      },
+    }
+  );
+  await h.start();
+
+  const out = await h.type("components");
+  assert.match(out, /lldb-a\s+LLDB A\s+protocol 0\.1/);
+  assert.match(out, /lldb-b\s+LLDB B\s+quarantined: .*peer closed/);
 });
 
 test("component-qualified commands route ambiguous operations", async () => {

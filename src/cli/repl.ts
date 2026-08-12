@@ -243,9 +243,17 @@ export function runRepl(deps: ReplDeps): Repl {
     const arg = cmd.slice(verb.length).trim();
     switch (verb) {
       case "components": {
-        const components = await deps.session.components();
+        const components = await deps.session.componentStatuses();
         for (const component of components) {
-          write(`${component.id}\t${component.name}\tprotocol ${component.protocolVersion}`);
+          if (component.status === "ready") {
+            write(
+              `${component.id}\t${component.descriptor.name}\tprotocol ${component.descriptor.protocolVersion}`
+            );
+          } else {
+            write(
+              `${component.id}\t${component.descriptor?.name ?? "unavailable"}\tquarantined: ${component.message}`
+            );
+          }
         }
         return true;
       }

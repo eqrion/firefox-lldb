@@ -28,6 +28,9 @@ export interface IsolatedLldbComponentRuntimeOptions {
   observerResumesTarget?: boolean;
   exclusiveModules?: boolean;
   verbose?: boolean;
+  /** Deadline for bounded component RPC methods. Run waits and native commands
+   * remain unbounded by contract. Defaults to 30 seconds. */
+  requestTimeoutMs?: number;
 }
 
 class IsolatedLldbRunControl implements RdpDebuggeeRunControl {
@@ -131,7 +134,13 @@ export class IsolatedLldbComponentRuntime {
     );
     try {
       await channel.ready;
-      const component = await connectSourceDebuggerComponent(componentChannel.port1);
+      const component = await connectSourceDebuggerComponent(componentChannel.port1, {
+        requestTimeoutMs: options.requestTimeoutMs ?? 30_000,
+        onTransportFailure: (error) => {
+          logger.error(`[${options.id ?? "lldb"}] ${error.message}; terminating isolate`);
+          void channel.terminate();
+        },
+      });
       return new IsolatedLldbComponentRuntime(component, channel);
     } catch (error) {
       componentChannel.port1.close();

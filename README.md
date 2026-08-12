@@ -100,6 +100,8 @@ suppresses foreign activations, but a real breakpoint owned by the foreign
 component preempts the step and exposes the composed cross-component stack.
 Each routed component adapter runs in its own outer worker and communicates
 with the session through structured-cloned `MessagePort` calls.
+An exited or unresponsive component is quarantined without discarding healthy
+siblings; the `components` command shows its failure state.
 
 ### Preparing your wasm
 

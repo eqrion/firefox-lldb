@@ -3,6 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 import { test } from "node:test";
+import { MessageChannel } from "node:worker_threads";
 import assert from "node:assert/strict";
 import { SourceDebuggerSession } from "../../src/source-debugger/session.js";
 import type { SourceDebuggerComponentInstance } from "../../src/source-debugger/component.js";
@@ -13,6 +14,10 @@ import type {
   SourceBreakpoint,
   SourceBreakpointRequest,
 } from "../../src/source-debugger/types.js";
+import {
+  connectSourceDebuggerComponent,
+  serveSourceDebuggerComponent,
+} from "../../src/source-debugger/rpc.js";
 
 function fakeComponent(
   id = "fake",
@@ -139,6 +144,100 @@ test("component IDs must be unique", () => {
     () => new SourceDebuggerSession({ components: [fakeComponent(), fakeComponent()] }),
     /must be unique/
   );
+});
+
+test("a failed component is quarantined while healthy projections remain available", async () => {
+  const { port1, port2 } = new MessageChannel();
+  const endpoint = serveSourceDebuggerComponent(
+    port1,
+    fakeComponent("failed", { physicalFrameIndex: 0 })
+  );
+  const failed = await connectSourceDebuggerComponent(port2, { requestTimeoutMs: 100 });
+  const healthy = fakeComponent("healthy", { physicalFrameIndex: 1 });
+  const session = new SourceDebuggerSession({ components: [failed, healthy] });
+
+  assert.deepEqual(
+    (await session.components()).map(({ id }) => id),
+    ["failed", "healthy"]
+  );
+  const breakpoint = await session.setBreakpoint({
+    componentId: "failed",
+    target: { kind: "function", name: "compute" },
+  });
+  assert.deepEqual(
+    (await session.frames()).map(({ componentId }) => componentId),
+    ["failed", "healthy"]
+  );
+
+  endpoint.close();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(
+    (await session.frames()).map(({ componentId }) => componentId),
+    ["healthy"]
+  );
+  const statuses = await session.componentStatuses();
+  assert.equal(statuses[0].status, "quarantined");
+  assert.match(statuses[0].status === "quarantined" ? statuses[0].message : "", /peer closed/);
+  assert.equal(statuses[1].status, "ready");
+  assert.deepEqual(
+    (await session.components()).map(({ id }) => id),
+    ["healthy"]
+  );
+  await assert.rejects(session.removeBreakpoint(breakpoint.id), /unknown breakpoint/);
+  assert.equal((await session.continue()).reason.kind, "breakpoint");
+
+  await session.close();
+});
+
+test("an observer which exits before arming is removed from the run barrier", async () => {
+  const { port1, port2 } = new MessageChannel();
+  const endpoint = serveSourceDebuggerComponent(port1, fakeComponent("observer"));
+  const observer = await connectSourceDebuggerComponent(port2, { requestTimeoutMs: 100 });
+  const driver = fakeComponent("driver");
+  const session = new SourceDebuggerSession({ components: [driver, observer] });
+
+  endpoint.close();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  const stop = await session.continue("driver");
+  assert.equal(stop.reason.kind, "breakpoint");
+  assert.deepEqual(
+    (await session.components()).map(({ id }) => id),
+    ["driver"]
+  );
+  assert.equal((await session.componentStatuses())[1].status, "quarantined");
+
+  await session.close();
+});
+
+test("a component exit during a run cancels survivors and advances the stop scope", async () => {
+  const { port1, port2 } = new MessageChannel();
+  let endpoint: ReturnType<typeof serveSourceDebuggerComponent>;
+  const driverLocal = fakeComponent("driver");
+  driverLocal.startRun = async () => {
+    setImmediate(() => endpoint.close());
+  };
+  driverLocal.waitForStop = async () => new Promise(() => {});
+  endpoint = serveSourceDebuggerComponent(port1, driverLocal);
+  const driver = await connectSourceDebuggerComponent(port2, { requestTimeoutMs: 100 });
+  const observer = fakeComponent("observer");
+  let observerCancelled = false;
+  observer.cancelRun = async () => {
+    observerCancelled = true;
+  };
+  const session = new SourceDebuggerSession({ components: [driver, observer] });
+
+  await assert.rejects(session.continue("driver"), /driver is quarantined.*peer closed/);
+  assert.equal(observerCancelled, true);
+  assert.equal(session.currentStopId(), "stop-1");
+  assert.equal((await session.state()).reason.kind, "breakpoint");
+  assert.deepEqual(
+    (await session.components()).map(({ id }) => id),
+    ["observer"]
+  );
+
+  await session.close();
 });
 
 test("multiple components compose owned frames and arm observers before the step driver", async () => {

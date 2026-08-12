@@ -25,6 +25,24 @@ import type {
 
 type RpcMethod = Exclude<keyof SourceDebuggerComponentInstance, "id">;
 
+export type SourceDebuggerRpcTransportFailure = "closed" | "peer-closed" | "timeout";
+
+export class SourceDebuggerRpcTransportError extends Error {
+  constructor(
+    readonly failure: SourceDebuggerRpcTransportFailure,
+    message: string
+  ) {
+    super(message);
+    this.name = "SourceDebuggerRpcTransportError";
+  }
+}
+
+export function isSourceDebuggerRpcTransportError(
+  error: unknown
+): error is SourceDebuggerRpcTransportError {
+  return error instanceof SourceDebuggerRpcTransportError;
+}
+
 interface RpcRequest {
   type: "source-debugger-request";
   id: number;
@@ -95,9 +113,12 @@ const REQUIRED_METHODS: RpcMethod[] = RPC_METHODS.filter(
 
 export interface SourceDebuggerRpcOptions {
   /** Reject a component call which does not settle within this deadline.
-   * Long-running waitForStop calls normally leave this unset; a session-level
-   * watchdog can opt in and then use cancelRun for recovery. */
+   * Long-running waitForStop, waitForPhysicalResume, and debugger-native
+   * command calls are exempt because waiting is part of their contract. */
   requestTimeoutMs?: number;
+  /** Called after a timeout or peer closure makes the entire RPC client
+   * unusable. An isolation host can terminate the containing worker here. */
+  onTransportFailure?: (error: SourceDebuggerRpcTransportError) => void;
 }
 
 export interface SourceDebuggerRpcEndpoint {
@@ -154,7 +175,11 @@ export async function connectSourceDebuggerComponent(
   port: MessagePort,
   options: SourceDebuggerRpcOptions = {}
 ): Promise<SourceDebuggerComponentInstance> {
-  const client = new SourceDebuggerRpcClient(port, options.requestTimeoutMs);
+  const client = new SourceDebuggerRpcClient(
+    port,
+    options.requestTimeoutMs,
+    options.onTransportFailure
+  );
   try {
     const hello = await client.call<RpcHello>("$hello");
     for (const method of REQUIRED_METHODS) {
@@ -177,7 +202,8 @@ class SourceDebuggerRpcClient {
 
   constructor(
     private readonly port: MessagePort,
-    requestTimeoutMs?: number
+    requestTimeoutMs?: number,
+    private readonly onTransportFailure?: (error: SourceDebuggerRpcTransportError) => void
   ) {
     if (
       requestTimeoutMs !== undefined &&
@@ -192,7 +218,11 @@ class SourceDebuggerRpcClient {
   }
 
   call<T>(method: RpcMethod | "$hello", ...args: unknown[]): Promise<T> {
-    if (this.#closed) return Promise.reject(new Error("SourceDebuggerComponent RPC is closed"));
+    if (this.#closed) {
+      return Promise.reject(
+        new SourceDebuggerRpcTransportError("closed", "SourceDebuggerComponent RPC is closed")
+      );
+    }
     const id = this.#nextId++;
     return new Promise<T>((resolve, reject) => {
       const pending: PendingCall = {
@@ -200,11 +230,12 @@ class SourceDebuggerRpcClient {
         resolve: (value) => resolve(value as T),
         reject,
       };
-      if (this.#timeoutMs !== undefined) {
+      if (this.#timeoutMs !== undefined && !NO_DEADLINE_METHODS.has(method)) {
         pending.timer = setTimeout(() => {
-          if (!this.#pending.delete(id)) return;
-          reject(
-            new Error(
+          if (!this.#pending.has(id)) return;
+          this.#failTransport(
+            new SourceDebuggerRpcTransportError(
+              "timeout",
               `SourceDebuggerComponent RPC ${String(method)} timed out after ${this.#timeoutMs}ms`
             )
           );
@@ -232,7 +263,9 @@ class SourceDebuggerRpcClient {
     this.port.off("message", this.#onMessage);
     this.port.off("close", this.#onClose);
     this.port.close();
-    this.#rejectPending(new Error("SourceDebuggerComponent RPC closed"));
+    this.#rejectPending(
+      new SourceDebuggerRpcTransportError("closed", "SourceDebuggerComponent RPC closed")
+    );
   }
 
   #onMessage = (message: unknown): void => {
@@ -246,10 +279,20 @@ class SourceDebuggerRpcClient {
   };
 
   #onClose = (): void => {
+    this.#failTransport(
+      new SourceDebuggerRpcTransportError("peer-closed", "SourceDebuggerComponent RPC peer closed")
+    );
+  };
+
+  #failTransport(error: SourceDebuggerRpcTransportError): void {
     if (this.#closed) return;
     this.#closed = true;
-    this.#rejectPending(new Error("SourceDebuggerComponent RPC peer closed"));
-  };
+    this.port.off("message", this.#onMessage);
+    this.port.off("close", this.#onClose);
+    this.port.close();
+    this.#rejectPending(error);
+    this.onTransportFailure?.(error);
+  }
 
   #rejectPending(error: Error): void {
     for (const pending of this.#pending.values()) {
@@ -259,6 +302,12 @@ class SourceDebuggerRpcClient {
     this.#pending.clear();
   }
 }
+
+const NO_DEADLINE_METHODS = new Set<RpcMethod | "$hello">([
+  "waitForStop",
+  "waitForPhysicalResume",
+  "command",
+]);
 
 class RemoteSourceDebuggerComponent implements SourceDebuggerComponentInstance {
   readonly id: string;

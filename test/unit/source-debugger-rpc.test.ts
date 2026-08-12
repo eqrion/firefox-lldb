@@ -8,6 +8,7 @@ import test from "node:test";
 import type { SourceDebuggerComponentInstance } from "../../src/source-debugger/component.js";
 import {
   connectSourceDebuggerComponent,
+  SourceDebuggerRpcTransportError,
   serveSourceDebuggerComponent,
 } from "../../src/source-debugger/rpc.js";
 import type { ComponentStop } from "../../src/source-debugger/types.js";
@@ -135,10 +136,41 @@ test("component RPC rejects a call which exceeds its configured deadline", async
   const endpoint = serveSourceDebuggerComponent(port1, component);
   const remote = await connectSourceDebuggerComponent(port2, { requestTimeoutMs: 50 });
 
-  await assert.rejects(remote.state("stop-1"), /state timed out after 50ms/);
+  await assert.rejects(remote.state("stop-1"), (error: unknown) => {
+    assert.ok(error instanceof SourceDebuggerRpcTransportError);
+    assert.equal(error.failure, "timeout");
+    assert.match(error.message, /state timed out after 50ms/);
+    return true;
+  });
+  await assert.rejects(remote.describe(), /RPC is closed/);
 
-  await remote.dispose();
   endpoint.close();
+});
+
+test("component RPC leaves run waits and native commands outside the bounded-call deadline", async () => {
+  const component = fakeComponent({
+    waitForStop: async () => new Promise(() => {}),
+    command: async () => new Promise(() => {}),
+  });
+  const { port1, port2 } = new MessageChannel();
+  const endpoint = serveSourceDebuggerComponent(port1, component);
+  const remote = await connectSourceDebuggerComponent(port2, { requestTimeoutMs: 20 });
+  const stop = remote.waitForStop("run-1");
+  const command = remote.command!("continue");
+
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(
+    await Promise.race([stop.then(() => "settled"), Promise.resolve("pending")]),
+    "pending"
+  );
+  assert.equal(
+    await Promise.race([command.then(() => "settled"), Promise.resolve("pending")]),
+    "pending"
+  );
+
+  endpoint.close();
+  await assert.rejects(stop, /RPC peer closed/);
+  await assert.rejects(command, /RPC peer closed/);
 });
 
 test("component RPC rejects pending calls when its peer exits", async () => {
