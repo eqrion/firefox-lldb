@@ -34,7 +34,8 @@ class LldbRuntimeRunControl implements LldbComponentRunControl, RdpDebuggeeRunCo
   constructor(
     private readonly id: string,
     private readonly logger: Logger,
-    private readonly observerResumesTarget: boolean
+    private readonly observerResumesTarget: boolean,
+    private readonly crossComponentStepping: boolean
   ) {}
 
   beginRun(request: ComponentRunRequest): Promise<void> {
@@ -81,6 +82,16 @@ class LldbRuntimeRunControl implements LldbComponentRunControl, RdpDebuggeeRunCo
     // latched so every later local wait in this run observes the already-
     // paused shared target instead of sleeping forever.
     if (pending.synchronizeRequested) this.#synchronizeStop?.();
+  }
+
+  adjustStepLimit(_tid: number, proposed: "step" | "next"): "step" | "next" {
+    const request = this.#pending?.request;
+    return this.crossComponentStepping &&
+      request?.role === "driver" &&
+      request.action.kind === "step-into" &&
+      proposed === "next"
+      ? "step"
+      : proposed;
   }
 
   endRun(runId: RunId): void {
@@ -148,7 +159,8 @@ export class EmbeddedLldbComponentRuntime {
     this.#runtimeRunControl = new LldbRuntimeRunControl(
       id,
       this.#logger,
-      options.observerResumesTarget ?? true
+      options.observerResumesTarget ?? true,
+      options.exclusiveModules ?? false
     );
     this.runControl = this.#runtimeRunControl;
     this.component = new LldbSourceDebuggerComponentInstance(client, {

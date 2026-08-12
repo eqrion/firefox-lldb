@@ -132,6 +132,7 @@ test("component-qualified commands route ambiguous operations", async () => {
   let breakpointComponent: string | undefined;
   let continueDriver: string | undefined;
   let nativeRoute: [string, string | undefined] | undefined;
+  let stepIntoFrame: string | undefined;
   let steppedFrame: string | undefined;
   const h = harness(
     okClient(() => ({ output: "", error: "", status: 0 })),
@@ -154,6 +155,10 @@ test("component-qualified commands route ambiguous operations", async () => {
         command: async (command: string, componentId?: string) => {
           nativeRoute = [command, componentId];
           return { output: "native ok", error: "", status: 0 };
+        },
+        stepInto: async (frameId?: string) => {
+          stepIntoFrame = frameId;
+          return { stopId: "stop-1", reason: { kind: "step" } };
         },
         frames: async () => [
           {
@@ -181,6 +186,8 @@ test("component-qualified commands route ambiguous operations", async () => {
   assert.equal(breakpointComponent, "lldb-b");
   await h.type("continue lldb-b");
   assert.equal(continueDriver, "lldb-b");
+  await h.type("step");
+  assert.equal(stepIntoFrame, "logical-b-frame");
   assert.match(await h.type("lldb lldb-b::thread list"), /native ok/);
   assert.deepEqual(nativeRoute, ["thread list", "lldb-b"]);
   await h.type("frame 0");

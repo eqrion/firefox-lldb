@@ -84,6 +84,15 @@ preserves LLDB-A's suspended Wasm caller. The e2e drives this sequence through
 the real `(sdb)` REPL, including component-qualified breakpoints and driver
 selection, composed backtraces, frame selection, locals, and `finish`.
 
+The production CLI proof exercises the inverse handoff without a breakpoint in
+the destination module. One generic `step` starts in LLDB-A, consumes the
+source-transparent stop at the opaque JavaScript import, preserves RDP
+instruction stepping instead of stepping over the foreign Wasm call as one JS
+line, and discovers LLDB-B's new top frame. LLDB-B then adopts the raw
+`SIGTRAP` entry stop with one source step so its prologue and parameters are
+materialized before the frontend sees the stop. A real destination breakpoint
+is never adopted and therefore preempts this thread plan.
+
 LLDB scopes currently select and materialize frames through the public command
 interpreter. The bulk SB wrapper runs on a different wasm pthread, cannot
 materialize non-top `DW_OP_WASM_location`, and can leave the next run-control
@@ -116,10 +125,11 @@ adapter.
    repeatable `--component ID=URL_SUBSTRING` routes, instantiates an isolated
    wasm LLDB for each, and exposes them through the real generic REPL. Replacing
    explicit routes with artifact-driven component discovery remains.
-7. **Cross-component stepping (step-out prototype complete).** The session can
-   step out from B through JavaScript while preserving A's foreign caller.
-   Implement step-in ownership handoff, step-over suppression of foreign
-   activations, and foreign-breakpoint preemption of an active thread plan.
+7. **Cross-component stepping (step-in/out prototype complete).** The session
+   can step into B through opaque JavaScript without a destination breakpoint,
+   then step out while preserving A's foreign caller. Implement step-over
+   suppression of foreign activations and complete foreign-breakpoint
+   preemption of every active thread-plan phase.
 8. **Worker RPC and failure containment.** Put each component behind a
    `MessagePort`, enforce deadlines/cancellation, and recover from one component
    failing without wedging the target.
@@ -132,13 +142,15 @@ prototype. Stop-scoped IDs built from `(stop, thread, physical frame position,
 inline position, component)` are sufficient for the TUI, frame selection,
 variables, and the initial cross-component control experiments.
 
-The next milestone is defining step-in, step-over, and breakpoint-preemption
-behavior when control crosses an ownership boundary. Step-out established the
-required scheduling primitive: each LLDB runtime sequences every physical
+The next stepping milestone is defining step-over and breakpoint-preemption
+behavior when control crosses an ownership boundary. Step-in and step-out use
+the shared scheduling primitive: each LLDB runtime sequences every physical
 resume requested by its active thread plan. The session holds the driver's
 resume lease until each observer has either issued its own next continue (and
 therefore re-armed its local stop wait) or completed and been started again.
-Only the driver's completed source-level plan commits the global stop.
+Step-in additionally treats a semantically unchanged composed source stack as
+an opaque transition, preserves instruction granularity through JavaScript,
+and transfers the next source-plan phase to a newly entered owner.
 
 The first experiment also exposed a separate wasm LLDB threading hazard: the
 bulk SB variable wrapper could leave LLDB's async remote thread unable to

@@ -49,6 +49,13 @@ may release that shared Firefox run lease. Observer LLDBs still execute their
 own state-machine transitions and consume the same stop notification, so an
 LLDB-internal step-off cannot race a second RDP controller.
 
+For cross-component step-in, the session treats a stop with an unchanged
+composed source stack as an opaque-language transition and continues the source
+plan. At a JavaScript boundary the active component's run-control policy keeps
+RDP instruction-step granularity (instead of the normal JS `next`) so a call
+into another owned Wasm module is observable. The destination component adopts
+the raw entry trap and completes its prologue before the logical stop is shown.
+
 ### Embedded wasm LLDB (`firefox-lldb`)
 
 The `firefox-lldb` command does not spawn a native lldb. It runs the platform
@@ -222,20 +229,20 @@ requests, events) generated from [`src/rdp/protocol.ts`](src/rdp/protocol.ts),
 the single source of truth. The table below maps each debugger need to the
 part of that surface serving it.
 
-| Need               | RDP source                                                                                                                                                                                                                                                                                   |
-| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| wasm module list   | `thread.sources` (filter `introductionType === "wasm"`)                                                                                                                                                                                                                                      |
-| wasm module bytes  | Use the injectable, validated HTTP provider, then fall back to Firefox's browser-owned ArrayBuffer source actor when Node lacks the page's credentials/cache context. HTTP errors, oversized bodies, and non-wasm responses fall back to an empty module rather than reaching the component. |
-| Stack frames       | `thread.frames` returns interleaved `wasmcall`/`call` frames; both are surfaced to LLDB. `resources-available-array` records each frame's thread-local source actor → URL mapping, including worker actors.                                                                                  |
-| wasm PC            | a `wasmcall` frame's `where.line` is the byte offset (column is always 1; not column as the original design assumed)                                                                                                                                                                         |
-| JS PC              | a `call` frame's `where.line` is the source line (1-based). Reported as `where.line + codeOffset` so LLDB's code-section subtraction recovers the DWARF address = source line.                                                                                                               |
-| JS sources         | each JS source is a synthetic wasm module (`src/gdb/synthetic-module.ts`) with DWARF v4 mapping address L → line L. Source text is fetched via the source actor `source` request and written to a temp file for `source list`.                                                               |
-| Breakpoints (wasm) | `thread.setBreakpoint` at `{ sourceUrl, line: <offset>, column: 1 }` — offset snapped to a valid position from `getBreakpointPositionsCompressed`; an invalid offset is a silent no-op in Firefox                                                                                            |
-| Breakpoints (JS)   | same packet; line = source line number (pc - codeOffset), snapped to a valid (line, column) from `getBreakpointPositionsCompressed` on the JS source actor — an unsnapped column binds to nothing and the breakpoint silently never fires                                                    |
-| Continue / step    | `thread.resume()` / `thread.resume({type:"step"})` for wasm frames, `{type:"next"}` for a JS innermost frame (one wasm instruction jumps an arbitrary number of JS source lines); stop via the `paused` event                                                                                |
-| Locals             | `frame.getEnvironment` → the `wasm function` scope's `var0..varN` bindings (raw i32/i64/f32/f64 values), returned to lldb in wasm-local-index order                                                                                                                                          |
-| Linear memory      | evaluate `new Uint8Array(memory0.buffer, addr, len)` in the wasm frame's scope (`evaluateJSAsync` with `frameActor`); `memory0` lives in the `wasm instance` scope                                                                                                                           |
-| Globals            | `wasm instance` scope `global0..globalN` bindings → `instance.get-global` / `global.get` → `qWasmGlobal`                                                                                                                                                                                     |
+| Need               | RDP source                                                                                                                                                                                                                                                                                                       |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| wasm module list   | `thread.sources` (filter `introductionType === "wasm"`)                                                                                                                                                                                                                                                          |
+| wasm module bytes  | Use the injectable, validated HTTP provider, then fall back to Firefox's browser-owned ArrayBuffer source actor when Node lacks the page's credentials/cache context. HTTP errors, oversized bodies, and non-wasm responses fall back to an empty module rather than reaching the component.                     |
+| Stack frames       | `thread.frames` returns interleaved `wasmcall`/`call` frames; both are surfaced to LLDB. `resources-available-array` records each frame's thread-local source actor → URL mapping, including worker actors.                                                                                                      |
+| wasm PC            | a `wasmcall` frame's `where.line` is the byte offset (column is always 1; not column as the original design assumed)                                                                                                                                                                                             |
+| JS PC              | a `call` frame's `where.line` is the source line (1-based). Reported as `where.line + codeOffset` so LLDB's code-section subtraction recovers the DWARF address = source line.                                                                                                                                   |
+| JS sources         | each JS source is a synthetic wasm module (`src/gdb/synthetic-module.ts`) with DWARF v4 mapping address L → line L. Source text is fetched via the source actor `source` request and written to a temp file for `source list`.                                                                                   |
+| Breakpoints (wasm) | `thread.setBreakpoint` at `{ sourceUrl, line: <offset>, column: 1 }` — offset snapped to a valid position from `getBreakpointPositionsCompressed`; an invalid offset is a silent no-op in Firefox                                                                                                                |
+| Breakpoints (JS)   | same packet; line = source line number (pc - codeOffset), snapped to a valid (line, column) from `getBreakpointPositionsCompressed` on the JS source actor — an unsnapped column binds to nothing and the breakpoint silently never fires                                                                        |
+| Continue / step    | `thread.resume()` / `thread.resume({type:"step"})` for wasm frames, `{type:"next"}` for a JS innermost frame (one wasm instruction jumps an arbitrary number of JS source lines); a multi-component step-in preserves `step` at an opaque JS boundary to observe foreign Wasm entry; stop via the `paused` event |
+| Locals             | `frame.getEnvironment` → the `wasm function` scope's `var0..varN` bindings (raw i32/i64/f32/f64 values), returned to lldb in wasm-local-index order                                                                                                                                                              |
+| Linear memory      | evaluate `new Uint8Array(memory0.buffer, addr, len)` in the wasm frame's scope (`evaluateJSAsync` with `frameActor`); `memory0` lives in the `wasm instance` scope                                                                                                                                               |
+| Globals            | `wasm instance` scope `global0..globalN` bindings → `instance.get-global` / `global.get` → `qWasmGlobal`                                                                                                                                                                                                         |
 
 ## Testing
 
@@ -312,6 +319,11 @@ RDP facts confirmed experimentally:
 - **Stepping across the JS/wasm boundary at step-in** — `thread step-in` from a
   JS frame at a wasm call site does cross the boundary and enter the wasm function.
   The inverse (step-in from wasm into a JS caller) is not supported.
+- **Component-to-component step-in is supported through opaque JS** — the
+  language-generic session can step from one owned Wasm module through a JS
+  import into another component's Wasm module. This does not expose the
+  intervening JavaScript as a source frame; full Wasm-to-JS handoff still needs
+  a JavaScript SourceDebuggerComponent.
 - **JS step-in degrades to step-over within JS** — inside a JS frame, stepping
   uses RDP `{type:"next"}` (step-over by source line), so `thread step-in` cannot
   descend into a called _JS_ function. Single-subprogram synthetic modules can't

@@ -37,18 +37,25 @@ test("the CLI loads and drives two routed SourceDebuggerComponents", async () =>
     assert.match(modules.output, /component=a\s+\[lldb-a\]/);
     assert.match(modules.output, /component=b\s+\[lldb-b\]/);
     assert.match((await repl.send("break lldb-a::compute_factorial")).output, /lldb-a:1/);
-    assert.match((await repl.send("break lldb-b::compute_factorial")).output, /lldb-b:1/);
+    assert.match((await repl.send("break lldb-a::call_other_factorial")).output, /lldb-a:2/);
 
     const first = await repl.send("continue lldb-a", 60_000);
     assert.equal(first.prompt, true);
     assert.match(first.output, /compute_factorial/);
 
     await repl.send("js p setTimeout(() => runInterleaved(), 100)");
-    const second = await repl.send("continue lldb-b", 60_000);
+    const caller = await repl.send("continue lldb-a", 60_000);
+    assert.equal(caller.prompt, true);
+    assert.match(caller.output, /call_other_factorial/);
+
+    // One source-level step from A crosses the JavaScript import and hands
+    // control to the debugger which owns B's newly-entered Wasm activation.
+    const second = await repl.send("step", 60_000);
     assert.equal(second.prompt, true);
-    assert.match(second.output, /compute_factorial/);
+    const stepBacktrace = await repl.send("bt");
+    assert.match(stepBacktrace.output, /compute_factorial/);
     assert.match(
-      (await repl.send("bt")).output,
+      stepBacktrace.output,
       /#0 .*compute_factorial.*\[lldb-b\].*#1 .*call_other_factorial.*\[lldb-a\]/s
     );
 

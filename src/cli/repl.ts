@@ -352,14 +352,14 @@ export function runRepl(deps: ReplDeps): Repl {
         return true;
       case "step":
       case "s":
-        await runSourceCommand((frameId) => deps.session.stepInto(frameId));
+        await runSourceCommand((frameId) => deps.session.stepInto(frameId), true);
         return true;
       case "next":
       case "n":
-        await runSourceCommand((frameId) => deps.session.stepOver(frameId));
+        await runSourceCommand((frameId) => deps.session.stepOver(frameId), true);
         return true;
       case "finish":
-        await runSourceCommand((frameId) => deps.session.stepOut(frameId));
+        await runSourceCommand((frameId) => deps.session.stepOut(frameId), true);
         return true;
       case "lldb": {
         if (!arg) throw new Error("lldb requires a command");
@@ -376,14 +376,15 @@ export function runRepl(deps: ReplDeps): Repl {
   }
 
   async function runSourceCommand(
-    operation: (frameId: LogicalFrameId | undefined) => Promise<{ output?: string }>
+    operation: (frameId: LogicalFrameId | undefined) => Promise<{ output?: string }>,
+    frameRelative = false
   ): Promise<void> {
     inflight = true;
-    const frameId = selectedFrameId;
-    selectedFrameId = undefined;
-    write("Process running.");
-    deps.onTargetResume?.();
     try {
+      const frameId = frameRelative ? await selectedFrame() : selectedFrameId;
+      selectedFrameId = undefined;
+      write("Process running.");
+      deps.onTargetResume?.();
       const stop = await operation(frameId);
       if (stop.output) write(stop.output);
     } finally {

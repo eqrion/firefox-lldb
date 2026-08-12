@@ -136,6 +136,11 @@ export type RdpDebuggeeResumeAction =
 // release the physical pause lease.
 export interface RdpDebuggeeRunControl {
   resume(action: RdpDebuggeeResumeAction, resumePhysicalTarget: () => void): void;
+  /** Adjust the RDP granularity chosen for an LLDB single-step. Multi-component
+   * source step-in uses instruction stepping at opaque JS boundaries so it can
+   * observe entry into a foreign-owned Wasm activation instead of stepping
+   * over that call as one JavaScript source line. */
+  adjustStepLimit?(tid: number, proposed: "step" | "next"): "step" | "next";
   installSynchronizeStop?(synchronize: () => void): void;
 }
 
@@ -977,7 +982,8 @@ export class RdpDebuggee {
       // JS line. This degrades JS step-in to step-over (single-subprogram
       // synthetic modules can't distinguish JS functions anyway).
       const innermost = this.#framesByTid.get(tid)?.[0];
-      const limit = innermost?.type === "call" ? "next" : "step";
+      const proposedLimit = innermost?.type === "call" ? "next" : "step";
+      const limit = this.#runControl?.adjustStepLimit?.(tid, proposedLimit) ?? proposedLimit;
       const resume = () => {
         this.#session.armAllStop();
         this.#session.stepOne(tid, limit);

@@ -41,6 +41,8 @@ interface ComponentRunWait {
   resumeSequence: number;
 }
 
+const MAX_TRANSPARENT_STEP_IN_STOPS = 32;
+
 // Language-neutral coordinator for one browser debug target. Components
 // project only the physical frames they own. Run control is coordinated with
 // an observer-first barrier so isolated debuggers enter each physical run
@@ -190,12 +192,58 @@ export class SourceDebuggerSession {
     return this.#run({ kind: "continue" }, componentId);
   }
 
-  stepInto(frameId?: LogicalFrameId) {
-    const frame = frameId ? this.#frame(frameId) : undefined;
-    return this.#run(
-      { kind: "step-into", ...(frame ? { frameId: frame.componentFrameId } : {}) },
-      frame?.componentId
-    );
+  async stepInto(frameId?: LogicalFrameId) {
+    const selected = frameId ? this.#frame(frameId) : undefined;
+    if (!selected) return this.#run({ kind: "step-into" });
+
+    let before = await this.frames(selected.threadId);
+    const selectedIndex = before.findIndex(({ id }) => id === selected.id);
+    if (selectedIndex < 0) throw new Error(`stale or unknown frame ${selected.id}`);
+    let frame = before[selectedIndex];
+    let adoptingForeignEntry = false;
+
+    for (let transition = 0; transition <= MAX_TRANSPARENT_STEP_IN_STOPS; transition++) {
+      const stop = await this.#run(
+        { kind: "step-into", frameId: frame.componentFrameId },
+        frame.componentId
+      );
+      if (stop.reason.kind !== "step") return stop;
+
+      const after = await this.frames(selected.threadId);
+      if (adoptingForeignEntry) return stop;
+      if (!sameSourceStack(before, after)) {
+        const top = after[0];
+        if (top && top.componentId !== frame.componentId) {
+          const destinationState = await this.#component(top.componentId).state(this.#stopId);
+          if (isForeignEntryTrap(destinationState.reason)) {
+            // An instruction-level step across opaque JavaScript stops at the
+            // destination Wasm function's raw entry PC. Give the destination
+            // owner one source step to skip its prologue and materialize
+            // parameters. A real destination breakpoint is deliberately not
+            // adopted, so user-visible stops always preempt the thread plan.
+            frame = top;
+            adoptingForeignEntry = true;
+            continue;
+          }
+        }
+        return stop;
+      }
+      if (transition === MAX_TRANSPARENT_STEP_IN_STOPS) {
+        throw new Error(
+          `step-in crossed more than ${MAX_TRANSPARENT_STEP_IN_STOPS} source-transparent stops`
+        );
+      }
+
+      // LLDB can complete a source thread plan on an opaque foreign-language
+      // transition even though the composed source stack has not changed. Run
+      // the selected component's next source step from its newly-projected
+      // physical frame. A newly-entered component, recursion, or source-line
+      // change alters the semantic stack and is returned to the frontend.
+      before = after;
+      frame = after[selectedIndex];
+    }
+
+    throw new Error("unreachable step-in transition state");
   }
 
   stepOver(frameId?: LogicalFrameId) {
@@ -420,4 +468,28 @@ function isRunControlCommand(command: string): boolean {
   return /^\s*(?:c|continue|process\s+continue|run|r|thread\s+(?:step|step-in|step-over|step-out|step-inst))\b/i.test(
     command
   );
+}
+
+function sameSourceStack(before: LogicalFrame[], after: LogicalFrame[]): boolean {
+  return (
+    before.length === after.length &&
+    before.every((frame, index) => sourceFrameKey(frame) === sourceFrameKey(after[index]))
+  );
+}
+
+function sourceFrameKey(frame: LogicalFrame): string {
+  const location = frame.location
+    ? `${frame.location.sourceId}:${frame.location.line}:${frame.location.column ?? ""}`
+    : frame.pc;
+  return [
+    frame.componentId,
+    frame.functionName,
+    location ?? "",
+    frame.inline ? "inline" : "physical",
+    frame.inlineFrameIndex,
+  ].join("\u0000");
+}
+
+function isForeignEntryTrap(reason: SessionState["reason"]): boolean {
+  return reason.kind === "stopped" || (reason.kind === "signal" && reason.signal === "SIGTRAP");
 }

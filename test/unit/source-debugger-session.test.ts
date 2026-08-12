@@ -47,12 +47,13 @@ function fakeComponent(
       reason: { kind: "breakpoint", threadId: "7" },
     }),
     threads: async () => [{ id: "7", stopped: true }],
-    frames: async () => [
+    frames: async (stopId) => [
       {
         id: "component-frame-0",
         physicalFrameIndex: options.physicalFrameIndex ?? 0,
         inlineFrameIndex: 0,
         functionName: "compute",
+        pc: stopId,
         inline: false,
       },
     ],
@@ -164,6 +165,95 @@ test("multiple components compose owned frames and arm observers before the step
     "start:outer:observer:continue",
     "start:inner:driver:step-into",
   ]);
+});
+
+test("step-in consumes a source-transparent foreign stop before handing off", async () => {
+  const events: string[] = [];
+  const outer = fakeComponent("outer", { events });
+  const inner = fakeComponent("inner", { events });
+  outer.frames = async (stopId) => [
+    {
+      id: stopId === "stop-0" ? "outer-before" : "outer-after",
+      physicalFrameIndex: stopId === "stop-0" ? 0 : 1,
+      inlineFrameIndex: 0,
+      functionName: "call_inner",
+      location: { sourceId: "outer.cc", line: 10 },
+      inline: false,
+    },
+  ];
+  inner.frames = async (stopId) =>
+    stopId === "stop-2"
+      ? [
+          {
+            id: "inner-after",
+            physicalFrameIndex: 0,
+            inlineFrameIndex: 0,
+            functionName: "entered",
+            location: { sourceId: "inner.cc", line: 20 },
+            inline: false,
+          },
+        ]
+      : [];
+
+  const session = new SourceDebuggerSession({ components: [outer, inner] });
+  const [frame] = await session.frames();
+  const stop = await session.stepInto(frame.id);
+
+  assert.equal(stop.reason.kind, "step");
+  assert.deepEqual(
+    events.filter((event) => event.includes(":driver:step-into")),
+    ["start:outer:driver:step-into", "start:outer:driver:step-into"]
+  );
+  assert.deepEqual(
+    (await session.frames()).map(({ componentId }) => componentId),
+    ["inner", "outer"]
+  );
+});
+
+test("step-in lets a destination owner adopt a raw foreign-entry trap", async () => {
+  const events: string[] = [];
+  const outer = fakeComponent("outer", { events });
+  const inner = fakeComponent("inner", { events });
+  outer.frames = async (stopId) => [
+    {
+      id: `outer-${stopId}`,
+      physicalFrameIndex: stopId === "stop-0" ? 0 : 1,
+      inlineFrameIndex: 0,
+      functionName: "call_inner",
+      location: { sourceId: "outer.cc", line: 10 },
+      inline: false,
+    },
+  ];
+  inner.frames = async (stopId) =>
+    stopId === "stop-2" || stopId === "stop-3"
+      ? [
+          {
+            id: `inner-${stopId}`,
+            physicalFrameIndex: 0,
+            inlineFrameIndex: 0,
+            functionName: "entered",
+            location: { sourceId: "inner.cc", line: 20 },
+            inline: false,
+          },
+        ]
+      : [];
+  inner.state = async (stopId) => ({
+    stopId,
+    reason:
+      stopId === "stop-2"
+        ? { kind: "signal", threadId: "7", signal: "SIGTRAP" }
+        : { kind: "step", threadId: "7" },
+  });
+
+  const session = new SourceDebuggerSession({ components: [outer, inner] });
+  const [frame] = await session.frames();
+  const stop = await session.stepInto(frame.id);
+
+  assert.equal(stop.reason.kind, "step");
+  assert.deepEqual(
+    events.filter((event) => event.includes(":driver:step-into")),
+    ["start:outer:driver:step-into", "start:outer:driver:step-into", "start:inner:driver:step-into"]
+  );
 });
 
 test("multi-component breakpoints require and retain an explicit owner", async () => {
