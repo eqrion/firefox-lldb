@@ -117,7 +117,9 @@ export class LldbSourceDebuggerComponent implements SourceDebuggerComponent {
     return { supported: true, confidence: 50, reason: "LLDB fallback for Wasm modules" };
   }
 
-  async instantiate(_host: SourceDebuggerComponentHost): Promise<SourceDebuggerComponentInstance> {
+  async instantiate(
+    _host: SourceDebuggerComponentHost
+  ): Promise<LldbSourceDebuggerComponentInstance> {
     return new LldbSourceDebuggerComponentInstance(this.#client, this.#options);
   }
 }

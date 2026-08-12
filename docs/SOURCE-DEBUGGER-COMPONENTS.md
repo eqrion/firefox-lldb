@@ -148,10 +148,12 @@ The imported debuggee side now has a concrete TypeScript seam as well.
 localhost platform/per-process sockets, transfers a `MessagePort`, and the
 worker adapts it to that resource before handing it to LLDB. Thus LLDB still
 gets its required GDB RSP protocol while the isolated component never imports
-TCP, Firefox RDP, or Node socket APIs. Endpoint lookup is still wired during
-LLDB runtime bootstrap; routing it through the component factory's
-`instantiate(host)` call is the remaining API cleanup before a Component Model
-translation.
+TCP, Firefox RDP, or Node socket APIs. Platform and process connections are
+registered as opaque endpoints; the worker resolves them by calling the real
+`SourceDebuggerComponentHost` proxy, and the LLDB definition is created through
+the component factory's `instantiate(host)` call. The remaining host cleanup is
+to move endpoint registration out of platform-server bootstrap and into a
+first-class session-owned debuggee host before a Component Model translation.
 
 LLDB scopes currently select and materialize frames through the public command
 interpreter. The bulk SB wrapper runs on a different wasm pthread, cannot

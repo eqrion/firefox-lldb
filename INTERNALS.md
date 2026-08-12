@@ -115,6 +115,9 @@ outer worker. The worker adapts it to the pull-based `GdbRspConnection` import;
 LLDB connects to `inprocess://<channelId>` and the runtime pumps only ordered
 bytes between that resource and its internal channel. TCP, gdbstub, RDP, and
 physical Firefox ownership stay outside the debugger isolate.
+Platform and per-process ports are registered under opaque endpoint IDs. The
+worker obtains each stream by calling its `SourceDebuggerComponentHost` proxy;
+it cannot select or connect to an arbitrary host port.
 
 ```
 wasm LLDB ─► channel N ◄─ GdbRspConnection ─ MessagePort ─► host net.Socket ─► platform / per-tab server

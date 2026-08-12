@@ -9,9 +9,10 @@ import {
   type RdpDebuggeeResumeAction,
   type RdpDebuggeeRunControl,
 } from "../gdb/rdp-debuggee.js";
-import type { GdbRspConnection } from "./component.js";
+import type { GdbRspConnection, GdbRspEndpoint, SourceDebuggerComponentHost } from "./component.js";
 import type { ComponentRunRequest, RunId } from "./types.js";
 import {
+  LldbSourceDebuggerComponent,
   LldbSourceDebuggerComponentInstance,
   type LldbComponentRunControl,
   type LldbSourceDebuggerComponentOptions,
@@ -169,6 +170,7 @@ class LldbRuntimeRunControl implements LldbComponentRunControl, RdpDebuggeeRunCo
 }
 
 export interface EmbeddedLldbComponentRuntimeOptions extends LldbSourceDebuggerComponentOptions {
+  host: SourceDebuggerComponentHost;
   logger?: Logger;
   fileProvider?: FileProvider;
   /** Whether an observer releases its own RDP pause lease after arming. Set
@@ -183,44 +185,61 @@ export class EmbeddedLldbComponentRuntime {
   readonly component: LldbSourceDebuggerComponentInstance;
   readonly runControl: RdpDebuggeeRunControl;
   readonly #client: LLDBClient;
+  readonly #host: SourceDebuggerComponentHost;
   readonly #logger: Logger;
   readonly #rspChannels = new Map<
     number,
     { connection: GdbRspConnection; close: (notifyHost: boolean) => Promise<void> }
   >();
-  readonly #runtimeRunControl: LldbRuntimeRunControl;
   #closePromise: Promise<void> | undefined;
 
-  private constructor(client: LLDBClient, options: EmbeddedLldbComponentRuntimeOptions) {
+  private constructor(
+    client: LLDBClient,
+    options: EmbeddedLldbComponentRuntimeOptions,
+    runtimeRunControl: LldbRuntimeRunControl,
+    component: LldbSourceDebuggerComponentInstance
+  ) {
     this.#client = client;
+    this.#host = options.host;
     this.#logger = options.logger ?? noopLogger;
-    const id = options.id ?? "lldb";
-    this.#runtimeRunControl = new LldbRuntimeRunControl(
-      id,
-      this.#logger,
-      options.observerResumesTarget ?? true,
-      options.exclusiveModules ?? false
-    );
-    this.runControl = this.#runtimeRunControl;
-    this.component = new LldbSourceDebuggerComponentInstance(client, {
-      id: options.id,
-      name: options.name,
-      onDispose: () => this.close(),
-      runControl: this.#runtimeRunControl,
-      exclusiveModules: options.exclusiveModules,
-      abortBreakpointFunction: options.exclusiveModules
-        ? SOURCE_DEBUGGER_ABORT_FUNCTION
-        : undefined,
-      logger: this.#logger,
-    });
+    this.runControl = runtimeRunControl;
+    this.component = component;
   }
 
   static async create(
-    options: EmbeddedLldbComponentRuntimeOptions = {}
+    options: EmbeddedLldbComponentRuntimeOptions
   ): Promise<EmbeddedLldbComponentRuntime> {
     const client = await LLDBClient.create();
-    if (options.fileProvider) client.setFileProvider(options.fileProvider);
-    return new EmbeddedLldbComponentRuntime(client, options);
+    try {
+      if (options.fileProvider) client.setFileProvider(options.fileProvider);
+      const logger = options.logger ?? noopLogger;
+      const runtimeRunControl = new LldbRuntimeRunControl(
+        options.id ?? "lldb",
+        logger,
+        options.observerResumesTarget ?? true,
+        options.exclusiveModules ?? false
+      );
+      let runtime: EmbeddedLldbComponentRuntime | undefined;
+      const definition: LldbSourceDebuggerComponent = new LldbSourceDebuggerComponent(client, {
+        id: options.id,
+        name: options.name,
+        onDispose: () => runtime?.close(),
+        runControl: runtimeRunControl,
+        exclusiveModules: options.exclusiveModules,
+        abortBreakpointFunction: options.exclusiveModules
+          ? SOURCE_DEBUGGER_ABORT_FUNCTION
+          : undefined,
+        logger,
+      });
+      const component: LldbSourceDebuggerComponentInstance = await definition.instantiate(
+        options.host
+      );
+      runtime = new EmbeddedLldbComponentRuntime(client, options, runtimeRunControl, component);
+      return runtime;
+    } catch (error) {
+      await client.destroy();
+      throw error;
+    }
   }
 
   /** Import an already-connected GDB RSP byte stream from the component host.
@@ -275,7 +294,12 @@ export class EmbeddedLldbComponentRuntime {
     }
   }
 
-  async connectPlatformChannel(channelId: number): Promise<void> {
+  async bridgeRspEndpoint(endpoint: GdbRspEndpoint): Promise<number> {
+    return this.bridgeRsp(await this.#host.connectGdbRsp(endpoint));
+  }
+
+  async connectPlatform(endpoint: GdbRspEndpoint): Promise<void> {
+    const channelId = await this.bridgeRspEndpoint(endpoint);
     await this.#checkedCommand("platform select remote-gdb-server");
     await this.#checkedCommand(`platform connect inprocess://${channelId}`);
   }

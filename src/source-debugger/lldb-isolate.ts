@@ -5,7 +5,7 @@
 import { MessageChannel, type MessagePort, Worker } from "node:worker_threads";
 import type { RdpDebuggeeResumeAction, RdpDebuggeeRunControl } from "../gdb/rdp-debuggee.js";
 import { noopLogger, type Logger } from "../logging.js";
-import type { SourceDebuggerComponentInstance } from "./component.js";
+import type { GdbRspEndpoint, SourceDebuggerComponentInstance } from "./component.js";
 import type {
   LldbIsolateControlMethod,
   LldbIsolateControlRequest,
@@ -95,19 +95,12 @@ export class IsolatedLldbComponentRuntime {
   readonly component: SourceDebuggerComponentInstance;
   readonly runControl: RdpDebuggeeRunControl;
   readonly #channel: LldbIsolateChannel;
-  readonly #logger: Logger;
-  readonly #rspChannels = new Set<HostRspByteChannel>();
   #closePromise: Promise<void> | undefined;
 
-  private constructor(
-    component: SourceDebuggerComponentInstance,
-    channel: LldbIsolateChannel,
-    logger: Logger
-  ) {
+  private constructor(component: SourceDebuggerComponentInstance, channel: LldbIsolateChannel) {
     this.component = component;
     this.runControl = channel.runControl;
     this.#channel = channel;
-    this.#logger = logger;
   }
 
   static async create(
@@ -149,7 +142,7 @@ export class IsolatedLldbComponentRuntime {
           void channel.terminate();
         },
       });
-      return new IsolatedLldbComponentRuntime(component, channel, logger);
+      return new IsolatedLldbComponentRuntime(component, channel);
     } catch (error) {
       componentChannel.port1.close();
       await channel.close().catch(() => {});
@@ -159,27 +152,23 @@ export class IsolatedLldbComponentRuntime {
 
   readonly bridgeTcp = async (port: number): Promise<number> => {
     if (this.#closePromise) throw new Error(`LLDB component ${this.component.id} is closed`);
-    const bridge = await openTcpRspByteChannel(port, {
-      logger: this.#logger,
-      label: `${this.component.id} RSP host`,
-    });
-    this.#rspChannels.add(bridge);
-    void bridge.closed.then(() => this.#rspChannels.delete(bridge));
+    const endpoint = this.#channel.registerRspEndpoint(port, "process");
     try {
-      return await this.#channel.callWithPorts(
-        "bridge-rsp",
-        [bridge.componentPort],
-        [bridge.componentPort]
-      );
+      return await this.#channel.call("bridge-rsp", endpoint);
     } catch (error) {
-      bridge.close();
+      this.#channel.discardRspEndpoint(endpoint.id);
       throw error;
     }
   };
 
   async connectPlatform(port: number): Promise<void> {
-    const channelId = await this.bridgeTcp(port);
-    await this.#channel.call("connect-platform", channelId);
+    const endpoint = this.#channel.registerRspEndpoint(port, "platform");
+    try {
+      await this.#channel.call("connect-platform", endpoint);
+    } catch (error) {
+      this.#channel.discardRspEndpoint(endpoint.id);
+      throw error;
+    }
   }
 
   async attach(
@@ -207,25 +196,14 @@ export class IsolatedLldbComponentRuntime {
   }
 
   close(): Promise<void> {
-    return (this.#closePromise ??= (async () => {
-      this.#closeRspChannels();
-      await this.#channel.close();
-    })());
+    return (this.#closePromise ??= this.#channel.close());
   }
 
   /** Force the isolation worker down. Normal cleanup uses close(); this is the
    * containment path for an unresponsive component. Its RPC peer immediately
    * rejects outstanding and subsequent calls when the port closes. */
   terminate(): Promise<void> {
-    return (this.#closePromise ??= (async () => {
-      this.#closeRspChannels();
-      await this.#channel.terminate();
-    })());
-  }
-
-  #closeRspChannels(): void {
-    for (const bridge of this.#rspChannels) bridge.close();
-    this.#rspChannels.clear();
+    return (this.#closePromise ??= this.#channel.terminate());
   }
 }
 
@@ -233,7 +211,10 @@ class LldbIsolateChannel {
   readonly ready: Promise<void>;
   readonly runControl: IsolatedLldbRunControl;
   readonly #pending = new Map<number, PendingControl>();
+  readonly #rspEndpoints = new Map<string, { port: number; kind: GdbRspEndpoint["kind"] }>();
+  readonly #rspChannels = new Set<HostRspByteChannel>();
   #nextId = 1;
+  #nextRspEndpointId = 1;
   #closed = false;
   #resolveReady!: () => void;
   #rejectReady!: (error: Error) => void;
@@ -259,25 +240,27 @@ class LldbIsolateChannel {
     worker.on("exit", this.#onWorkerExit);
   }
 
+  registerRspEndpoint(port: number, kind: GdbRspEndpoint["kind"]): GdbRspEndpoint {
+    if (this.#closed) throw new Error("LLDB component isolate is closed");
+    const endpoint = { id: `rsp-${this.#nextRspEndpointId++}`, kind } satisfies GdbRspEndpoint;
+    this.#rspEndpoints.set(endpoint.id, { port, kind });
+    return endpoint;
+  }
+
+  discardRspEndpoint(id: string): void {
+    this.#rspEndpoints.delete(id);
+  }
+
   call<M extends LldbIsolateControlMethod>(
     method: M,
     ...args: unknown[]
   ): Promise<LldbIsolateControlResults[M]> {
-    return this.#call(method, args, []);
-  }
-
-  callWithPorts<M extends LldbIsolateControlMethod>(
-    method: M,
-    args: unknown[],
-    ports: MessagePort[]
-  ): Promise<LldbIsolateControlResults[M]> {
-    return this.#call(method, args, ports);
+    return this.#call(method, args);
   }
 
   #call<M extends LldbIsolateControlMethod>(
     method: M,
-    args: unknown[],
-    ports: MessagePort[]
+    args: unknown[]
   ): Promise<LldbIsolateControlResults[M]> {
     if (this.#closed) return Promise.reject(new Error("LLDB component isolate is closed"));
     const id = this.#nextId++;
@@ -287,15 +270,12 @@ class LldbIsolateChannel {
         reject,
       });
       try {
-        this.port.postMessage(
-          {
-            type: "lldb-isolate-control-request",
-            id,
-            method,
-            args,
-          } satisfies LldbIsolateControlRequest,
-          ports
-        );
+        this.port.postMessage({
+          type: "lldb-isolate-control-request",
+          id,
+          method,
+          args,
+        } satisfies LldbIsolateControlRequest);
       } catch (error) {
         this.#pending.delete(id);
         reject(toError(error));
@@ -344,8 +324,55 @@ class LldbIsolateChannel {
       case "lldb-isolate-abort-stop":
         this.runControl.abortStop(message.tid);
         return;
+      case "lldb-isolate-open-rsp":
+        void this.#openRspEndpoint(message.id, message.endpoint).catch((error) =>
+          this.#closeWithError(toError(error))
+        );
+        return;
     }
   };
+
+  async #openRspEndpoint(requestId: number, endpoint: GdbRspEndpoint): Promise<void> {
+    const registered = this.#rspEndpoints.get(endpoint.id);
+    if (!registered || registered.kind !== endpoint.kind) {
+      this.port.postMessage({
+        type: "lldb-isolate-open-rsp-response",
+        id: requestId,
+        error: serializeError(new Error(`unknown ${endpoint.kind} RSP endpoint ${endpoint.id}`)),
+      });
+      return;
+    }
+    this.#rspEndpoints.delete(endpoint.id);
+
+    let bridge: HostRspByteChannel | undefined;
+    try {
+      bridge = await openTcpRspByteChannel(registered.port, {
+        logger: this.logger,
+        label: `${endpoint.kind} ${endpoint.id}`,
+      });
+      if (this.#closed) throw new Error("LLDB component isolate closed while opening RSP");
+      const liveBridge = bridge;
+      this.#rspChannels.add(liveBridge);
+      void liveBridge.closed.then(() => this.#rspChannels.delete(liveBridge));
+      this.port.postMessage(
+        {
+          type: "lldb-isolate-open-rsp-response",
+          id: requestId,
+          port: bridge.componentPort,
+        },
+        [bridge.componentPort]
+      );
+    } catch (error) {
+      bridge?.close();
+      if (!this.#closed) {
+        this.port.postMessage({
+          type: "lldb-isolate-open-rsp-response",
+          id: requestId,
+          error: serializeError(error),
+        });
+      }
+    }
+  }
 
   #onPortClose = (): void => {
     this.#closeWithError(new Error("LLDB component isolate control port closed"));
@@ -365,11 +392,25 @@ class LldbIsolateChannel {
     this.#rejectReady(error);
     for (const pending of this.#pending.values()) pending.reject(error);
     this.#pending.clear();
+    this.#rspEndpoints.clear();
+    for (const bridge of this.#rspChannels) bridge.close();
+    this.#rspChannels.clear();
     this.runControl.close();
     this.port.off("message", this.#onMessage);
     this.port.off("close", this.#onPortClose);
     this.port.close();
   }
+}
+
+function serializeError(error: unknown): { name: string; message: string; stack?: string } {
+  if (error instanceof Error) {
+    return {
+      name: error.name,
+      message: error.message,
+      ...(error.stack ? { stack: error.stack } : {}),
+    };
+  }
+  return { name: "Error", message: String(error) };
 }
 
 function deserializeError(error: { name: string; message: string; stack?: string }): Error {
