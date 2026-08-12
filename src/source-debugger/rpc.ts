@@ -135,6 +135,9 @@ export interface SourceDebuggerRpcEndpoint {
   close(): void;
 }
 
+export type RemoteSourceDebuggerComponentInstance = SourceDebuggerComponentInstance &
+  SourceDebuggerRpcEndpoint;
+
 export function serveSourceDebuggerComponent(
   port: MessagePort,
   component: SourceDebuggerComponentInstance
@@ -237,7 +240,7 @@ export function connectSourceDebuggerComponentDefinition(
 export async function connectSourceDebuggerComponent(
   port: MessagePort,
   options: SourceDebuggerRpcOptions = {}
-): Promise<SourceDebuggerComponentInstance> {
+): Promise<RemoteSourceDebuggerComponentInstance> {
   const client = new SourceDebuggerRpcClient(
     port,
     options.requestTimeoutMs,
@@ -372,7 +375,7 @@ const NO_DEADLINE_METHODS = new Set<RpcCallMethod>([
   "command",
 ]);
 
-class RemoteSourceDebuggerComponent implements SourceDebuggerComponentInstance {
+class RemoteSourceDebuggerComponent implements RemoteSourceDebuggerComponentInstance {
   readonly id: string;
   readonly waitForPhysicalResume?: (
     runId: RunId,
@@ -474,6 +477,10 @@ class RemoteSourceDebuggerComponent implements SourceDebuggerComponentInstance {
     } finally {
       this.client.close();
     }
+  }
+
+  close(): void {
+    this.client.close();
   }
 }
 

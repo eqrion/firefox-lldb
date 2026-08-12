@@ -18,7 +18,11 @@ import { quietLogger } from "./logger.js";
 import { runRepl } from "./repl.js";
 import type { RdpWasmSession } from "../rdp/session.js";
 import { debugEnvEnabled, sourceDebuggerTraceEnabled } from "../config.js";
-import { IsolatedLldbComponentRuntime } from "../source-debugger/lldb-isolate.js";
+import {
+  IsolatedLldbComponentRuntime,
+  LldbSourceDebuggerComponentLoader,
+} from "../source-debugger/lldb-isolate.js";
+import { SourceDebuggerSessionHost } from "../source-debugger/host.js";
 import { SourceDebuggerSession } from "../source-debugger/session.js";
 import {
   componentForModuleUrl,
@@ -39,21 +43,25 @@ async function main(): Promise<void> {
   }
 
   const runtimes: IsolatedLldbComponentRuntime[] = [];
+  const debuggeeHost = new SourceDebuggerSessionHost({ logger: sourceLogger });
+  const loaders = routes.map(
+    (route) =>
+      new LldbSourceDebuggerComponentLoader({
+        id: route.id,
+        name: routes.length === 1 && route.id === "lldb" ? "LLDB" : `LLDB (${route.id})`,
+        logger: sourceLogger,
+        observerResumesTarget: routes.length === 1,
+        exclusiveModules: routedComponents,
+        verbose: verbose || sourceTrace,
+      })
+  );
   try {
-    for (const route of routes) {
-      runtimes.push(
-        await IsolatedLldbComponentRuntime.create({
-          id: route.id,
-          name: routes.length === 1 && route.id === "lldb" ? "LLDB" : `LLDB (${route.id})`,
-          logger: sourceLogger,
-          observerResumesTarget: routes.length === 1,
-          exclusiveModules: routedComponents,
-          verbose: verbose || sourceTrace,
-        })
-      );
+    for (const loader of loaders) {
+      runtimes.push(await loader.load(debuggeeHost.forComponent(loader.id)));
     }
   } catch (error) {
     await Promise.allSettled(runtimes.map((runtime) => runtime.close()));
+    debuggeeHost.close();
     throw error;
   }
   let session: RdpWasmSession | undefined;
@@ -61,6 +69,7 @@ async function main(): Promise<void> {
     components: runtimes.map(({ component }) => component),
     getRdpSession: () => session,
     resolveModuleOwner: createRoutedModuleOwnerResolver(routes, runtimes),
+    debuggeeHost,
     logger: sourceLogger,
   });
 

@@ -5,6 +5,7 @@
 import type { RdpWasmSession } from "../rdp/session.js";
 import { noopLogger, type Logger } from "../logging.js";
 import type { SourceDebuggerComponentInstance } from "./component.js";
+import type { SourceDebuggerSessionHost } from "./host.js";
 import type { ModuleOwnerResolver } from "./ownership.js";
 import { isSourceDebuggerRpcTransportError } from "./rpc.js";
 import type {
@@ -33,6 +34,8 @@ export interface SourceDebuggerSessionOptions {
   components: SourceDebuggerComponentInstance[];
   getRdpSession?: () => RdpWasmSession | undefined;
   resolveModuleOwner?: ModuleOwnerResolver;
+  /** Imported debuggee capabilities owned and revoked with this session. */
+  debuggeeHost?: SourceDebuggerSessionHost;
   logger?: Logger;
 }
 
@@ -58,6 +61,7 @@ export class SourceDebuggerSession {
   readonly #componentById: Map<ComponentId, SourceDebuggerComponentInstance>;
   readonly #getRdpSession: () => RdpWasmSession | undefined;
   readonly #resolveModuleOwner: ModuleOwnerResolver;
+  readonly #debuggeeHost: SourceDebuggerSessionHost | undefined;
   readonly #logger: Logger;
   readonly #frames = new Map<LogicalFrameId, LogicalFrame>();
   readonly #breakpointRoutes = new Map<BreakpointId, BreakpointRoute>();
@@ -82,6 +86,7 @@ export class SourceDebuggerSession {
     }
     this.#getRdpSession = options.getRdpSession ?? (() => undefined);
     this.#resolveModuleOwner = options.resolveModuleOwner ?? (async () => this.#components[0].id);
+    this.#debuggeeHost = options.debuggeeHost;
     this.#logger = options.logger ?? noopLogger;
     this.#stateComponentId = this.#components[0].id;
   }
@@ -348,7 +353,11 @@ export class SourceDebuggerSession {
   }
 
   async close(): Promise<void> {
-    await Promise.allSettled(this.#components.map((component) => component.dispose()));
+    try {
+      await Promise.allSettled(this.#components.map((component) => component.dispose()));
+    } finally {
+      this.#debuggeeHost?.close();
+    }
     this.#frames.clear();
     this.#breakpointRoutes.clear();
     this.#componentDescriptors.clear();

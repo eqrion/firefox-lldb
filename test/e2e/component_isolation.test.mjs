@@ -6,12 +6,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { parseCliArgs, startPlatformServer } from "../../src/core/platform-session.ts";
 import { freePort } from "../../src/platform/gdb-server-spawner.ts";
+import { SourceDebuggerSessionHost } from "../../src/source-debugger/host.ts";
 import { IsolatedLldbComponentRuntime } from "../../src/source-debugger/lldb-isolate.ts";
 import { createProbeModuleOwnerResolver } from "../../src/source-debugger/ownership.ts";
 import { SourceDebuggerSession } from "../../src/source-debugger/session.ts";
 
 test("an isolated LLDB imports its platform RSP connection from the host", async () => {
-  const runtime = await IsolatedLldbComponentRuntime.create({ id: "rsp-import" });
+  const host = new SourceDebuggerSessionHost();
+  const runtime = await IsolatedLldbComponentRuntime.create({
+    host: host.forComponent("rsp-import"),
+    id: "rsp-import",
+  });
   const handle = await startPlatformServer(
     parseCliArgs(["--connect", "--port", "0", "--rdp-port", String(await freePort())])
   );
@@ -36,14 +41,23 @@ test("an isolated LLDB imports its platform RSP connection from the host", async
   } finally {
     await handle.shutdown();
     await runtime.close();
+    host.close();
   }
 });
 
 test("an exited LLDB isolate is quarantined without losing its sibling", async () => {
-  const runtime = await IsolatedLldbComponentRuntime.create({ id: "isolated-lldb" });
-  const sibling = await IsolatedLldbComponentRuntime.create({ id: "surviving-lldb" });
+  const host = new SourceDebuggerSessionHost();
+  const runtime = await IsolatedLldbComponentRuntime.create({
+    host: host.forComponent("isolated-lldb"),
+    id: "isolated-lldb",
+  });
+  const sibling = await IsolatedLldbComponentRuntime.create({
+    host: host.forComponent("surviving-lldb"),
+    id: "surviving-lldb",
+  });
   const session = new SourceDebuggerSession({
     components: [runtime.component, sibling.component],
+    debuggeeHost: host,
   });
   try {
     const resolveOwner = createProbeModuleOwnerResolver([runtime, sibling]);

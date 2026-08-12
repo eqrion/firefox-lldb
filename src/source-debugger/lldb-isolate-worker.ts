@@ -5,73 +5,26 @@
 import { readFile } from "node:fs/promises";
 import { workerData } from "node:worker_threads";
 import type { Logger } from "../logging.js";
-import type { GdbRspConnection, GdbRspEndpoint, SourceDebuggerComponentHost } from "./component.js";
+import type { GdbRspEndpoint } from "./component.js";
+import { connectSourceDebuggerComponentHost } from "./host-rpc.js";
+import { serveSourceDebuggerComponentIsolate } from "./isolate.js";
 import { EmbeddedLldbComponentRuntime } from "./lldb-runtime.js";
 import type {
   LldbIsolateControlRequest,
   LldbIsolateHostMessage,
-  LldbIsolateOpenRspResponse,
   LldbIsolateWorkerData,
   LldbIsolateWorkerMessage,
 } from "./lldb-isolate-protocol.js";
-import { serveSourceDebuggerComponent, serveSourceDebuggerComponentDefinition } from "./rpc.js";
-import { connectRspByteChannel } from "./rsp-byte-channel.js";
 
 const data = workerData as LldbIsolateWorkerData;
-const { definitionPort, componentPort, controlPort, options } = data;
+const { definitionPort, componentPort, hostPort, controlPort, options } = data;
 
 function post(message: LldbIsolateHostMessage): void {
   controlPort.postMessage(message);
 }
 
-class IsolateSourceDebuggerComponentHost implements SourceDebuggerComponentHost {
-  readonly #pending = new Map<
-    number,
-    { resolve: (connection: GdbRspConnection) => void; reject: (error: Error) => void }
-  >();
-  #nextId = 1;
-  #closed = false;
-
-  connectGdbRsp(endpoint: GdbRspEndpoint): Promise<GdbRspConnection> {
-    if (this.#closed) return Promise.reject(new Error("source debugger component host is closed"));
-    const id = this.#nextId++;
-    return new Promise((resolve, reject) => {
-      this.#pending.set(id, { resolve, reject });
-      try {
-        post({ type: "lldb-isolate-open-rsp", id, endpoint });
-      } catch (error) {
-        this.#pending.delete(id);
-        reject(toError(error));
-      }
-    });
-  }
-
-  handleResponse(response: LldbIsolateOpenRspResponse): void {
-    const pending = this.#pending.get(response.id);
-    if (!pending) {
-      response.port?.close();
-      return;
-    }
-    this.#pending.delete(response.id);
-    if (response.error) {
-      response.port?.close();
-      pending.reject(deserializeError(response.error));
-    } else if (response.port) pending.resolve(connectRspByteChannel(response.port));
-    else pending.reject(new Error("component host returned no GDB RSP connection"));
-  }
-
-  close(error: Error): void {
-    if (this.#closed) return;
-    this.#closed = true;
-    for (const pending of this.#pending.values()) pending.reject(error);
-    this.#pending.clear();
-  }
-}
-
-const host = new IsolateSourceDebuggerComponentHost();
-controlPort.on("close", () =>
-  host.close(new Error("source debugger component host control port closed"))
-);
+const host = connectSourceDebuggerComponentHost(hostPort, { requestTimeoutMs: 30_000 });
+controlPort.on("close", () => host.close());
 
 const logger: Logger = {
   debug: options.verbose
@@ -92,11 +45,11 @@ void (async () => {
     observerResumesTarget: options.observerResumesTarget,
     exclusiveModules: options.exclusiveModules,
   });
-  const definitionEndpoint = serveSourceDebuggerComponentDefinition(
-    definitionPort,
-    runtime.definition
+  const isolateEndpoint = serveSourceDebuggerComponentIsolate(
+    { definitionPort, componentPort },
+    runtime.definition,
+    runtime.component
   );
-  const componentEndpoint = serveSourceDebuggerComponent(componentPort, runtime.component);
   runtime.runControl.installSynchronizeStop?.((tid) =>
     post({ type: "lldb-isolate-synchronize-stop", ...(tid === undefined ? {} : { tid }) })
   );
@@ -105,10 +58,6 @@ void (async () => {
   );
 
   const onMessage = (message: LldbIsolateWorkerMessage): void => {
-    if (message.type === "lldb-isolate-open-rsp-response") {
-      host.handleResponse(message);
-      return;
-    }
     if (message.type === "lldb-isolate-resume") {
       runtime.runControl.resume(message.action, (action) =>
         post({ type: "lldb-isolate-release", id: message.id, action })
@@ -120,9 +69,8 @@ void (async () => {
       (result) => {
         post({ type: "lldb-isolate-control-response", id: message.id, result });
         if (message.method === "close") {
-          definitionEndpoint.close();
-          componentEndpoint.close();
-          host.close(new Error("source debugger component host closed"));
+          isolateEndpoint.close();
+          host.close();
           controlPort.off("message", onMessage);
           controlPort.close();
         }
@@ -140,7 +88,7 @@ void (async () => {
   controlPort.start();
   post({ type: "lldb-isolate-ready" });
 })().catch((error) => {
-  host.close(toError(error));
+  host.close();
   post({ type: "lldb-isolate-initialization-error", error: serializeError(error) });
   definitionPort.close();
   componentPort.close();
@@ -174,15 +122,4 @@ function serializeError(error: unknown): { name: string; message: string; stack?
     };
   }
   return { name: "Error", message: String(error) };
-}
-
-function deserializeError(error: { name: string; message: string; stack?: string }): Error {
-  const result = new Error(error.message);
-  result.name = error.name;
-  if (error.stack) result.stack = error.stack;
-  return result;
-}
-
-function toError(error: unknown): Error {
-  return error instanceof Error ? error : new Error(String(error));
 }

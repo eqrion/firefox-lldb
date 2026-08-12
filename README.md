@@ -88,6 +88,12 @@ real asynchronous `probeModule()` still has to accept it. Future Dart/.NET/etc.
 components can instead be selected directly by unique artifact-driven probe
 confidence, without URL routes.
 
+Each installed ecosystem enters through a generic
+`SourceDebuggerComponentLoader`. A shared `SourceDebuggerSessionHost` gives the
+resulting isolate a component-scoped debuggee interface and owns its RSP
+connections for the session lifetime; LLDB is now one implementation of that
+loader rather than part of the generic worker protocol.
+
 At the `(sdb)` prompt, qualify ambiguous commands with the component ID:
 
 ```text

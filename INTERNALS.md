@@ -99,13 +99,20 @@ The CLI presents those adapters to `SourceDebuggerSession` through
 `src/source-debugger/rpc.ts`, a concurrent request/response transport over
 `MessagePort`. Separate definition and instance ports keep discovery
 (`describe`/`probeModule`) independent from target-specific operations; the
-LLDB control channel no longer carries component API calls. This exercises
+third generic port carries the component's imported
+`SourceDebuggerComponentHost`. Installed ecosystems enter through
+`SourceDebuggerComponentLoader`, which receives a binding scoped to its
+component ID and chooses how to create its isolate. The LLDB control channel no
+longer carries component API or host calls. This exercises
 structured cloning and keeps a pending
 `waitForStop` from blocking a sibling `abortRun` or `cancelRun` call. The LLDB
 adapter, runtime, and nested `lldb-wasm` worker live inside a per-component
-outer worker (`lldb-isolate-worker.ts`). The host-side proxy retains TCP
-bridges and Firefox's physical resume closures; the worker returns only a
-refined resume action and permission to release one. Worker exit closes the
+outer worker (`lldb-isolate-worker.ts`). A shared `SourceDebuggerSessionHost`
+owns opaque one-shot RSP endpoints and every live TCP byte-channel bridge;
+sibling bindings cannot consume one another's endpoints, and session shutdown
+revokes them all. The LLDB host-side proxy retains only bootstrap state and
+Firefox's physical resume closures; the worker returns a refined resume action
+and permission to release one. Worker exit closes the
 component port, rejects pending calls, and drops unreleased closures so failure
 is biased toward leaving Firefox paused. Bounded component calls have a
 30-second watchdog (run waits and debugger-native commands are intentionally
@@ -131,7 +138,9 @@ bytes between that resource and its internal channel. TCP, gdbstub, RDP, and
 physical Firefox ownership stay outside the debugger isolate.
 Platform and per-process ports are registered under opaque endpoint IDs. The
 worker obtains each stream by calling its `SourceDebuggerComponentHost` proxy;
-it cannot select or connect to an arbitrary host port.
+it cannot select or connect to an arbitrary host port, nor consume an endpoint
+registered for a sibling component. Endpoint and bridge lifetime belongs to the
+shared `SourceDebuggerSessionHost`, not the LLDB-specific control channel.
 
 ```
 wasm LLDB ─► channel N ◄─ GdbRspConnection ─ MessagePort ─► host net.Socket ─► platform / per-tab server

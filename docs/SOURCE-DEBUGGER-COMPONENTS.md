@@ -33,14 +33,23 @@ The first implementation lives under `src/source-debugger/`:
   highest-confidence owner for each newly loaded module.
 - `../wasm/metadata.ts` scans custom-section names in the host and normalizes
   them into small, payload-free debug-info hints.
+- `host.ts` owns one session's imported debuggee capabilities and issues
+  component-scoped, one-shot RSP endpoints.
+- `host-rpc.ts` projects those imported capabilities into an isolate without
+  exposing TCP, RDP, or Node APIs.
 - `rsp-byte-channel.ts` adapts host-owned TCP endpoints to transferable RSP
   streams without exposing sockets to debugger isolates.
+- `loader.ts` defines the browser-facing installation seam for debugger
+  ecosystems.
+- `isolate.ts` implements the generic three-port definition, instance, and
+  imported-host transport used by TypeScript workers.
 - `lldb-component.ts` adapts the real wasm-compiled LLDB and its public API.
 - `lldb-runtime.ts` owns one isolated LLDB worker, pthread pool, and in-process
   channels, and imports host-supplied RSP byte streams.
 - `lldb-isolate.ts` is the host proxy for an outer component worker. The worker
   owns the LLDB adapter, its runtime, and the nested `lldb-wasm` worker; the
-  host owns TCP bridges, component proxies, and physical run-lease proxies.
+  LLDB-specific channel retains only bootstrap, native commands, and physical
+  run-lease proxies.
 - `rpc.ts` exposes an instance over concurrent request/response calls on a
   `MessagePort`, and separately exposes a definition's discovery methods over
   the same generic transport. Both preserve structured records, errors, and
@@ -75,15 +84,16 @@ fan out to candidates. Ecosystems that need to validate custom-section payloads
 will eventually need a bounded module-inspection resource or richer normalized
 host metadata.
 
-The outer worker now has separate generic definition and instance ports. The
-host calls `describe()` and `probeModule()` through the definition port; the
-session calls target-specific operations through the instance port. LLDB's
-remaining control channel contains only runtime/bootstrap work such as RSP
-bridging, platform connection, attach, native commands, and shutdown. A new
-debugger ecosystem therefore does not need to speak an LLDB-named discovery
-protocol. `instantiate(host)` still runs locally inside the worker because that
-is where the imported host-resource proxy lives; making worker creation itself
-a generic loader is the next boundary to extract.
+The generic isolate loader now creates separate definition, instance, and
+imported-host ports. The host calls `describe()` and `probeModule()` through the
+definition port; the session calls target-specific operations through the
+instance port; and the worker receives only its component-scoped debuggee host
+proxy. An ecosystem implements `SourceDebuggerComponentLoader` to create its
+isolate and instantiate the definition with that imported host. LLDB's
+remaining control channel contains only runtime/bootstrap work such as
+platform connection, attach, native commands, run-lease handoff, and shutdown.
+A Dart, .NET, or other debugger therefore does not need to speak an LLDB-named
+discovery or host protocol.
 
 The `firefox-lldb` CLI now presents a language-generic `(sdb)` prompt. Its core
 commands call only `SourceDebuggerSession`:
@@ -190,11 +200,12 @@ localhost platform/per-process sockets, transfers a `MessagePort`, and the
 worker adapts it to that resource before handing it to LLDB. Thus LLDB still
 gets its required GDB RSP protocol while the isolated component never imports
 TCP, Firefox RDP, or Node socket APIs. Platform and process connections are
-registered as opaque endpoints; the worker resolves them by calling the real
-`SourceDebuggerComponentHost` proxy, and the LLDB definition is created through
-the component factory's `instantiate(host)` call. The remaining host cleanup is
-to move endpoint registration out of platform-server bootstrap and into a
-first-class session-owned debuggee host before a Component Model translation.
+registered as opaque, one-shot endpoints in `SourceDebuggerSessionHost`; the
+worker resolves them by calling its scoped `SourceDebuggerComponentHost`
+proxy. Endpoint IDs, live TCP bridges, sibling isolation, and teardown are all
+owned at session scope. The LLDB definition is created through the component
+factory's `instantiate(host)` call. This is the TypeScript shape to translate
+into Component Model resource imports later.
 
 LLDB scopes currently select and materialize frames through the public command
 interpreter. The bulk SB wrapper runs on a different wasm pthread, cannot
@@ -209,12 +220,14 @@ adapter.
 1. **Complete the LLDB source adapter (in progress).** Extend the wasm LLDB SB wrapper with
    structured thread, source, breakpoint-location, scope, and lazy `SBValue`
    operations. Remove presentation parsing from `lldb-component.ts`.
-2. **Move raw debuggee ownership into the session (shared-host and RSP-import proofs complete).** The
+2. **Move raw debuggee ownership into the session (TypeScript prototype complete).** The
    platform can now lend one physical `RdpWasmSession` to multiple filtered
    gdbstub projections without transferring its lifetime. TCP stays in the
-   outer host and each LLDB isolate imports only a `GdbRspConnection`. Extract
-   endpoint creation into the component factory's first-class session-owned
-   host rather than the current platform/bootstrap options.
+   outer host and each LLDB isolate imports only a `GdbRspConnection`. A
+   first-class `SourceDebuggerSessionHost` creates component-scoped endpoints,
+   owns their live byte channels, rejects sibling use, and revokes everything
+   with the logical session. Translating that resource boundary to the
+   Component Model remains.
 3. **Make module assignment explicit (probe arbitration complete).** Components are probed
    asynchronously when modules arrive; a unique best claim gets sticky
    ownership, while ties and unsupported modules fail closed. The production

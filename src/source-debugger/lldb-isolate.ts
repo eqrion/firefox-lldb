@@ -5,12 +5,10 @@
 import { MessageChannel, type MessagePort, Worker } from "node:worker_threads";
 import type { RdpDebuggeeResumeAction, RdpDebuggeeRunControl } from "../gdb/rdp-debuggee.js";
 import { noopLogger, type Logger } from "../logging.js";
-import type {
-  GdbRspEndpoint,
-  ModuleClaim,
-  SourceDebuggerComponentDefinition,
-  SourceDebuggerComponentInstance,
-} from "./component.js";
+import type { ModuleClaim, SourceDebuggerComponentInstance } from "./component.js";
+import type { SourceDebuggerComponentHostBinding } from "./host.js";
+import { SourceDebuggerComponentIsolate } from "./isolate.js";
+import type { LoadedSourceDebuggerComponent, SourceDebuggerComponentLoader } from "./loader.js";
 import type {
   LldbIsolateControlMethod,
   LldbIsolateControlRequest,
@@ -18,13 +16,7 @@ import type {
   LldbIsolateHostMessage,
   LldbIsolateWorkerData,
 } from "./lldb-isolate-protocol.js";
-import {
-  connectSourceDebuggerComponent,
-  connectSourceDebuggerComponentDefinition,
-  type SourceDebuggerRpcEndpoint,
-} from "./rpc.js";
 import type { SourceDebuggerComponentProbe } from "./ownership.js";
-import { openTcpRspByteChannel, type HostRspByteChannel } from "./rsp-byte-channel.js";
 import type { CommandResult, ModuleDescriptor } from "./types.js";
 
 interface PendingControl {
@@ -33,6 +25,7 @@ interface PendingControl {
 }
 
 export interface IsolatedLldbComponentRuntimeOptions {
+  host: SourceDebuggerComponentHostBinding;
   id?: string;
   name?: string;
   logger?: Logger;
@@ -101,38 +94,53 @@ class IsolatedLldbRunControl implements RdpDebuggeeRunControl {
   }
 }
 
-export class IsolatedLldbComponentRuntime implements SourceDebuggerComponentProbe {
-  readonly definition: SourceDebuggerComponentDefinition & SourceDebuggerRpcEndpoint;
-  readonly component: SourceDebuggerComponentInstance;
+export class IsolatedLldbComponentRuntime
+  implements SourceDebuggerComponentProbe, LoadedSourceDebuggerComponent
+{
   readonly runControl: RdpDebuggeeRunControl;
+  readonly #host: SourceDebuggerComponentHostBinding;
+  readonly #isolate: SourceDebuggerComponentIsolate;
   readonly #channel: LldbIsolateChannel;
   #closePromise: Promise<void> | undefined;
 
   private constructor(
-    definition: SourceDebuggerComponentDefinition & SourceDebuggerRpcEndpoint,
-    component: SourceDebuggerComponentInstance,
+    host: SourceDebuggerComponentHostBinding,
+    isolate: SourceDebuggerComponentIsolate,
     channel: LldbIsolateChannel
   ) {
-    this.definition = definition;
-    this.component = component;
+    this.#host = host;
+    this.#isolate = isolate;
     this.runControl = channel.runControl;
     this.#channel = channel;
   }
 
   get id(): string {
-    return this.component.id;
+    return this.#isolate.id;
+  }
+
+  get definition(): SourceDebuggerComponentIsolate["definition"] {
+    return this.#isolate.definition;
+  }
+
+  get component(): SourceDebuggerComponentInstance {
+    return this.#isolate.component;
   }
 
   static async create(
-    options: IsolatedLldbComponentRuntimeOptions = {}
+    options: IsolatedLldbComponentRuntimeOptions
   ): Promise<IsolatedLldbComponentRuntime> {
-    const definitionChannel = new MessageChannel();
-    const componentChannel = new MessageChannel();
     const controlChannel = new MessageChannel();
     const logger = options.logger ?? noopLogger;
+    let channel: LldbIsolateChannel | undefined;
+    const isolate = new SourceDebuggerComponentIsolate(options.host, {
+      requestTimeoutMs: options.requestTimeoutMs ?? 30_000,
+      onTransportFailure: (error) => {
+        logger.error(`[${options.id ?? "lldb"}] ${error.message}; terminating isolate`);
+        void channel?.terminate();
+      },
+    });
     const workerData: LldbIsolateWorkerData = {
-      definitionPort: definitionChannel.port2,
-      componentPort: componentChannel.port2,
+      ...isolate.workerPorts,
       controlPort: controlChannel.port2,
       options: {
         id: options.id,
@@ -145,70 +153,54 @@ export class IsolatedLldbComponentRuntime implements SourceDebuggerComponentProb
     const workerEntry = import.meta.url.endsWith(".ts")
       ? new URL("./lldb-isolate-worker-dev.mjs", import.meta.url)
       : new URL("./lldb-isolate-worker.js", import.meta.url);
-    const worker = new Worker(workerEntry, {
-      workerData,
-      transferList: [definitionChannel.port2, componentChannel.port2, controlChannel.port2],
-    });
-    const channel = new LldbIsolateChannel(
-      worker,
-      controlChannel.port1,
-      logger,
-      options.exclusiveModules ?? false
-    );
-    let definition: (SourceDebuggerComponentDefinition & SourceDebuggerRpcEndpoint) | undefined;
     try {
+      const worker = new Worker(workerEntry, {
+        workerData,
+        transferList: [...isolate.transferList, controlChannel.port2],
+      });
+      channel = new LldbIsolateChannel(
+        worker,
+        controlChannel.port1,
+        logger,
+        options.exclusiveModules ?? false
+      );
       await channel.ready;
-      const onTransportFailure = (error: Error) => {
-        logger.error(`[${options.id ?? "lldb"}] ${error.message}; terminating isolate`);
-        void channel.terminate();
-      };
-      definition = connectSourceDebuggerComponentDefinition(definitionChannel.port1, {
-        requestTimeoutMs: options.requestTimeoutMs ?? 30_000,
-        onTransportFailure,
-      });
-      const component = await connectSourceDebuggerComponent(componentChannel.port1, {
-        requestTimeoutMs: options.requestTimeoutMs ?? 30_000,
-        onTransportFailure,
-      });
-      const descriptor = await definition.describe();
-      if (descriptor.id !== component.id) {
-        throw new Error(
-          `SourceDebuggerComponent definition id ${descriptor.id} does not match instance id ${component.id}`
-        );
-      }
-      return new IsolatedLldbComponentRuntime(definition, component, channel);
+      await isolate.connect();
+      return new IsolatedLldbComponentRuntime(options.host, isolate, channel);
     } catch (error) {
-      definition?.close();
-      definitionChannel.port1.close();
-      componentChannel.port1.close();
-      await channel.close().catch(() => {});
+      isolate.close();
+      if (channel) await channel.close().catch(() => {});
+      else {
+        controlChannel.port1.close();
+        controlChannel.port2.close();
+      }
       throw error;
     }
   }
 
   readonly bridgeTcp = async (port: number): Promise<number> => {
     if (this.#closePromise) throw new Error(`LLDB component ${this.component.id} is closed`);
-    const endpoint = this.#channel.registerRspEndpoint(port, "process");
+    const endpoint = this.#host.registerGdbRspEndpoint(port, "process");
     try {
       return await this.#channel.call("bridge-rsp", endpoint);
     } catch (error) {
-      this.#channel.discardRspEndpoint(endpoint.id);
+      this.#host.discardGdbRspEndpoint(endpoint);
       throw error;
     }
   };
 
   async connectPlatform(port: number): Promise<void> {
-    const endpoint = this.#channel.registerRspEndpoint(port, "platform");
+    const endpoint = this.#host.registerGdbRspEndpoint(port, "platform");
     try {
       await this.#channel.call("connect-platform", endpoint);
     } catch (error) {
-      this.#channel.discardRspEndpoint(endpoint.id);
+      this.#host.discardGdbRspEndpoint(endpoint);
       throw error;
     }
   }
 
   probeModule(module: Omit<ModuleDescriptor, "owner">): Promise<ModuleClaim> {
-    return this.definition.probeModule(module);
+    return this.#isolate.probeModule(module);
   }
 
   async attach(
@@ -247,9 +239,27 @@ export class IsolatedLldbComponentRuntime implements SourceDebuggerComponentProb
   }
 
   async #close(force: boolean): Promise<void> {
-    this.definition.close();
+    this.#isolate.close();
     if (force) await this.#channel.terminate();
     else await this.#channel.close();
+  }
+}
+
+export type LldbSourceDebuggerComponentLoaderOptions = Omit<
+  IsolatedLldbComponentRuntimeOptions,
+  "host"
+>;
+
+/** Installed LLDB ecosystem entry for a generic component catalog. */
+export class LldbSourceDebuggerComponentLoader implements SourceDebuggerComponentLoader<IsolatedLldbComponentRuntime> {
+  readonly id: string;
+
+  constructor(private readonly options: LldbSourceDebuggerComponentLoaderOptions = {}) {
+    this.id = options.id ?? "lldb";
+  }
+
+  load(host: SourceDebuggerComponentHostBinding): Promise<IsolatedLldbComponentRuntime> {
+    return IsolatedLldbComponentRuntime.create({ ...this.options, id: this.id, host });
   }
 }
 
@@ -257,10 +267,7 @@ class LldbIsolateChannel {
   readonly ready: Promise<void>;
   readonly runControl: IsolatedLldbRunControl;
   readonly #pending = new Map<number, PendingControl>();
-  readonly #rspEndpoints = new Map<string, { port: number; kind: GdbRspEndpoint["kind"] }>();
-  readonly #rspChannels = new Set<HostRspByteChannel>();
   #nextId = 1;
-  #nextRspEndpointId = 1;
   #closed = false;
   #resolveReady!: () => void;
   #rejectReady!: (error: Error) => void;
@@ -284,17 +291,6 @@ class LldbIsolateChannel {
     port.start();
     worker.on("error", this.#onWorkerError);
     worker.on("exit", this.#onWorkerExit);
-  }
-
-  registerRspEndpoint(port: number, kind: GdbRspEndpoint["kind"]): GdbRspEndpoint {
-    if (this.#closed) throw new Error("LLDB component isolate is closed");
-    const endpoint = { id: `rsp-${this.#nextRspEndpointId++}`, kind } satisfies GdbRspEndpoint;
-    this.#rspEndpoints.set(endpoint.id, { port, kind });
-    return endpoint;
-  }
-
-  discardRspEndpoint(id: string): void {
-    this.#rspEndpoints.delete(id);
   }
 
   call<M extends LldbIsolateControlMethod>(
@@ -370,55 +366,8 @@ class LldbIsolateChannel {
       case "lldb-isolate-abort-stop":
         this.runControl.abortStop(message.tid);
         return;
-      case "lldb-isolate-open-rsp":
-        void this.#openRspEndpoint(message.id, message.endpoint).catch((error) =>
-          this.#closeWithError(toError(error))
-        );
-        return;
     }
   };
-
-  async #openRspEndpoint(requestId: number, endpoint: GdbRspEndpoint): Promise<void> {
-    const registered = this.#rspEndpoints.get(endpoint.id);
-    if (!registered || registered.kind !== endpoint.kind) {
-      this.port.postMessage({
-        type: "lldb-isolate-open-rsp-response",
-        id: requestId,
-        error: serializeError(new Error(`unknown ${endpoint.kind} RSP endpoint ${endpoint.id}`)),
-      });
-      return;
-    }
-    this.#rspEndpoints.delete(endpoint.id);
-
-    let bridge: HostRspByteChannel | undefined;
-    try {
-      bridge = await openTcpRspByteChannel(registered.port, {
-        logger: this.logger,
-        label: `${endpoint.kind} ${endpoint.id}`,
-      });
-      if (this.#closed) throw new Error("LLDB component isolate closed while opening RSP");
-      const liveBridge = bridge;
-      this.#rspChannels.add(liveBridge);
-      void liveBridge.closed.then(() => this.#rspChannels.delete(liveBridge));
-      this.port.postMessage(
-        {
-          type: "lldb-isolate-open-rsp-response",
-          id: requestId,
-          port: bridge.componentPort,
-        },
-        [bridge.componentPort]
-      );
-    } catch (error) {
-      bridge?.close();
-      if (!this.#closed) {
-        this.port.postMessage({
-          type: "lldb-isolate-open-rsp-response",
-          id: requestId,
-          error: serializeError(error),
-        });
-      }
-    }
-  }
 
   #onPortClose = (): void => {
     this.#closeWithError(new Error("LLDB component isolate control port closed"));
@@ -438,25 +387,11 @@ class LldbIsolateChannel {
     this.#rejectReady(error);
     for (const pending of this.#pending.values()) pending.reject(error);
     this.#pending.clear();
-    this.#rspEndpoints.clear();
-    for (const bridge of this.#rspChannels) bridge.close();
-    this.#rspChannels.clear();
     this.runControl.close();
     this.port.off("message", this.#onMessage);
     this.port.off("close", this.#onPortClose);
     this.port.close();
   }
-}
-
-function serializeError(error: unknown): { name: string; message: string; stack?: string } {
-  if (error instanceof Error) {
-    return {
-      name: error.name,
-      message: error.message,
-      ...(error.stack ? { stack: error.stack } : {}),
-    };
-  }
-  return { name: "Error", message: String(error) };
 }
 
 function deserializeError(error: { name: string; message: string; stack?: string }): Error {

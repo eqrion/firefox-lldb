@@ -12,6 +12,7 @@ import { PassThrough, Writable } from "node:stream";
 import { parseCliArgs, startPlatformServer } from "../../src/core/platform-session.ts";
 import { runRepl } from "../../src/cli/repl.ts";
 import { IsolatedLldbComponentRuntime } from "../../src/source-debugger/lldb-isolate.ts";
+import { SourceDebuggerSessionHost } from "../../src/source-debugger/host.ts";
 import { SourceDebuggerSession } from "../../src/source-debugger/session.ts";
 import { freePort } from "../../src/platform/gdb-server-spawner.ts";
 import { consoleLogger } from "../../src/cli/logger.ts";
@@ -97,7 +98,9 @@ test("two isolated LLDB components compose an interleaved stack over one Firefox
   const staticServer = await startStaticServer("test/fixtures/two-components");
   const url = `http://127.0.0.1:${staticServer.port}/index.html`;
   const rdpPort = await freePort();
+  const debuggeeHost = new SourceDebuggerSessionHost({ logger: protocolLogger });
   const primary = await IsolatedLldbComponentRuntime.create({
+    host: debuggeeHost.forComponent("lldb-a"),
     id: "lldb-a",
     name: "LLDB A",
     exclusiveModules: true,
@@ -106,6 +109,7 @@ test("two isolated LLDB components compose an interleaved stack over one Firefox
     verbose: Boolean(process.env.E2E_RUNTIME_VERBOSE),
   });
   const secondary = await IsolatedLldbComponentRuntime.create({
+    host: debuggeeHost.forComponent("lldb-b"),
     id: "lldb-b",
     name: "LLDB B",
     exclusiveModules: true,
@@ -176,6 +180,7 @@ test("two isolated LLDB components compose an interleaved stack over one Firefox
       getRdpSession: () => primaryRdpSession,
       resolveModuleOwner: async (module) =>
         module.url.includes("component=b") ? "lldb-b" : "lldb-a",
+      debuggeeHost,
     });
     repl = startRepl(session);
 
@@ -290,6 +295,7 @@ test("two isolated LLDB components compose an interleaved stack over one Firefox
   } finally {
     repl?.close();
     await session?.close().catch(() => {});
+    debuggeeHost.close();
     await Promise.allSettled([
       primary.close(),
       secondary.close(),

@@ -4,12 +4,10 @@
 
 import type { MessagePort } from "node:worker_threads";
 import type { RdpDebuggeeResumeAction } from "../gdb/rdp-debuggee.js";
-import type { GdbRspEndpoint } from "./component.js";
+import type { SourceDebuggerComponentWorkerPorts } from "./isolate.js";
 import type { CommandResult } from "./types.js";
 
-export interface LldbIsolateWorkerData {
-  definitionPort: MessagePort;
-  componentPort: MessagePort;
+export interface LldbIsolateWorkerData extends SourceDebuggerComponentWorkerPorts {
   controlPort: MessagePort;
   options: {
     id?: string;
@@ -78,19 +76,6 @@ export interface LldbIsolateAbortStop {
   tid?: number;
 }
 
-export interface LldbIsolateOpenRspRequest {
-  type: "lldb-isolate-open-rsp";
-  id: number;
-  endpoint: GdbRspEndpoint;
-}
-
-export interface LldbIsolateOpenRspResponse {
-  type: "lldb-isolate-open-rsp-response";
-  id: number;
-  port?: MessagePort;
-  error?: { name: string; message: string; stack?: string };
-}
-
 export type LldbIsolateHostMessage =
   | LldbIsolateControlResponse
   | LldbIsolateReady
@@ -98,13 +83,9 @@ export type LldbIsolateHostMessage =
   | LldbIsolateLog
   | LldbIsolateRelease
   | LldbIsolateSynchronizeStop
-  | LldbIsolateAbortStop
-  | LldbIsolateOpenRspRequest;
+  | LldbIsolateAbortStop;
 
-export type LldbIsolateWorkerMessage =
-  | LldbIsolateControlRequest
-  | LldbIsolateResume
-  | LldbIsolateOpenRspResponse;
+export type LldbIsolateWorkerMessage = LldbIsolateControlRequest | LldbIsolateResume;
 
 export interface LldbIsolateControlResults {
   "bridge-rsp": number;

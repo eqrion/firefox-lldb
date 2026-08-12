@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { MessageChannel } from "node:worker_threads";
 import assert from "node:assert/strict";
 import { SourceDebuggerSession } from "../../src/source-debugger/session.js";
+import { SourceDebuggerSessionHost } from "../../src/source-debugger/host.js";
 import type { SourceDebuggerComponentInstance } from "../../src/source-debugger/component.js";
 import type { RdpWasmSession } from "../../src/rdp/session.js";
 import type {
@@ -144,6 +145,17 @@ test("component IDs must be unique", () => {
     () => new SourceDebuggerSession({ components: [fakeComponent(), fakeComponent()] }),
     /must be unique/
   );
+});
+
+test("session close revokes its debuggee host capabilities", async () => {
+  const host = new SourceDebuggerSessionHost();
+  const session = new SourceDebuggerSession({
+    components: [fakeComponent()],
+    debuggeeHost: host,
+  });
+
+  await session.close();
+  assert.throws(() => host.forComponent("late"), /SourceDebuggerSessionHost is closed/);
 });
 
 test("a failed component is quarantined while healthy projections remain available", async () => {
