@@ -3,7 +3,8 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // Production-path proof: spawn the real firefox-lldb executable in a PTY and
-// ask it to construct isolated LLDB SourceDebuggerComponents itself.
+// ask it to construct isolated LLDB SourceDebuggerComponents itself. Every
+// generic operation crosses the outer worker's MessagePort RPC boundary.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

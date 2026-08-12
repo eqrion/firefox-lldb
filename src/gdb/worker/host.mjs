@@ -17,6 +17,7 @@ import {
   STATE_RESPONSE,
   DATA_BYTES,
 } from "./wire.mjs";
+import { normalizeDebuggeeError } from "./errors.mjs";
 
 /**
  * @param {object} opts
@@ -48,23 +49,37 @@ export function startGdbServer({ dispatch, port, onInfo, onTrace, onError, verbo
   worker.on("message", async (m) => {
     if (m === 1) {
       let out;
+      let requestLabel = "unknown request";
       try {
         const len = Atomics.load(ctrl, CTRL_LEN);
         if (len < 0 || len > data.length) throw new Error("invalid worker request length");
         const req = decode(data.subarray(0, len));
+        requestLabel = `${req.type}.${req.method}`;
         out = encode({ ok: true, value: await dispatch(req) });
       } catch (e) {
         try {
-          out = encode({ ok: false, error: String(e?.message || e) });
+          const normalized = normalizeDebuggeeError(e);
+          if (normalized.unexpected) {
+            reportError(`[gdb debuggee error] ${requestLabel}: ${e?.stack || normalized.message}`);
+          }
+          out = encode({ ok: false, error: normalized.tag, message: normalized.message });
         } catch {
-          out = encode({ ok: false, error: "rpc failure" });
+          out = encode({
+            ok: false,
+            error: "invalid-entity",
+            message: "failed to encode debuggee error",
+          });
         }
       }
       if (out.length > data.length) {
         // A response that overflows the shared buffer (e.g. an unreasonable
         // memory read produced by a non-wasm-plugin session) would throw on
         // data.set and kill the worker. Reply with an error instead.
-        out = encode({ ok: false, error: "out-of-bounds" });
+        out = encode({
+          ok: false,
+          error: "out-of-bounds",
+          message: "debuggee response exceeded the shared buffer",
+        });
       }
       data.set(out, 0);
       Atomics.store(ctrl, CTRL_LEN, out.length);

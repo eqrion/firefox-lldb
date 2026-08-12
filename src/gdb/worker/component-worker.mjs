@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { WASIShim } from "@bytecodealliance/preview2-shim/instantiation";
 import { instantiate } from "../generated/gdbstub.js";
 import { encode, decode, CTRL_STATE, CTRL_LEN, STATE_IDLE, STATE_REQUEST } from "./wire.mjs";
+import { normalizeDebuggeeError } from "./errors.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const GEN = path.join(here, "../generated");
@@ -41,9 +42,14 @@ function rpc(type, id, method, args) {
   if (!resp.ok) {
     // jco lifts a thrown error into a WIT `result` Err only via `.payload`
     // (which must be the error enum's tag, e.g. "out-of-bounds"); a bare Error
-    // is re-thrown. Attach payload so debuggee methods can signal Err.
-    const err = new Error(resp.error || "rpc error");
-    err.payload = resp.error;
+    // is re-thrown. Normalize again at this final boundary so a malformed or
+    // older host response can never make jco lower an invalid enum value.
+    const normalized = normalizeDebuggeeError({
+      message: resp.message || resp.error || "rpc error",
+      payload: resp.error,
+    });
+    const err = new Error(normalized.message);
+    err.payload = normalized.tag;
     throw err;
   }
   return wrap(resp.value);

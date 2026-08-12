@@ -63,12 +63,15 @@ class LldbRuntimeRunControl implements LldbComponentRunControl, RdpDebuggeeRunCo
     });
   }
 
-  resume(_action: RdpDebuggeeResumeAction, resumePhysicalTarget: () => void): void {
+  resume(
+    action: RdpDebuggeeResumeAction,
+    resumePhysicalTarget: (action: RdpDebuggeeResumeAction) => void
+  ): void {
     const pending = this.#pending;
     if (!pending) {
       // Native LLDB commands issued outside SourceDebuggerSession retain their
       // normal behavior during the migration.
-      resumePhysicalTarget();
+      resumePhysicalTarget(action);
       return;
     }
     this.logger.debug(`[${this.id}] armed ${pending.request.runId} as ${pending.request.role}`);
@@ -78,14 +81,15 @@ class LldbRuntimeRunControl implements LldbComponentRunControl, RdpDebuggeeRunCo
       if (sequence > waiter.afterSequence) waiter.resolve(sequence);
       else pending.resumeWaiters.push(waiter);
     }
+    const releasedAction = this.#adjustResumeAction(action);
     if (pending.request.role === "driver") {
-      pending.resumeCallbacks.set(sequence, resumePhysicalTarget);
+      pending.resumeCallbacks.set(sequence, () => resumePhysicalTarget(releasedAction));
       if (this.observerResumesTarget) this.releasePhysicalResume(pending.request.runId, sequence);
     } else if (this.observerResumesTarget) {
       this.logger.debug(
         `[${this.id}] released ${pending.request.role} pause lease for ${pending.request.runId}`
       );
-      resumePhysicalTarget();
+      resumePhysicalTarget(releasedAction);
     }
     // A stop can reach the driver while this LLDB is between an internal
     // step-off and its following semantic continue. Keep synchronization
@@ -95,14 +99,15 @@ class LldbRuntimeRunControl implements LldbComponentRunControl, RdpDebuggeeRunCo
     else if (pending.synchronizeRequested) this.#synchronizeStop?.();
   }
 
-  adjustStepLimit(_tid: number, proposed: "step" | "next"): "step" | "next" {
+  #adjustResumeAction(action: RdpDebuggeeResumeAction): RdpDebuggeeResumeAction {
     const request = this.#pending?.request;
-    return this.crossComponentStepping &&
+    return action.kind === "step" &&
+      this.crossComponentStepping &&
       request?.role === "driver" &&
       request.action.kind === "step-into" &&
-      proposed === "next"
-      ? "step"
-      : proposed;
+      action.limit === "next"
+      ? { ...action, limit: "step" }
+      : action;
   }
 
   endRun(runId: RunId): void {

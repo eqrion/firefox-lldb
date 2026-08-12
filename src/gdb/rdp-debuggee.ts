@@ -148,12 +148,13 @@ export interface RdpDebuggeeRunControl {
   /** This endpoint participates in cross-component plan preemption and needs
    * the private logical breakpoint used to stop its debugger engine. */
   usesAbortSentinel?: boolean;
-  resume(action: RdpDebuggeeResumeAction, resumePhysicalTarget: () => void): void;
-  /** Adjust the RDP granularity chosen for an LLDB single-step. Multi-component
-   * source step-in uses instruction stepping at opaque JS boundaries so it can
-   * observe entry into a foreign-owned Wasm activation instead of stepping
-   * over that call as one JavaScript source line. */
-  adjustStepLimit?(tid: number, proposed: "step" | "next"): "step" | "next";
+  /** Hold a proposed physical resume until this debugger owns the shared run
+   * lease. The component may refine the action before releasing it; LLDB
+   * step-in uses instruction granularity at opaque JavaScript boundaries. */
+  resume(
+    action: RdpDebuggeeResumeAction,
+    resumePhysicalTarget: (action: RdpDebuggeeResumeAction) => void
+  ): void;
   installSynchronizeStop?(synchronize: () => void): void;
   installAbortStop?(abort: () => void): void;
 }
@@ -971,7 +972,7 @@ export class RdpDebuggee {
           this.#session.close();
         });
       } else {
-        const resume = () => {
+        const resume = (_action: RdpDebuggeeResumeAction) => {
           // Arm the physical all-stop only when run control grants this
           // component the resume lease. Observer components share the stop
           // event but must not install duplicate coordinators on one session.
@@ -986,8 +987,9 @@ export class RdpDebuggee {
           this.#onFirstContinue = null;
           cb?.();
         };
-        if (this.#runControl) this.#runControl.resume({ kind: "continue" }, resume);
-        else resume();
+        const action = { kind: "continue" } as const;
+        if (this.#runControl) this.#runControl.resume(action, resume);
+        else resume(action);
       }
     }
     return this.#eventFutureRef();
@@ -1024,13 +1026,14 @@ export class RdpDebuggee {
       // synthetic modules can't distinguish JS functions anyway).
       const innermost = this.#framesByTid.get(tid)?.[0];
       const proposedLimit = innermost?.type === "call" ? "next" : "step";
-      const limit = this.#runControl?.adjustStepLimit?.(tid, proposedLimit) ?? proposedLimit;
-      const resume = () => {
+      const action = { kind: "step", tid, limit: proposedLimit } as const;
+      const resume = (released: RdpDebuggeeResumeAction) => {
+        const limit = released.kind === "step" ? released.limit : proposedLimit;
         this.#session.armAllStop();
         this.#session.stepOne(tid, limit);
       };
-      if (this.#runControl) this.#runControl.resume({ kind: "step", tid, limit }, resume);
-      else resume();
+      if (this.#runControl) this.#runControl.resume(action, resume);
+      else resume(action);
     }
     return this.#eventFutureRef();
   }

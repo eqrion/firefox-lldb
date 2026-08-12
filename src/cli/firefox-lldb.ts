@@ -12,22 +12,15 @@
 // servers through in-memory channels: LLDB connects to "inprocess://<id>" and
 // we pump bytes between channel <id> and a localhost socket.
 
-import { readFile } from "node:fs/promises";
-import { MessageChannel } from "node:worker_threads";
 import { parseCliArgs, startPlatformServer } from "../core/platform-session.js";
 import { focusFirefoxWindow } from "../rdp/firefox.js";
 import { quietLogger } from "./logger.js";
 import { runRepl } from "./repl.js";
 import type { RdpWasmSession } from "../rdp/session.js";
 import { debugEnvEnabled } from "../config.js";
-import { EmbeddedLldbComponentRuntime } from "../source-debugger/lldb-runtime.js";
+import { IsolatedLldbComponentRuntime } from "../source-debugger/lldb-isolate.js";
 import { SourceDebuggerSession } from "../source-debugger/session.js";
 import { componentForModuleUrl, parseComponentRoutes } from "../source-debugger/config.js";
-import {
-  connectSourceDebuggerComponent,
-  serveSourceDebuggerComponent,
-  type SourceDebuggerRpcEndpoint,
-} from "../source-debugger/rpc.js";
 
 async function main(): Promise<void> {
   const args = parseCliArgs(process.argv.slice(2));
@@ -39,17 +32,17 @@ async function main(): Promise<void> {
     throw new Error("multiple --component routes currently require --url for automatic attach");
   }
 
-  const runtimes: EmbeddedLldbComponentRuntime[] = [];
+  const runtimes: IsolatedLldbComponentRuntime[] = [];
   try {
     for (const route of routes) {
       runtimes.push(
-        await EmbeddedLldbComponentRuntime.create({
+        await IsolatedLldbComponentRuntime.create({
           id: route.id,
           name: routes.length === 1 && route.id === "lldb" ? "LLDB" : `LLDB (${route.id})`,
           logger,
-          fileProvider: (path) => readFile(path).catch(() => null),
           observerResumesTarget: routes.length === 1,
           exclusiveModules: routedComponents,
+          verbose,
         })
       );
     }
@@ -57,27 +50,9 @@ async function main(): Promise<void> {
     await Promise.allSettled(runtimes.map((runtime) => runtime.close()));
     throw error;
   }
-  const componentEndpoints: SourceDebuggerRpcEndpoint[] = [];
-  const components = await Promise.all(
-    runtimes.map(async ({ component }) => {
-      const { port1, port2 } = new MessageChannel();
-      const endpoint = serveSourceDebuggerComponent(port1, component);
-      componentEndpoints.push(endpoint);
-      try {
-        return await connectSourceDebuggerComponent(port2);
-      } catch (error) {
-        endpoint.close();
-        throw error;
-      }
-    })
-  ).catch(async (error) => {
-    for (const endpoint of componentEndpoints) endpoint.close();
-    await Promise.allSettled(runtimes.map((runtime) => runtime.close()));
-    throw error;
-  });
   let session: RdpWasmSession | undefined;
   const sourceDebuggerSession = new SourceDebuggerSession({
-    components,
+    components: runtimes.map(({ component }) => component),
     getRdpSession: () => session,
     selectModuleOwner: (module) => componentForModuleUrl(routes, module.url).id,
     logger,
@@ -90,7 +65,6 @@ async function main(): Promise<void> {
     exiting = true;
     const work = [
       () => sourceDebuggerSession.close(),
-      ...componentEndpoints.map((endpoint) => () => endpoint.close()),
       ...[...handles].reverse().map((handle) => () => handle.shutdown()),
       ...runtimes.map((runtime) => () => runtime.close()),
     ];

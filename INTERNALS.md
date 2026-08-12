@@ -73,16 +73,21 @@ The CLI presents those adapters to `SourceDebuggerSession` through
 `src/source-debugger/rpc.ts`, a concurrent request/response transport over
 `MessagePort`. This exercises structured cloning and keeps a pending
 `waitForStop` from blocking a sibling `abortRun` or `cancelRun` call. The server
-endpoint still lives in the CLI realm; moving it into the component's isolation
-worker is the next containment step.
+endpoint, LLDB adapter, runtime, TCP bridges, and nested `lldb-wasm` worker live
+inside a per-component outer worker (`lldb-isolate-worker.ts`). The host-side
+proxy retains Firefox's physical resume closures; the worker returns only a
+refined resume action and permission to release one. Worker exit closes the
+component port, rejects pending calls, and drops unreleased closures so failure
+is biased toward leaving Firefox paused.
 
 ### Embedded wasm LLDB (`firefox-lldb`)
 
 The `firefox-lldb` command does not spawn a native lldb. It runs the platform
 server in-process and drives LLDB compiled to WebAssembly (the `lldb-wasm`
 package, built from `../llvm-project/lldb/tools/lldb-wasm`) through an
-`EmbeddedLldbComponentRuntime` and `SourceDebuggerSession`. Because the wasm
-LLDB cannot open TCP sockets, each
+`IsolatedLldbComponentRuntime` and `SourceDebuggerSession`. The outer isolate
+owns an `EmbeddedLldbComponentRuntime`. Because the wasm LLDB cannot open TCP
+sockets, each
 RSP connection it would normally make (the platform connection and every per-tab
 GDB server) is bridged through an in-memory channel: LLDB connects to
 `inprocess://<channelId>` and `firefox-lldb` pumps bytes between that channel and

@@ -98,6 +98,8 @@ route through the selected frame's component automatically.
 different component; `finish` can return through the same mixed stack. `next`
 suppresses foreign activations, but a real breakpoint owned by the foreign
 component preempts the step and exposes the composed cross-component stack.
+Each routed component adapter runs in its own outer worker and communicates
+with the session through structured-cloned `MessagePort` calls.
 
 ### Preparing your wasm
 

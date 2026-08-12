@@ -10,6 +10,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 // @ts-expect-error — .mjs file has no type declarations
 import { encode, decode } from "../../src/gdb/worker/wire.mjs";
+// @ts-expect-error — .mjs file has no type declarations
+import { normalizeDebuggeeError } from "../../src/gdb/worker/errors.mjs";
 
 function roundTrip(value: unknown): unknown {
   const encoded = encode(value);
@@ -81,4 +83,28 @@ test("encode produces a Uint8Array", () => {
   const encoded = encode({ ok: true, value: 42 });
   assert.ok(encoded instanceof Uint8Array);
   assert.ok(encoded.length > 0);
+});
+
+test("debuggee errors preserve WIT tags and messages", () => {
+  const error = Object.assign(new Error("read crossed memory bounds"), {
+    payload: "out-of-bounds",
+  });
+  assert.deepEqual(normalizeDebuggeeError(error), {
+    message: "read crossed memory bounds",
+    tag: "out-of-bounds",
+    unexpected: false,
+  });
+});
+
+test("unexpected debuggee errors map to the closed WIT enum", () => {
+  assert.deepEqual(normalizeDebuggeeError(new TypeError("stale frame resource")), {
+    message: "stale frame resource",
+    tag: "invalid-entity",
+    unexpected: true,
+  });
+  assert.deepEqual(normalizeDebuggeeError({ message: "missing payload", payload: undefined }), {
+    message: "missing payload",
+    tag: "invalid-entity",
+    unexpected: true,
+  });
 });
