@@ -214,6 +214,27 @@ test("two isolated LLDB components compose an interleaved stack over one Firefox
       aLocals.flatMap(({ values }) => values).find(({ name }) => name === "n")?.value.display,
       "7"
     );
+
+    // LLDB-B's StepOut uses multiple physical stop/resume cycles internally.
+    // The session must keep LLDB-A observing each cycle without allowing its
+    // first intermediate stop to abort B's active thread plan.
+    const stepStop = await deadline(
+      session.stepOut(mixedFrames[0].id),
+      40_000,
+      "cross-component step-out timed out"
+    );
+    assert.equal(stepStop.reason.kind, "step", stepStop.output);
+    const framesAfterStepOut = await session.frames();
+    assert.equal(
+      framesAfterStepOut.some(({ componentId }) => componentId === "lldb-b"),
+      false,
+      "LLDB-B still owns a frame after stepping out of its outermost Wasm activation"
+    );
+    assert.equal(
+      framesAfterStepOut.some(({ componentId }) => componentId === "lldb-a"),
+      true,
+      "LLDB-A lost the suspended caller while LLDB-B stepped out"
+    );
   } finally {
     await session?.close().catch(() => {});
     await Promise.allSettled([

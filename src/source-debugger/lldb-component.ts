@@ -43,6 +43,8 @@ export interface LldbSourceDebuggerComponentOptions {
 export interface LldbComponentRunControl {
   beginRun(request: ComponentRunRequest): Promise<void>;
   endRun(runId: RunId): void;
+  waitForPhysicalResume(runId: RunId, afterSequence: number): Promise<number | undefined>;
+  releasePhysicalResume(runId: RunId, sequence: number): void;
   synchronizeRun(runId: RunId): void;
 }
 
@@ -197,42 +199,13 @@ export class LldbSourceDebuggerComponentInstance implements SourceDebuggerCompon
 
   async scopes(_stopId: StopId, frameId: string): Promise<SourceScope[]> {
     const index = parseFrameIndex(frameId);
-    if (index > 0) {
-      // Calling the current bulk SBValue wrapper first can poison evaluation of
-      // DW_OP_WASM_location in a non-top frame. Select/materialize through the
-      // interpreter before touching that wrapper.
-      const fallback = await this.#commandFrameVariables(index);
-      if (fallback.size) return [sourceScope([...fallback])];
-    }
-
-    const variables = await this.#client.getVariables(index);
-    let fallback = new Map<string, { type: string; display: string }>();
-    if (variables.some(({ value }) => value === "")) {
-      // The current SB wrapper can enumerate non-top wasm variables while
-      // returning empty value text. LLDB's command interpreter selects and
-      // materializes the same frame correctly. Keep this narrow compatibility
-      // adapter until lldb-wasm exposes the fixed structured SBValue path.
-      fallback = await this.#commandFrameVariables(index);
-    }
-    return [
-      {
-        name: "Locals",
-        kind: "locals",
-        values: variables.map((variable) => {
-          const materialized = fallback.get(variable.name);
-          const display = materialized?.display ?? variable.value;
-          return {
-            name: variable.name,
-            value: {
-              name: variable.name,
-              type: materialized?.type ?? variable.type,
-              display,
-              hasChildren: /^(?:\{|\[)/.test(display),
-            },
-          };
-        }),
-      },
-    ];
+    // The current bulk SBValue wrapper runs on the wasm worker thread while
+    // run-control commands run on the session pthread. Besides failing to
+    // materialize DW_OP_WASM_location in non-top frames, calling it can leave
+    // LLDB unable to acknowledge the next resume. Keep all component
+    // inspection on the session thread through the public command API.
+    const materialized = await this.#commandFrameVariables(index);
+    return [sourceScope([...materialized])];
   }
 
   async evaluate(
@@ -292,6 +265,14 @@ export class LldbSourceDebuggerComponentInstance implements SourceDebuggerCompon
 
   async startRun(request: ComponentRunRequest): Promise<void> {
     if (this.#runs.has(request.runId)) throw new Error(`run ${request.runId} already exists`);
+    if (request.action.kind !== "continue" && request.action.frameId !== undefined) {
+      const selected = await this.command(
+        `frame select ${parseFrameIndex(request.action.frameId)}`
+      );
+      if (selected.status >= LLDB_FAILED_STATUS) {
+        throw new Error(selected.error || `could not select frame ${request.action.frameId}`);
+      }
+    }
     const ready = this.#runControl?.beginRun(request) ?? Promise.resolve();
     const command = commandForRun(request);
     const operation = this.command(command)
@@ -321,6 +302,16 @@ export class LldbSourceDebuggerComponentInstance implements SourceDebuggerCompon
     } finally {
       this.#runs.delete(runId);
     }
+  }
+
+  waitForPhysicalResume(runId: RunId, afterSequence: number): Promise<number | undefined> {
+    return (
+      this.#runControl?.waitForPhysicalResume(runId, afterSequence) ?? Promise.resolve(undefined)
+    );
+  }
+
+  async releasePhysicalResume(runId: RunId, sequence: number): Promise<void> {
+    this.#runControl?.releasePhysicalResume(runId, sequence);
   }
 
   async cancelRun(runId: RunId): Promise<void> {

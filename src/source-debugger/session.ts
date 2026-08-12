@@ -9,6 +9,7 @@ import type {
   CommandResult,
   ComponentId,
   ComponentRunAction,
+  ComponentStop,
   LogicalFrame,
   LogicalFrameId,
   ModuleDescriptor,
@@ -32,6 +33,12 @@ export interface SourceDebuggerSessionOptions {
 interface BreakpointRoute {
   component: SourceDebuggerComponentInstance;
   componentBreakpointId: string;
+}
+
+interface ComponentRunWait {
+  component: SourceDebuggerComponentInstance;
+  stop: Promise<{ component: SourceDebuggerComponentInstance; stop: ComponentStop }>;
+  resumeSequence: number;
 }
 
 // Language-neutral coordinator for one browser debug target. Components
@@ -280,31 +287,108 @@ export class SourceDebuggerSession {
         )
       );
       await driver.startRun({ runId, role: "driver", action });
-      const waits = this.#components.map((component) =>
-        component.waitForStop(runId).then((stop) => ({ component, stop }))
+      const driverWait = driver.waitForStop(runId).then((stop) => ({ component: driver, stop }));
+      const observerWaits: ComponentRunWait[] = await Promise.all(
+        observers.map(async (component) => ({
+          component,
+          stop: component.waitForStop(runId).then((stop) => ({ component, stop })),
+          resumeSequence: (await component.waitForPhysicalResume?.(runId, 0)) ?? 0,
+        }))
       );
+      const firstResume = await driver.waitForPhysicalResume?.(runId, 0);
+      if (
+        firstResume !== undefined &&
+        driver.waitForPhysicalResume &&
+        driver.releasePhysicalResume
+      ) {
+        await driver.releasePhysicalResume(runId, firstResume);
+        let resumeSequence = firstResume;
+        for (;;) {
+          const progress = await Promise.race([
+            driverWait.then((result) => ({ kind: "complete" as const, result })),
+            driver
+              .waitForPhysicalResume(runId, resumeSequence)
+              .then((sequence) => ({ kind: "resume" as const, sequence })),
+          ]);
+          if (progress.kind === "complete" || progress.sequence === undefined) {
+            const result = progress.kind === "complete" ? progress.result : await driverWait;
+            await Promise.all(observers.map((component) => component.synchronizeRun?.(runId)));
+            return this.#commitRunStop([
+              result,
+              ...(await Promise.all(observerWaits.map(({ stop }) => stop))),
+            ]);
+          }
+
+          // The driver's source-level operation is still active, but LLDB has
+          // reached an internal physical stop and wants to resume again. An
+          // observer either asks to continue too (which means it has already
+          // armed its next local stop wait) or completes at this stop and must
+          // be started again. In both cases, hold the driver's physical lease
+          // until every observer is ready for the next stop.
+          await Promise.all(
+            observerWaits.map((observer) => this.#prepareObserverResume(observer, runId))
+          );
+          resumeSequence = progress.sequence;
+          await driver.releasePhysicalResume(runId, resumeSequence);
+        }
+      }
+
+      const waits = [driverWait, ...observerWaits.map(({ stop }) => stop)];
       const first = await Promise.race(waits);
       await Promise.all(
         this.#components
           .filter((component) => component !== first.component)
           .map((component) => component.synchronizeRun?.(runId))
       );
-      const stops = (await Promise.all(waits)).map(({ stop }) => stop);
-      const stop =
-        stops.find((candidate) => candidate.disposition === "accepted") ??
-        stops[this.#components.indexOf(driver)];
-      this.#advanceStop();
-      return {
-        stopId: this.#stopId,
-        reason: stop.reason,
-        ...(stop.output ? { output: stop.output } : {}),
-      };
+      return this.#commitRunStop(await Promise.all(waits));
     } catch (error) {
       await Promise.allSettled(this.#components.map((component) => component.cancelRun(runId)));
       throw error;
     } finally {
       if (this.#activeRunId === runId) this.#activeRunId = undefined;
     }
+  }
+
+  async #prepareObserverResume(observer: ComponentRunWait, runId: RunId): Promise<void> {
+    if (observer.component.waitForPhysicalResume) {
+      const progress = await Promise.race([
+        observer.stop.then(() => ({ kind: "complete" as const })),
+        observer.component
+          .waitForPhysicalResume(runId, observer.resumeSequence)
+          .then((sequence) => ({ kind: "resume" as const, sequence })),
+      ]);
+      if (progress.kind === "resume" && progress.sequence !== undefined) {
+        observer.resumeSequence = progress.sequence;
+        return;
+      }
+    } else {
+      await observer.stop;
+    }
+
+    await observer.component.startRun({
+      runId,
+      role: "observer",
+      action: { kind: "continue" },
+    });
+    observer.stop = observer.component
+      .waitForStop(runId)
+      .then((stop) => ({ component: observer.component, stop }));
+    observer.resumeSequence = (await observer.component.waitForPhysicalResume?.(runId, 0)) ?? 0;
+  }
+
+  #commitRunStop(
+    results: Array<{
+      component: SourceDebuggerComponentInstance;
+      stop: Awaited<ReturnType<SourceDebuggerComponentInstance["waitForStop"]>>;
+    }>
+  ): SessionState & { output?: string } {
+    const accepted = results.find(({ stop }) => stop.disposition === "accepted") ?? results[0];
+    this.#advanceStop();
+    return {
+      stopId: this.#stopId,
+      reason: accepted.stop.reason,
+      ...(accepted.stop.output ? { output: accepted.stop.output } : {}),
+    };
   }
 
   #advanceStop(): void {

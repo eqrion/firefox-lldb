@@ -73,14 +73,17 @@ Wasm-B/JavaScript/Wasm-A activation chain stopped at B's breakpoint. The
 generic session composes B above A by physical frame position and routes
 `n = 6` to LLDB-B and the non-top `n = 7` to LLDB-A. The previous driver also
 performs LLDB's internal step-off without stealing the shared physical run
-lease.
+lease. From that mixed stop, a generic `stepOut` runs LLDB-B's complete thread
+plan through its many physical instruction stops, returns to JavaScript, and
+preserves LLDB-A's suspended Wasm caller.
 
-Top-frame LLDB scopes use the structured public variable API. The current SB
-wrapper enumerates non-top wasm variables but cannot materialize their
-`DW_OP_WASM_location`; selecting that frame through LLDB's public command
-interpreter works. Non-top scopes therefore retain a narrow presentation
-adapter until lldb-wasm exposes the corrected structured path. Expression
-evaluation has the same temporary interpreter adapter.
+LLDB scopes currently select and materialize frames through the public command
+interpreter. The bulk SB wrapper runs on a different wasm pthread, cannot
+materialize non-top `DW_OP_WASM_location`, and can leave the next run-control
+command unable to acknowledge its resume. This presentation adapter keeps
+inspection and run control on the session pthread until lldb-wasm exposes the
+corrected structured path. Expression evaluation uses the same temporary
+adapter.
 
 ## Staged path to two isolated LLDBs
 
@@ -104,9 +107,10 @@ evaluation has the same temporary interpreter adapter.
    projections by physical frame position and route scopes/evaluation back
    through the selected logical frame's component. The e2e proves the session
    API; exposing two configured components in the interactive CLI remains.
-7. **Cross-component stepping.** Implement step-in ownership handoff,
-   step-over suppression of foreign activations, step-out to a foreign caller,
-   and foreign-breakpoint preemption of an active thread plan.
+7. **Cross-component stepping (step-out prototype complete).** The session can
+   step out from B through JavaScript while preserving A's foreign caller.
+   Implement step-in ownership handoff, step-over suppression of foreign
+   activations, and foreign-breakpoint preemption of an active thread plan.
 8. **Worker RPC and failure containment.** Put each component behind a
    `MessagePort`, enforce deadlines/cancellation, and recover from one component
    failing without wedging the target.
@@ -119,20 +123,19 @@ prototype. Stop-scoped IDs built from `(stop, thread, physical frame position,
 inline position, component)` are sufficient for the TUI, frame selection,
 variables, and the initial cross-component control experiments.
 
-The next milestone is cross-component stepping from the interleaved stop:
-step-out from B through JavaScript to A, then define the step-over behavior
-when a foreign activation or breakpoint appears. An initial step-out experiment
-showed the missing protocol state: B's LLDB thread plan emits intermediate
-physical instruction stops, while A's observer `continue` completes at the
-first one. The current first-stop barrier then synchronizes B and aborts its
-still-active plan. Components therefore need to report stop candidates, the
-session must let the driver accept or reject them, and completed observers must
-be re-armed until a candidate is committed globally.
+The next milestone is defining step-in, step-over, and breakpoint-preemption
+behavior when control crosses an ownership boundary. Step-out established the
+required scheduling primitive: each LLDB runtime sequences every physical
+resume requested by its active thread plan. The session holds the driver's
+resume lease until each observer has either issued its own next continue (and
+therefore re-armed its local stop wait) or completed and been started again.
+Only the driver's completed source-level plan commits the global stop.
 
-Repeated continuation from an LLDB-owned breakpoint also needs a
-debugger-native readiness signal: in some runs LLDB times out internally before
-reaching the debuggee resume callback, which the session's existing arm barrier
-cannot observe or repair.
+The first experiment also exposed a separate wasm LLDB threading hazard: the
+bulk SB variable wrapper could leave LLDB's async remote thread unable to
+acknowledge the next resume. Keeping component inspection on the public
+session-thread command API avoids that race while preserving full LLDB variable
+materialization.
 
 ## Proof target
 

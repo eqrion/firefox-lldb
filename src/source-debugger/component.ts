@@ -59,6 +59,11 @@ export interface SourceDebuggerComponentInstance {
 
   startRun(request: ComponentRunRequest): Promise<void>;
   waitForStop(runId: RunId): Promise<ComponentStop>;
+  // LLDB thread plans can resume the physical debuggee more than once before
+  // their source-level operation completes. A component which exposes this
+  // gate lets the session re-arm every observer before each such resume.
+  waitForPhysicalResume?(runId: RunId, afterSequence: number): Promise<number | undefined>;
+  releasePhysicalResume?(runId: RunId, sequence: number): Promise<void>;
   synchronizeRun?(runId: RunId): Promise<void>;
   cancelRun(runId: RunId): Promise<void>;
 

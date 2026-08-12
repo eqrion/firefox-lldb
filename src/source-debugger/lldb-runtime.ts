@@ -19,6 +19,12 @@ interface PendingRun {
   request: ComponentRunRequest;
   resolveReady: () => void;
   synchronizeRequested: boolean;
+  resumeSequence: number;
+  resumeCallbacks: Map<number, () => void>;
+  resumeWaiters: Array<{
+    afterSequence: number;
+    resolve: (sequence: number | undefined) => void;
+  }>;
 }
 
 class LldbRuntimeRunControl implements LldbComponentRunControl, RdpDebuggeeRunControl {
@@ -35,7 +41,14 @@ class LldbRuntimeRunControl implements LldbComponentRunControl, RdpDebuggeeRunCo
     if (this.#pending) throw new Error(`run ${this.#pending.request.runId} is already active`);
     this.logger.debug(`[${this.id}] begin ${request.runId} as ${request.role}`);
     return new Promise<void>((resolveReady) => {
-      this.#pending = { request, resolveReady, synchronizeRequested: false };
+      this.#pending = {
+        request,
+        resolveReady,
+        synchronizeRequested: false,
+        resumeSequence: 0,
+        resumeCallbacks: new Map(),
+        resumeWaiters: [],
+      };
     });
   }
 
@@ -49,7 +62,15 @@ class LldbRuntimeRunControl implements LldbComponentRunControl, RdpDebuggeeRunCo
     }
     this.logger.debug(`[${this.id}] armed ${pending.request.runId} as ${pending.request.role}`);
     pending.resolveReady();
-    if (pending.request.role === "driver" || this.observerResumesTarget) {
+    const sequence = ++pending.resumeSequence;
+    for (const waiter of pending.resumeWaiters.splice(0)) {
+      if (sequence > waiter.afterSequence) waiter.resolve(sequence);
+      else pending.resumeWaiters.push(waiter);
+    }
+    if (pending.request.role === "driver") {
+      pending.resumeCallbacks.set(sequence, resumePhysicalTarget);
+      if (this.observerResumesTarget) this.releasePhysicalResume(pending.request.runId, sequence);
+    } else if (this.observerResumesTarget) {
       this.logger.debug(
         `[${this.id}] released ${pending.request.role} pause lease for ${pending.request.runId}`
       );
@@ -65,8 +86,26 @@ class LldbRuntimeRunControl implements LldbComponentRunControl, RdpDebuggeeRunCo
   endRun(runId: RunId): void {
     if (this.#pending?.request.runId === runId) {
       this.logger.debug(`[${this.id}] completed ${runId}`);
+      for (const waiter of this.#pending.resumeWaiters) waiter.resolve(undefined);
       this.#pending = undefined;
     }
+  }
+
+  waitForPhysicalResume(runId: RunId, afterSequence: number): Promise<number | undefined> {
+    const pending = this.#pending;
+    if (!pending || pending.request.runId !== runId) return Promise.resolve(undefined);
+    if (pending.resumeSequence > afterSequence) return Promise.resolve(pending.resumeSequence);
+    return new Promise((resolve) => pending.resumeWaiters.push({ afterSequence, resolve }));
+  }
+
+  releasePhysicalResume(runId: RunId, sequence: number): void {
+    const pending = this.#pending;
+    if (!pending || pending.request.runId !== runId) return;
+    const resume = pending.resumeCallbacks.get(sequence);
+    if (!resume) return;
+    pending.resumeCallbacks.delete(sequence);
+    this.logger.debug(`[${this.id}] released driver pause lease ${sequence} for ${runId}`);
+    resume();
   }
 
   installSynchronizeStop(synchronize: () => void): void {

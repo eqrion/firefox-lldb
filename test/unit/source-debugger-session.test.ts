@@ -211,6 +211,127 @@ test("the first component stop synchronizes observers before the session commits
   assert.ok(events.includes("sync:observer"));
 });
 
+test("an LLDB driver re-arms observers before an intermediate physical resume", async () => {
+  const events: string[] = [];
+  const driver = fakeComponent("driver", { events });
+  const observer = fakeComponent("observer", { events });
+  let resolveDriver!: (stop: ComponentStop) => void;
+  let observerStop!: Promise<ComponentStop>;
+  let resolveObserver!: (stop: ComponentStop) => void;
+  let observerCycle = 0;
+
+  observer.startRun = async (_request) => {
+    observerCycle++;
+    events.push(`arm:observer:${observerCycle}`);
+    observerStop = new Promise((resolve) => {
+      resolveObserver = resolve;
+    });
+  };
+  observer.waitForStop = async () => observerStop;
+  driver.startRun = async () => {
+    events.push("arm:driver");
+  };
+  driver.waitForStop = async () =>
+    new Promise((resolve) => {
+      resolveDriver = resolve;
+    });
+  driver.waitForPhysicalResume = async (_runId, afterSequence) => {
+    if (afterSequence === 0) return 1;
+    if (afterSequence === 1) return 2;
+    return new Promise<number | undefined>(() => {});
+  };
+  driver.releasePhysicalResume = async (runId, sequence) => {
+    events.push(`release:driver:${sequence}`);
+    if (sequence === 1) {
+      resolveObserver({
+        runId,
+        disposition: "synchronized",
+        reason: { kind: "stopped" },
+      });
+    } else {
+      resolveObserver({
+        runId,
+        disposition: "synchronized",
+        reason: { kind: "stopped" },
+      });
+      resolveDriver({
+        runId,
+        disposition: "accepted",
+        reason: { kind: "step" },
+      });
+    }
+  };
+
+  const session = new SourceDebuggerSession({ components: [driver, observer] });
+  const stop = await session.stepOut(undefined);
+  assert.equal(stop.reason.kind, "step");
+  assert.deepEqual(events.slice(0, 5), [
+    "arm:observer:1",
+    "arm:driver",
+    "release:driver:1",
+    "arm:observer:2",
+    "release:driver:2",
+  ]);
+});
+
+test("an observer's internal continue satisfies the intermediate re-arm barrier", async () => {
+  const events: string[] = [];
+  const driver = fakeComponent("driver");
+  const observer = fakeComponent("observer");
+  let resolveDriver!: (stop: ComponentStop) => void;
+  let resolveObserver!: (stop: ComponentStop) => void;
+
+  observer.startRun = async () => {
+    events.push("arm:observer");
+  };
+  observer.waitForStop = async (_runId) =>
+    new Promise((resolve) => {
+      resolveObserver = resolve;
+    });
+  observer.waitForPhysicalResume = async (_runId, afterSequence) => {
+    if (afterSequence < 2) {
+      const sequence = afterSequence + 1;
+      events.push(`ready:observer:${sequence}`);
+      return sequence;
+    }
+    return new Promise<number | undefined>(() => {});
+  };
+  observer.synchronizeRun = async (runId) => {
+    resolveObserver({
+      runId,
+      disposition: "synchronized",
+      reason: { kind: "stopped" },
+    });
+  };
+  driver.startRun = async () => {
+    events.push("arm:driver");
+  };
+  driver.waitForStop = async () =>
+    new Promise((resolve) => {
+      resolveDriver = resolve;
+    });
+  driver.waitForPhysicalResume = async (_runId, afterSequence) => {
+    if (afterSequence < 2) return afterSequence + 1;
+    return new Promise<number | undefined>(() => {});
+  };
+  driver.releasePhysicalResume = async (runId, sequence) => {
+    events.push(`release:driver:${sequence}`);
+    if (sequence === 2) {
+      resolveDriver({
+        runId,
+        disposition: "accepted",
+        reason: { kind: "step" },
+      });
+    }
+  };
+
+  const session = new SourceDebuggerSession({ components: [driver, observer] });
+  const stop = await session.stepOut();
+  assert.equal(stop.reason.kind, "step");
+  assert.equal(events.filter((event) => event === "arm:observer").length, 1);
+  assert.ok(events.indexOf("ready:observer:2") < events.indexOf("release:driver:2"));
+});
+
 test("module refresh assigns one owner and reports additions and removals", async () => {
   const events: string[] = [];
   let urls = ["https://example.test/a.wasm", "https://example.test/b.wasm"];
