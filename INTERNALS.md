@@ -102,8 +102,15 @@ The CLI presents those adapters to `SourceDebuggerSession` through
 third generic port carries the component's imported
 `SourceDebuggerComponentHost`. Installed ecosystems enter through
 `SourceDebuggerComponentLoader`, which receives a binding scoped to its
-component ID and chooses how to create its isolate. The LLDB control channel no
-longer carries component API or host calls. This exercises
+component ID and chooses how to create its isolate. It returns a generic
+activation/close lifecycle to `SourceDebuggerSessionRuntime`, which constructs
+the broker, activates target connections in catalog order, and tears down the
+broker, target handles, and isolates in dependency order. The production CLI
+does not directly create an LLDB platform server, bridge RSP ports, attach an
+LLDB process, or retain LLDB run-control objects. Those operations live in
+`lldb-loader.ts`, behind the same lifecycle another installed ecosystem would
+implement. The LLDB control channel no longer carries component API or host
+calls. This exercises
 structured cloning and keeps a pending
 `waitForStop` from blocking a sibling `abortRun` or `cancelRun` call. The LLDB
 adapter, runtime, and nested `lldb-wasm` worker live inside a per-component
@@ -127,15 +134,18 @@ its reason.
 
 The `firefox-lldb` command does not spawn a native lldb. It runs the platform
 server in-process and drives LLDB compiled to WebAssembly (the `lldb-wasm`
-package, built from `../llvm-project/lldb/tools/lldb-wasm`) through an
-`IsolatedLldbComponentRuntime` and `SourceDebuggerSession`. The outer isolate
-owns an `EmbeddedLldbComponentRuntime`. Because the wasm LLDB cannot open TCP
-sockets, the host opens each RSP connection it needs (the platform connection
-and every per-tab GDB server) and transfers a `MessagePort` byte channel to the
-outer worker. The worker adapts it to the pull-based `GdbRspConnection` import;
-LLDB connects to `inprocess://<channelId>` and the runtime pumps only ordered
-bytes between that resource and its internal channel. TCP, gdbstub, RDP, and
-physical Firefox ownership stay outside the debugger isolate.
+package, built from `../llvm-project/lldb/tools/lldb-wasm`) as an installed
+`LldbSourceDebuggerComponentLoader`. `SourceDebuggerSessionRuntime` presents
+the resulting components through `SourceDebuggerSession`; LLDB's target
+adapter owns each `IsolatedLldbComponentRuntime` and its platform/attach
+lifecycle. The outer isolate owns an `EmbeddedLldbComponentRuntime`. Because
+the wasm LLDB cannot open TCP sockets, the host opens each RSP connection it
+needs (the platform connection and every per-tab GDB server) and transfers a
+`MessagePort` byte channel to the outer worker. The worker adapts it to the
+pull-based `GdbRspConnection` import; LLDB connects to
+`inprocess://<channelId>` and the runtime pumps only ordered bytes between that
+resource and its internal channel. TCP, gdbstub, RDP, and physical Firefox
+ownership stay outside the debugger isolate.
 Platform and per-process ports are registered under opaque endpoint IDs. The
 worker obtains each stream by calling its `SourceDebuggerComponentHost` proxy;
 it cannot select or connect to an arbitrary host port, nor consume an endpoint

@@ -8,7 +8,6 @@ import { noopLogger, type Logger } from "../logging.js";
 import type { ModuleClaim, SourceDebuggerComponentInstance } from "./component.js";
 import type { SourceDebuggerComponentHostBinding } from "./host.js";
 import { SourceDebuggerComponentIsolate } from "./isolate.js";
-import type { LoadedSourceDebuggerComponent, SourceDebuggerComponentLoader } from "./loader.js";
 import type {
   LldbIsolateControlMethod,
   LldbIsolateControlRequest,
@@ -94,9 +93,7 @@ class IsolatedLldbRunControl implements RdpDebuggeeRunControl {
   }
 }
 
-export class IsolatedLldbComponentRuntime
-  implements SourceDebuggerComponentProbe, LoadedSourceDebuggerComponent
-{
+export class IsolatedLldbComponentRuntime implements SourceDebuggerComponentProbe {
   readonly runControl: RdpDebuggeeRunControl;
   readonly #host: SourceDebuggerComponentHostBinding;
   readonly #isolate: SourceDebuggerComponentIsolate;
@@ -242,24 +239,6 @@ export class IsolatedLldbComponentRuntime
     this.#isolate.close();
     if (force) await this.#channel.terminate();
     else await this.#channel.close();
-  }
-}
-
-export type LldbSourceDebuggerComponentLoaderOptions = Omit<
-  IsolatedLldbComponentRuntimeOptions,
-  "host"
->;
-
-/** Installed LLDB ecosystem entry for a generic component catalog. */
-export class LldbSourceDebuggerComponentLoader implements SourceDebuggerComponentLoader<IsolatedLldbComponentRuntime> {
-  readonly id: string;
-
-  constructor(private readonly options: LldbSourceDebuggerComponentLoaderOptions = {}) {
-    this.id = options.id ?? "lldb";
-  }
-
-  load(host: SourceDebuggerComponentHostBinding): Promise<IsolatedLldbComponentRuntime> {
-    return IsolatedLldbComponentRuntime.create({ ...this.options, id: this.id, host });
   }
 }
 

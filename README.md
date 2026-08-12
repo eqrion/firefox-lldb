@@ -92,7 +92,10 @@ Each installed ecosystem enters through a generic
 `SourceDebuggerComponentLoader`. A shared `SourceDebuggerSessionHost` gives the
 resulting isolate a component-scoped debuggee interface and owns its RSP
 connections for the session lifetime; LLDB is now one implementation of that
-loader rather than part of the generic worker protocol.
+loader rather than part of the generic worker protocol. The CLI activates and
+closes those loaders through `SourceDebuggerSessionRuntime`; LLDB-specific
+platform servers, attach commands, shared-RDP wiring, and run control no longer
+appear in the CLI lifecycle.
 
 At the `(sdb)` prompt, qualify ambiguous commands with the component ID:
 

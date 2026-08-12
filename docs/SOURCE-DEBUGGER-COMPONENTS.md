@@ -40,9 +40,13 @@ The first implementation lives under `src/source-debugger/`:
 - `rsp-byte-channel.ts` adapts host-owned TCP endpoints to transferable RSP
   streams without exposing sockets to debugger isolates.
 - `loader.ts` defines the browser-facing installation seam for debugger
-  ecosystems.
+  ecosystems, including their target activation lifecycle.
+- `runtime.ts` loads installed ecosystems, constructs the generic session,
+  activates their target connections, and tears them down in reverse order.
 - `isolate.ts` implements the generic three-port definition, instance, and
   imported-host transport used by TypeScript workers.
+- `lldb-loader.ts` contains LLDB's Firefox target adapter: platform-server
+  creation, RSP bridging, shared-RDP attach, interrupt/focus, and teardown.
 - `lldb-component.ts` adapts the real wasm-compiled LLDB and its public API.
 - `lldb-runtime.ts` owns one isolated LLDB worker, pthread pool, and in-process
   channels, and imports host-supplied RSP byte streams.
@@ -89,11 +93,21 @@ imported-host ports. The host calls `describe()` and `probeModule()` through the
 definition port; the session calls target-specific operations through the
 instance port; and the worker receives only its component-scoped debuggee host
 proxy. An ecosystem implements `SourceDebuggerComponentLoader` to create its
-isolate and instantiate the definition with that imported host. LLDB's
-remaining control channel contains only runtime/bootstrap work such as
-platform connection, attach, native commands, run-lease handoff, and shutdown.
-A Dart, .NET, or other debugger therefore does not need to speak an LLDB-named
-discovery or host protocol.
+isolate, instantiate the definition with that imported host, and return a
+generic `activate()`/`close()` lifecycle. `SourceDebuggerSessionRuntime` loads
+the catalog entries, constructs the broker, activates each component in order,
+and performs session, target, and isolate teardown in dependency order. LLDB's
+loader privately handles platform connection, attach, shared RDP projections,
+native setup commands, and physical run-control wiring. A Dart, .NET, or other
+debugger therefore does not need to implement an LLDB-shaped bootstrap,
+discovery, or host protocol.
+
+The production CLI now depends only on the generic session runtime and the
+selected installed loaders. It no longer creates platform servers, registers
+RSP bridges, calls LLDB attach commands, handles LLDB run-control objects, or
+tracks per-component teardown. Those details are part of the LLDB loader's
+target adapter and are exercised through the same generic activation path as a
+future ecosystem integration.
 
 The `firefox-lldb` CLI now presents a language-generic `(sdb)` prompt. Its core
 commands call only `SourceDebuggerSession`:
@@ -241,12 +255,14 @@ adapter.
 5. **Synchronize stops and continues (handoff prototype complete).** Arm every observer,
    let one component hold the physical run-control lease, fan out stops, and
    synchronize debugger-internal resume sequences before committing the stop.
-6. **Compose the real mixed stack in the TUI (CLI prototype complete).** Merge
+6. **Compose the real mixed stack in the TUI (generic CLI activation complete).** Merge
    projections by physical frame position and route scopes/evaluation back
    through the selected logical frame's component. The production CLI accepts
    repeatable `--component ID=URL_SUBSTRING` routes, instantiates an isolated
-   wasm LLDB for each, and exposes them through the real generic REPL. Replacing
-   explicit routes with artifact-driven component discovery remains.
+   wasm LLDB for each through `SourceDebuggerSessionRuntime`, and exposes them
+   through the real generic REPL. All Firefox/RSP/attach details now stay in
+   the installed LLDB loader. Replacing explicit routes with artifact-driven
+   component discovery remains.
 7. **Cross-component stepping (step-in/over/out prototype complete).** The session
    can step into B through opaque JavaScript without a destination breakpoint,
    step over B while suppressing its foreign activation, stop at a real B

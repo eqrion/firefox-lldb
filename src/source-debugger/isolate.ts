@@ -10,7 +10,6 @@ import type {
 } from "./component.js";
 import type { SourceDebuggerComponentHostBinding } from "./host.js";
 import { serveSourceDebuggerComponentHost } from "./host-rpc.js";
-import type { LoadedSourceDebuggerComponent } from "./loader.js";
 import type { SourceDebuggerComponentProbe } from "./ownership.js";
 import {
   connectSourceDebuggerComponent,
@@ -33,9 +32,7 @@ export interface SourceDebuggerComponentWorkerPorts {
  * code only has to put workerPorts in its worker data and signal readiness;
  * definition, instance, imported-host, deadlines, and identity checks live
  * here for every debugger ecosystem. */
-export class SourceDebuggerComponentIsolate
-  implements SourceDebuggerComponentProbe, LoadedSourceDebuggerComponent
-{
+export class SourceDebuggerComponentIsolate implements SourceDebuggerComponentProbe {
   readonly workerPorts: SourceDebuggerComponentWorkerPorts;
   readonly transferList: MessagePort[];
   readonly #definitionPort: MessagePort;

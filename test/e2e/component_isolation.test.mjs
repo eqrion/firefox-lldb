@@ -4,44 +4,44 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseCliArgs, startPlatformServer } from "../../src/core/platform-session.ts";
+import { parseCliArgs } from "../../src/core/platform-session.ts";
 import { freePort } from "../../src/platform/gdb-server-spawner.ts";
 import { SourceDebuggerSessionHost } from "../../src/source-debugger/host.ts";
 import { IsolatedLldbComponentRuntime } from "../../src/source-debugger/lldb-isolate.ts";
+import {
+  LldbSourceDebuggerComponentLoader,
+  LldbSourceDebuggerTarget,
+} from "../../src/source-debugger/lldb-loader.ts";
 import { createProbeModuleOwnerResolver } from "../../src/source-debugger/ownership.ts";
+import { SourceDebuggerSessionRuntime } from "../../src/source-debugger/runtime.ts";
 import { SourceDebuggerSession } from "../../src/source-debugger/session.ts";
 
-test("an isolated LLDB imports its platform RSP connection from the host", async () => {
-  const host = new SourceDebuggerSessionHost();
-  const runtime = await IsolatedLldbComponentRuntime.create({
-    host: host.forComponent("rsp-import"),
-    id: "rsp-import",
+test("the generic session runtime activates LLDB without exposing its bootstrap", async () => {
+  const route = { id: "rsp-import", urlSubstring: "*" };
+  const target = new LldbSourceDebuggerTarget({
+    args: parseCliArgs(["--connect", "--port", "0", "--rdp-port", String(await freePort())]),
+    routes: [route],
   });
-  const handle = await startPlatformServer(
-    parseCliArgs(["--connect", "--port", "0", "--rdp-port", String(await freePort())])
-  );
+  const runtime = await SourceDebuggerSessionRuntime.load({
+    loaders: [new LldbSourceDebuggerComponentLoader(target, route)],
+  });
   try {
-    const resolveOwner = createProbeModuleOwnerResolver([runtime]);
-    assert.equal(
-      await resolveOwner({ id: "fixture", url: "https://example.test/fixture.wasm" }),
-      "rsp-import"
-    );
+    const activation = await runtime.activate();
+    assert.match(activation.readyMessage, /firefox-lldb source debugger/);
     assert.deepEqual(
-      await runtime.probeModule({
+      await runtime.components[0].probeModule({
         id: "fixture",
         url: "https://example.test/fixture.wasm",
         debugInfo: ["dwarf"],
       }),
       { supported: true, confidence: 90, reason: "embedded DWARF" }
     );
-    await runtime.connectPlatform(handle.port);
-    const status = await runtime.command("platform status");
-    assert.ok(status.status < 6, status.error || status.output);
-    assert.match(status.output, /remote-gdb-server/);
+    assert.deepEqual(
+      (await runtime.session.components()).map(({ id }) => id),
+      ["rsp-import"]
+    );
   } finally {
-    await handle.shutdown();
     await runtime.close();
-    host.close();
   }
 });
 

@@ -10,12 +10,20 @@ import type { SourceDebuggerComponentHostBinding } from "./host.js";
 import type { SourceDebuggerComponentProbe } from "./ownership.js";
 import type { ComponentId } from "./types.js";
 
+export interface SourceDebuggerComponentActivation {
+  /** Optional text a frontend can present when every component is ready. */
+  readyMessage?: string;
+}
+
 /** One loaded, isolated debugger ecosystem. Runtime-specific extensions (for
  * example LLDB platform bootstrap) can add methods without changing what the
  * session or component catalog consumes. */
 export interface LoadedSourceDebuggerComponent extends SourceDebuggerComponentProbe {
   readonly definition: SourceDebuggerComponentDefinition;
   readonly component: SourceDebuggerComponentInstance;
+  /** Connect the isolated engine to its configured debug target. Target and
+   * engine-specific bootstrap stays inside the installed loader. */
+  activate(): Promise<SourceDebuggerComponentActivation | void>;
   close(): void | Promise<void>;
 }
 
