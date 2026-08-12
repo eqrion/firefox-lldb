@@ -56,6 +56,11 @@ next
 finish
 ```
 
+When more than one component is present, ambiguous commands accept an explicit
+route: `break lldb-b::compute_factorial`, `continue lldb-b`, and
+`lldb lldb-b::thread list`. Frame-relative commands (`locals`, `p`, `step`,
+`next`, and `finish`) route through the selected logical frame automatically.
+
 Existing LLDB commands continue to work during the migration. `lldb <command>`
 makes the debugger-specific escape hatch explicit.
 
@@ -75,7 +80,9 @@ generic session composes B above A by physical frame position and routes
 performs LLDB's internal step-off without stealing the shared physical run
 lease. From that mixed stop, a generic `stepOut` runs LLDB-B's complete thread
 plan through its many physical instruction stops, returns to JavaScript, and
-preserves LLDB-A's suspended Wasm caller.
+preserves LLDB-A's suspended Wasm caller. The e2e drives this sequence through
+the real `(sdb)` REPL, including component-qualified breakpoints and driver
+selection, composed backtraces, frame selection, locals, and `finish`.
 
 LLDB scopes currently select and materialize frames through the public command
 interpreter. The bulk SB wrapper runs on a different wasm pthread, cannot
@@ -103,10 +110,11 @@ adapter.
 5. **Synchronize stops and continues (handoff prototype complete).** Arm every observer,
    let one component hold the physical run-control lease, fan out stops, and
    synchronize debugger-internal resume sequences before committing the stop.
-6. **Compose the real mixed stack in the TUI (API prototype complete).** Merge
+6. **Compose the real mixed stack in the TUI (REPL prototype complete).** Merge
    projections by physical frame position and route scopes/evaluation back
-   through the selected logical frame's component. The e2e proves the session
-   API; exposing two configured components in the interactive CLI remains.
+   through the selected logical frame's component. The e2e proves the real
+   generic REPL over two components; making the production CLI discover and
+   instantiate multiple component implementations remains.
 7. **Cross-component stepping (step-out prototype complete).** The session can
    step out from B through JavaScript while preserving A's foreign caller.
    Implement step-in ownership handoff, step-over suppression of foreign

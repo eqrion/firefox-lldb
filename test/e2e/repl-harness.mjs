@@ -46,10 +46,10 @@ export class ReplSession {
     return bridgeTcp(this.#client, this.#sockets, port);
   }
 
-  #settle() {
+  #settle(mark = 0) {
     return new Promise((resolve) => {
       const check = () => {
-        if (stripAnsi(this.#out).trimEnd().endsWith("(sdb)")) resolve();
+        if (stripAnsi(this.#out.slice(mark)).includes("(sdb) ")) resolve();
         else this.#waiters.push(check);
       };
       check();
@@ -143,7 +143,7 @@ export class ReplSession {
   async type(line) {
     const mark = this.#out.length;
     this.#input.write(line + "\n");
-    await withDeadline(this, this.#settle(), 30_000);
+    await withDeadline(this, this.#settle(mark), 30_000);
     return stripAnsi(this.#out.slice(mark));
   }
 

@@ -21,7 +21,11 @@ interface FakeClient {
   pause: () => Promise<void>;
 }
 
-type ExtraOpts = { onTargetInterrupt?: () => void; onTargetResume?: () => void };
+type ExtraOpts = {
+  onTargetInterrupt?: () => void;
+  onTargetResume?: () => void;
+  sourceSession?: Record<string, unknown>;
+};
 
 function harness(client: FakeClient, session?: Partial<RdpWasmSession>, extra?: ExtraOpts) {
   const input = new PassThrough();
@@ -57,6 +61,7 @@ function harness(client: FakeClient, session?: Partial<RdpWasmSession>, extra?: 
     stepInto: async () => ({ stopId: "stop-1", reason: { kind: "step" } }),
     stepOver: async () => ({ stopId: "stop-1", reason: { kind: "step" } }),
     stepOut: async () => ({ stopId: "stop-1", reason: { kind: "step" } }),
+    ...extra?.sourceSession,
   } as unknown as SourceDebuggerSession;
   const repl = runRepl({
     session: debuggerSession,
@@ -65,7 +70,8 @@ function harness(client: FakeClient, session?: Partial<RdpWasmSession>, extra?: 
     onExit: () => {
       exited = true;
     },
-    ...extra,
+    ...(extra?.onTargetInterrupt ? { onTargetInterrupt: extra.onTargetInterrupt } : {}),
+    ...(extra?.onTargetResume ? { onTargetResume: extra.onTargetResume } : {}),
   });
   const settle = () =>
     new Promise<void>((resolve) => {
@@ -120,6 +126,66 @@ test("command error text is surfaced", async () => {
   await h.start();
   const out = await h.type("bogus");
   assert.match(out, /no such command/);
+});
+
+test("component-qualified commands route ambiguous operations", async () => {
+  let breakpointComponent: string | undefined;
+  let continueDriver: string | undefined;
+  let nativeRoute: [string, string | undefined] | undefined;
+  let steppedFrame: string | undefined;
+  const h = harness(
+    okClient(() => ({ output: "", error: "", status: 0 })),
+    undefined,
+    {
+      sourceSession: {
+        setBreakpoint: async (request: { componentId?: string; target: unknown }) => {
+          breakpointComponent = request.componentId;
+          return {
+            id: "lldb-b:1",
+            componentId: "lldb-b",
+            verified: true,
+            target: request.target,
+          };
+        },
+        continue: async (componentId?: string) => {
+          continueDriver = componentId;
+          return { stopId: "stop-1", reason: { kind: "breakpoint" } };
+        },
+        command: async (command: string, componentId?: string) => {
+          nativeRoute = [command, componentId];
+          return { output: "native ok", error: "", status: 0 };
+        },
+        frames: async () => [
+          {
+            id: "logical-b-frame",
+            stopId: "stop-0",
+            threadId: "1",
+            componentId: "lldb-b",
+            componentFrameId: "0",
+            physicalFrameIndex: 0,
+            inlineFrameIndex: 0,
+            functionName: "compute_factorial",
+            inline: false,
+          },
+        ],
+        stepOut: async (frameId?: string) => {
+          steppedFrame = frameId;
+          return { stopId: "stop-1", reason: { kind: "step" } };
+        },
+      },
+    }
+  );
+  await h.start();
+
+  assert.match(await h.type("break lldb-b::compute_factorial"), /lldb-b:1: verified/);
+  assert.equal(breakpointComponent, "lldb-b");
+  await h.type("continue lldb-b");
+  assert.equal(continueDriver, "lldb-b");
+  assert.match(await h.type("lldb lldb-b::thread list"), /native ok/);
+  assert.deepEqual(nativeRoute, ["thread list", "lldb-b"]);
+  await h.type("frame 0");
+  await h.type("finish");
+  assert.equal(steppedFrame, "logical-b-frame");
 });
 
 test("js p evaluates and prints the result", async () => {

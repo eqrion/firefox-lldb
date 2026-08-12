@@ -46,15 +46,18 @@ Source debugger commands:
   frame <N>                  select and display a source frame
   locals                     show variables in the selected frame
   p <EXPR>                   evaluate in the selected frame
-  break <FILE>:<LINE>        set a source breakpoint
-  break <FUNCTION>           set a function breakpoint
+  break [COMPONENT::]<FILE>:<LINE>
+                             set a source breakpoint
+  break [COMPONENT::]<FUNCTION>
+                             set a function breakpoint
   breakpoints                list breakpoints
   delete <ID>                remove a breakpoint
-  continue | c               continue execution
+  continue | c [COMPONENT]   continue with an optional run-control driver
   step | s                   step into
   next | n                   step over
   finish                     step out
-  lldb <COMMAND>             run a debugger-native LLDB command`;
+  lldb [COMPONENT::]<COMMAND>
+                             run a debugger-native LLDB command`;
 const JS_HELP =
   "js p <expr>    evaluate JS (expression is literal to end of line; e.g. js p document.title)\n" +
   "js bt          print the JS call stack\n" +
@@ -307,14 +310,17 @@ export function runRepl(deps: ReplDeps): Repl {
       case "break":
       case "b": {
         if (!arg) throw new Error("break requires FILE:LINE or FUNCTION");
-        const source = arg.match(/^(.*):(\d+)$/);
+        const qualified = componentQualifiedArgument(arg);
+        if (!qualified.value) throw new Error("break requires FILE:LINE or FUNCTION");
+        const source = qualified.value.match(/^(.*):(\d+)$/);
         const breakpoint = await deps.session.setBreakpoint({
+          ...(qualified.componentId ? { componentId: qualified.componentId } : {}),
           target: source
             ? {
                 kind: "source",
                 location: { sourceId: source[1], line: Number(source[2]) },
               }
-            : { kind: "function", name: arg },
+            : { kind: "function", name: qualified.value },
         });
         write(
           `Breakpoint ${breakpoint.id}: ${breakpoint.verified ? "verified" : "pending"}${breakpoint.message ? ` (${breakpoint.message})` : ""}`
@@ -341,22 +347,25 @@ export function runRepl(deps: ReplDeps): Repl {
       }
       case "continue":
       case "c":
-        await runSourceCommand(() => deps.session.continue());
+        if (words.length > 1) throw new Error("continue accepts at most one component id");
+        await runSourceCommand(() => deps.session.continue(words[0]));
         return true;
       case "step":
       case "s":
-        await runSourceCommand(() => deps.session.stepInto(selectedFrameId));
+        await runSourceCommand((frameId) => deps.session.stepInto(frameId));
         return true;
       case "next":
       case "n":
-        await runSourceCommand(() => deps.session.stepOver(selectedFrameId));
+        await runSourceCommand((frameId) => deps.session.stepOver(frameId));
         return true;
       case "finish":
-        await runSourceCommand(() => deps.session.stepOut(selectedFrameId));
+        await runSourceCommand((frameId) => deps.session.stepOut(frameId));
         return true;
       case "lldb": {
         if (!arg) throw new Error("lldb requires a command");
-        const result = await deps.session.command(arg);
+        const qualified = componentQualifiedArgument(arg);
+        if (!qualified.value) throw new Error("lldb requires a command");
+        const result = await deps.session.command(qualified.value, qualified.componentId);
         if (result.output) write(result.output);
         if (result.error) write(result.error);
         return true;
@@ -366,13 +375,16 @@ export function runRepl(deps: ReplDeps): Repl {
     }
   }
 
-  async function runSourceCommand(operation: () => Promise<{ output?: string }>): Promise<void> {
+  async function runSourceCommand(
+    operation: (frameId: LogicalFrameId | undefined) => Promise<{ output?: string }>
+  ): Promise<void> {
     inflight = true;
+    const frameId = selectedFrameId;
     selectedFrameId = undefined;
     write("Process running.");
     deps.onTargetResume?.();
     try {
-      const stop = await operation();
+      const stop = await operation(frameId);
       if (stop.output) write(stop.output);
     } finally {
       inflight = false;
@@ -494,6 +506,17 @@ export function runRepl(deps: ReplDeps): Repl {
   }
 
   return { print, printConsole, start, close, done };
+}
+
+function componentQualifiedArgument(argument: string): {
+  componentId?: string;
+  value: string;
+} {
+  const separator = argument.indexOf("::");
+  if (separator < 0) return { value: argument };
+  const componentId = argument.slice(0, separator).trim();
+  if (!componentId) return { value: argument };
+  return { componentId, value: argument.slice(separator + 2).trim() };
 }
 
 function formatFrame(index: number, frame: FrameForm): string {

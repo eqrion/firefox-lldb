@@ -8,7 +8,9 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { PassThrough, Writable } from "node:stream";
 import { parseCliArgs, startPlatformServer } from "../../src/core/platform-session.ts";
+import { runRepl } from "../../src/cli/repl.ts";
 import { EmbeddedLldbComponentRuntime } from "../../src/source-debugger/lldb-runtime.ts";
 import { SourceDebuggerSession } from "../../src/source-debugger/session.ts";
 import { freePort } from "../../src/platform/gdb-server-spawner.ts";
@@ -47,6 +49,50 @@ async function deadline(promise, ms, message) {
   }
 }
 
+function startRepl(session) {
+  const input = new PassThrough();
+  let output = "";
+  const waiters = [];
+  const stream = new Writable({
+    write(chunk, _encoding, callback) {
+      output += chunk.toString();
+      waiters.splice(0).forEach((waiter) => waiter());
+      callback();
+    },
+  });
+  const repl = runRepl({ session, input, output: stream });
+  const settledAfter = (mark) =>
+    new Promise((resolve) => {
+      const check = () => {
+        if (
+          output
+            .slice(mark)
+            .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "")
+            .includes("(sdb) ")
+        ) {
+          resolve();
+        } else {
+          waiters.push(check);
+        }
+      };
+      check();
+    });
+  repl.start();
+  return {
+    async type(line) {
+      const mark = output.length;
+      input.write(line + "\n");
+      await deadline(
+        settledAfter(mark),
+        40_000,
+        `REPL command timed out: ${line}; output: ${output.slice(mark).slice(-500)}`
+      );
+      return output.slice(mark).replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
+    },
+    close: () => repl.close(),
+  };
+}
+
 test("two isolated LLDB components compose an interleaved stack over one Firefox tab", async () => {
   const staticServer = await startStaticServer("test/fixtures/two-components");
   const url = `http://127.0.0.1:${staticServer.port}/index.html`;
@@ -69,6 +115,7 @@ test("two isolated LLDB components compose an interleaved stack over one Firefox
   let secondaryHandle;
   let session;
   let primaryRdpSession;
+  let repl;
 
   try {
     primaryHandle = await startPlatformServer(
@@ -127,6 +174,7 @@ test("two isolated LLDB components compose an interleaved stack over one Firefox
       getRdpSession: () => primaryRdpSession,
       selectModuleOwner: (module) => (module.url.includes("component=b") ? "lldb-b" : "lldb-a"),
     });
+    repl = startRepl(session);
 
     assert.deepEqual(
       (await session.components()).map(({ id }) => id),
@@ -146,27 +194,23 @@ test("two isolated LLDB components compose an interleaved stack over one Firefox
         ["b", "lldb-b"],
       ]
     );
+    assert.match(await repl.type("components"), /lldb-a\s+LLDB A.*lldb-b\s+LLDB B/s);
+    const moduleOutput = await repl.type("modules");
+    assert.match(moduleOutput, /component=a\s+\[lldb-a\]/);
+    assert.match(moduleOutput, /component=b\s+\[lldb-b\]/);
 
-    const a = await session.setBreakpoint({
-      componentId: "lldb-a",
-      target: { kind: "function", name: "compute_factorial" },
-    });
-    const b = await session.setBreakpoint({
-      componentId: "lldb-b",
-      target: { kind: "function", name: "compute_factorial" },
-    });
-    assert.equal(a.id, "lldb-a:1");
-    assert.equal(b.id, "lldb-b:1");
-    assert.equal(a.verified, true);
-    assert.equal(b.verified, true);
-
-    const stop = await deadline(
-      session.continue("lldb-a"),
-      30_000,
-      "two-component continue timed out"
+    assert.match(
+      await repl.type("break lldb-a::compute_factorial"),
+      /Breakpoint lldb-a:1: verified/
     );
-    assert.equal(stop.reason.kind, "breakpoint");
-    assert.match(stop.output ?? "", /compute_factorial/);
+    assert.match(
+      await repl.type("break lldb-b::compute_factorial"),
+      /Breakpoint lldb-b:1: verified/
+    );
+
+    const stopOutput = await repl.type("continue lldb-a");
+    assert.match(stopOutput, /compute_factorial/);
+    assert.equal((await session.state()).reason.kind, "breakpoint");
     assert.notEqual(
       (await secondary.component.state(session.currentStopId())).reason.kind,
       "running"
@@ -184,13 +228,12 @@ test("two isolated LLDB components compose an interleaved stack over one Firefox
     // run page code while Firefox is paused, before the next all-stop listener
     // and physical resume have been armed.
     await primaryRdpSession.evaluate("setTimeout(() => runInterleaved(), 100)");
-    const secondStop = await deadline(
-      session.continue("lldb-b"),
-      30_000,
-      "reverse two-component continue timed out"
+    const secondStopOutput = await repl.type("continue lldb-b");
+    assert.match(secondStopOutput, /compute_factorial/);
+    assert.equal(
+      (await secondary.component.state(session.currentStopId())).reason.kind,
+      "breakpoint"
     );
-    assert.equal(secondStop.reason.kind, "breakpoint");
-    assert.match(secondStop.output ?? "", /compute_factorial/);
 
     // Each LLDB sees the same physical stack but only exports source frames
     // for its owned module; SourceDebuggerSession merges them by physical
@@ -203,6 +246,10 @@ test("two isolated LLDB components compose an interleaved stack over one Firefox
     assert.match(mixedFrames[0].functionName, /compute_factorial/);
     assert.match(mixedFrames[1].functionName, /call_other_factorial/);
     assert.ok(mixedFrames[0].physicalFrameIndex < mixedFrames[1].physicalFrameIndex);
+    assert.match(
+      await repl.type("bt"),
+      /#0 .*compute_factorial.*\[lldb-b\].*#1 .*call_other_factorial.*\[lldb-a\]/s
+    );
 
     const bLocals = await session.scopes(mixedFrames[0].id);
     const aLocals = await session.scopes(mixedFrames[1].id);
@@ -214,16 +261,18 @@ test("two isolated LLDB components compose an interleaved stack over one Firefox
       aLocals.flatMap(({ values }) => values).find(({ name }) => name === "n")?.value.display,
       "7"
     );
+    assert.match(await repl.type("frame 0"), /#0 .*compute_factorial.*\[lldb-b\]/);
+    assert.match(await repl.type("locals"), /\bn\s*=\s*6\b/);
+    assert.match(await repl.type("frame 1"), /#1 .*call_other_factorial.*\[lldb-a\]/);
+    assert.match(await repl.type("locals"), /\bn\s*=\s*7\b/);
+    await repl.type("frame 0");
 
     // LLDB-B's StepOut uses multiple physical stop/resume cycles internally.
     // The session must keep LLDB-A observing each cycle without allowing its
     // first intermediate stop to abort B's active thread plan.
-    const stepStop = await deadline(
-      session.stepOut(mixedFrames[0].id),
-      40_000,
-      "cross-component step-out timed out"
-    );
-    assert.equal(stepStop.reason.kind, "step", stepStop.output);
+    const stepOutput = await repl.type("finish");
+    assert.match(stepOutput, /stop reason = (?:wasm )?step/);
+    assert.equal((await secondary.component.state(session.currentStopId())).reason.kind, "step");
     const framesAfterStepOut = await session.frames();
     assert.equal(
       framesAfterStepOut.some(({ componentId }) => componentId === "lldb-b"),
@@ -236,6 +285,7 @@ test("two isolated LLDB components compose an interleaved stack over one Firefox
       "LLDB-A lost the suspended caller while LLDB-B stepped out"
     );
   } finally {
+    repl?.close();
     await session?.close().catch(() => {});
     await Promise.allSettled([
       primary.close(),
