@@ -50,6 +50,8 @@ export interface ModuleDescriptor {
   id: ModuleId;
   url: string;
   owner: ComponentId;
+  /** Host-inspected, payload-free debug artifact kinds such as `dwarf` and
+   * `source-map`. Kept as strings so ecosystems can add hints independently. */
   debugInfo?: string[];
 }
 

@@ -68,6 +68,7 @@ import {
   MAX_MODULE_BYTES,
   type ModuleByteProvider,
 } from "./module-bytes.js";
+import { wasmDebugInfoHints, type WasmDebugInfoHint } from "../wasm/metadata.js";
 
 export { grip, type TabInfo, type SourceForm, type FrameForm, type PauseEvent, type StoppedEvent };
 
@@ -303,6 +304,7 @@ export class RdpWasmSession extends EventEmitter {
   #snappedBreakpointByUrl = new Map<string, Map<number, number>>();
 
   #wasmActorByUrl = new Map<string, { actor: string; generation: number }>();
+  #wasmDebugInfoByUrl = new Map<string, { generation: number; hints: WasmDebugInfoHint[] }>();
   #breakpointPositionCache = new Map<string, Promise<number[]>>(); // actor -> positions
   #jsActorByUrl = new Map<string, { actor: string; generation: number }>();
   // Reverse of the two maps above (wasm + JS actors share one namespace).
@@ -367,6 +369,7 @@ export class RdpWasmSession extends EventEmitter {
   #invalidateActorCaches(): void {
     this.#jsActorByUrl.clear();
     this.#wasmActorByUrl.clear();
+    this.#wasmDebugInfoByUrl.clear();
     this.#breakpointPositionCache.clear();
     this.#sourceUrlByActor.clear();
   }
@@ -815,6 +818,33 @@ export class RdpWasmSession extends EventEmitter {
   }
 
   async fetchModuleBytes(url: string): Promise<Uint8Array> {
+    const bytes = await this.#acquireModuleBytes(url);
+    try {
+      this.#wasmDebugInfoByUrl.set(url, {
+        generation: this.#activeGeneration,
+        hints: wasmDebugInfoHints(bytes),
+      });
+    } catch (error) {
+      this.#logger.debug(
+        `[rdp] could not inspect debug metadata for ${url}: ${error instanceof Error ? error.message : String(error)}`
+      );
+      this.#wasmDebugInfoByUrl.set(url, { generation: this.#activeGeneration, hints: [] });
+    }
+    return bytes;
+  }
+
+  /** Compact, host-inspected evidence for component ownership probes. Raw
+   * module payloads stay in the debuggee/RSP layer. */
+  async wasmModuleDebugInfo(url: string): Promise<string[]> {
+    let entry = this.#wasmDebugInfoByUrl.get(url);
+    if (entry?.generation !== this.#activeGeneration) {
+      await this.fetchModuleBytes(url);
+      entry = this.#wasmDebugInfoByUrl.get(url);
+    }
+    return [...(entry?.hints ?? [])];
+  }
+
+  async #acquireModuleBytes(url: string): Promise<Uint8Array> {
     const actorEntry = this.#wasmActorByUrl.get(url);
     const actor = actorEntry?.generation === this.#activeGeneration ? actorEntry.actor : undefined;
     if (url.startsWith("http://") || url.startsWith("https://")) {

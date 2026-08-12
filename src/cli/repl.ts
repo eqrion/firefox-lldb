@@ -260,7 +260,11 @@ export function runRepl(deps: ReplDeps): Repl {
       case "modules": {
         const modules = await deps.session.modules();
         if (!modules.length) write("no Wasm modules");
-        for (const module of modules) write(`${module.id}\t[${module.owner}]\t${module.url}`);
+        for (const module of modules) {
+          write(
+            `${module.id}\t[${module.owner}]\t${module.url}${module.debugInfo ? `\tdebug: ${module.debugInfo.join(", ") || "none"}` : ""}`
+          );
+        }
         return true;
       }
       case "threads": {

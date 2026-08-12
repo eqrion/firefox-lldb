@@ -633,16 +633,20 @@ test("an ended observer resume stream still classifies its final preempting stop
 
 test("module refresh assigns one owner and reports additions and removals", async () => {
   const events: string[] = [];
+  const probedDebugInfo: Array<string[] | undefined> = [];
   let ownershipRequests = 0;
   let urls = ["https://example.test/a.wasm", "https://example.test/b.wasm"];
   const rdp = {
     wasmSources: async () => urls.map((url, index) => ({ actor: String(index), url })),
+    wasmModuleDebugInfo: async (url: string) =>
+      url.endsWith("b.wasm") ? ["source-map"] : ["dwarf"],
   } as unknown as RdpWasmSession;
   const session = new SourceDebuggerSession({
     components: [fakeComponent("a", { events }), fakeComponent("b", { events })],
     getRdpSession: () => rdp,
     resolveModuleOwner: async (module) => {
       ownershipRequests++;
+      probedDebugInfo.push(module.debugInfo);
       await Promise.resolve();
       return module.url.endsWith("b.wasm") ? "b" : "a";
     },
@@ -658,6 +662,7 @@ test("module refresh assigns one owner and reports additions and removals", asyn
   assert.ok(events.includes("add:a:https://example.test/a.wasm"));
   assert.ok(events.includes("add:b:https://example.test/b.wasm"));
   assert.equal(ownershipRequests, 2);
+  assert.deepEqual(probedDebugInfo, [["dwarf"], ["source-map"]]);
 
   await session.modules();
   assert.equal(ownershipRequests, 2, "loaded modules keep their original owner");

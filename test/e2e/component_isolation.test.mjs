@@ -21,6 +21,14 @@ test("an isolated LLDB imports its platform RSP connection from the host", async
       await resolveOwner({ id: "fixture", url: "https://example.test/fixture.wasm" }),
       "rsp-import"
     );
+    assert.deepEqual(
+      await runtime.probeModule({
+        id: "fixture",
+        url: "https://example.test/fixture.wasm",
+        debugInfo: ["dwarf"],
+      }),
+      { supported: true, confidence: 90, reason: "embedded DWARF" }
+    );
     await runtime.connectPlatform(handle.port);
     const status = await runtime.command("platform status");
     assert.ok(status.status < 6, status.error || status.output);

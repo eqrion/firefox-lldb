@@ -357,17 +357,26 @@ export class SourceDebuggerSession {
   }
 
   async #refreshModules(): Promise<ModuleDescriptor[]> {
-    const sources = await this.#getRdpSession()?.wasmSources();
+    const rdp = this.#getRdpSession();
+    const sources = await rdp?.wasmSources();
     const next = new Map<string, ModuleDescriptor>();
     for (const source of sources ?? []) {
-      const module = { id: source.url, url: source.url };
+      const existing = next.get(source.url) ?? this.#moduleById.get(source.url);
+      if (existing) {
+        next.set(existing.id, existing);
+        continue;
+      }
+
+      const debugInfo = await rdp?.wasmModuleDebugInfo?.(source.url);
+      const module = {
+        id: source.url,
+        url: source.url,
+        ...(debugInfo ? { debugInfo } : {}),
+      };
       // Ownership is sticky for the lifetime of a loaded module. Re-running
       // discovery on every refresh could silently move it between debuggers if
       // a component is installed, removed, or changes its probe result.
-      const owner =
-        next.get(module.id)?.owner ??
-        this.#moduleById.get(module.id)?.owner ??
-        (await this.#resolveModuleOwner(module));
+      const owner = await this.#resolveModuleOwner(module);
       this.#knownComponent(owner);
       next.set(module.id, { ...module, owner });
     }

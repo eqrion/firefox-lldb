@@ -31,6 +31,8 @@ The first implementation lives under `src/source-debugger/`:
 - `component.ts` defines the imported/exported component contracts.
 - `ownership.ts` probes installed component definitions and selects the unique
   highest-confidence owner for each newly loaded module.
+- `../wasm/metadata.ts` scans custom-section names in the host and normalizes
+  them into small, payload-free debug-info hints.
 - `rsp-byte-channel.ts` adapts host-owned TCP endpoints to transferable RSP
   streams without exposing sockets to debugger isolates.
 - `lldb-component.ts` adapts the real wasm-compiled LLDB and its public API.
@@ -66,9 +68,11 @@ eligible route, then still calls that isolated component definition's real
 the same resolver without routes once installed ecosystems return distinct
 claims. The prototype eagerly instantiates every observer so it can participate
 in physical stop barriers, but discovery remains a definition-side operation.
-The metadata available to probes is currently the module ID, URL, and optional
-debug-info hints; importing browser-owned module bytes/custom-section metadata
-into the discovery phase remains a follow-up.
+The metadata available to probes is currently the module ID, URL, and
+host-inspected `dwarf`/`source-map` hints. Raw browser-owned module bytes do not
+fan out to candidates. Ecosystems that need to validate custom-section payloads
+will eventually need a bounded module-inspection resource or richer normalized
+host metadata.
 
 The `firefox-lldb` CLI now presents a language-generic `(sdb)` prompt. Its core
 commands call only `SourceDebuggerSession`:
@@ -204,8 +208,9 @@ adapter.
    asynchronously when modules arrive; a unique best claim gets sticky
    ownership, while ties and unsupported modules fail closed. The production
    CLI invokes the real LLDB definition's probe across its outer worker, with
-   URL routes temporarily constraining identical LLDB instances. Rich module
-   bytes/custom-section metadata and route-free ecosystem discovery remain.
+   URL routes temporarily constraining identical LLDB instances. The host now
+   derives payload-free `dwarf` and `source-map` hints from Wasm custom-section
+   names; richer ecosystem metadata and route-free discovery remain.
 4. **Instantiate two LLDB components (prototype complete).** Each gets a separate LLDB worker,
    gdbstub, RSP endpoint, pthread pool, and disjoint module set. Both observe
    the same physical Firefox process.

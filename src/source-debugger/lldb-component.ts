@@ -113,8 +113,20 @@ export class LldbSourceDebuggerComponent implements SourceDebuggerComponent {
     return descriptor(this.#options);
   }
 
-  async probeModule(_module: Omit<ModuleDescriptor, "owner">): Promise<ModuleClaim> {
-    return { supported: true, confidence: 50, reason: "LLDB fallback for Wasm modules" };
+  async probeModule(module: Omit<ModuleDescriptor, "owner">): Promise<ModuleClaim> {
+    if (module.debugInfo?.includes("dwarf")) {
+      return { supported: true, confidence: 90, reason: "embedded DWARF" };
+    }
+    if (module.debugInfo?.includes("source-map")) {
+      return { supported: true, confidence: 80, reason: "source-map to DWARF bridge" };
+    }
+    return {
+      supported: true,
+      confidence: module.debugInfo ? 10 : 50,
+      reason: module.debugInfo
+        ? "LLDB fallback; no recognized source metadata"
+        : "LLDB fallback for an uninspected Wasm module",
+    };
   }
 
   async instantiate(

@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import net from "node:net";
 import { RdpWasmSession, type StoppedEvent, type PauseEvent } from "../../src/rdp/session.js";
 import { encodeRdpFrame, sliceRdpFrame } from "../../src/rdp/transport.js";
+import { buildSyntheticModule } from "../../src/gdb/synthetic-module.js";
 
 // ---------------------------------------------------------------------------
 // Fake RDP server
@@ -1560,7 +1561,11 @@ test("fetchModuleBytes reads browser-owned ArrayBuffer source actors", async () 
   const srv = new FakeRdpServer();
   await srv.listen();
   const session = await srv.acceptSession();
-  const wasm = Uint8Array.of(0, 0x61, 0x73, 0x6d, 1, 0, 0, 0);
+  const wasm = buildSyntheticModule({
+    name: "fixture.cpp",
+    compDir: "/fixture",
+    lineCount: 2,
+  }).bytecode;
 
   srv.targetAvailable("thread1", { isTopLevel: true });
   await sleep(200);
@@ -1589,6 +1594,7 @@ test("fetchModuleBytes reads browser-owned ArrayBuffer source actors", async () 
   );
 
   assert.deepEqual(await session.fetchModuleBytes("wasm:fixture"), wasm);
+  assert.deepEqual(await session.wasmModuleDebugInfo("wasm:fixture"), ["dwarf"]);
 
   session.close();
   srv.close();

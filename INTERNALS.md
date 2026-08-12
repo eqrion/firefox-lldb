@@ -55,7 +55,10 @@ unique highest-confidence supported claim wins; ambiguity, no support, or a
 probe failure aborts assignment. Ownership remains pinned until unload. The
 CLI's explicit URL routes currently narrow this process for multiple identical
 LLDB definitions, but the selected definition's probe still runs across the
-outer isolation boundary.
+outer isolation boundary. Raw Wasm remains in the RDP/gdbstub host: it scans
+custom-section names once and sends only normalized `dwarf`/`source-map` hints
+in the module descriptor. LLDB gives those artifacts stronger claims while
+remaining a low-confidence fallback for unrecognized Wasm.
 
 With multiple Firefox threads, an observer may be locally stepping a stale
 breakpoint on a worker when a sibling stops the main thread. The debuggee WIT
