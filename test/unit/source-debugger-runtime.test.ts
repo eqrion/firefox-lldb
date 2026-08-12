@@ -4,6 +4,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import type { RdpWasmSession } from "../../src/rdp/session.js";
 import type {
   SourceDebuggerComponentDefinition,
   SourceDebuggerComponentInstance,
@@ -105,6 +106,58 @@ test("catalog discovery probes every definition and instantiates only module own
   assert.equal(events.at(-1), "target:close");
 });
 
+test("a module loaded after startup activates its owner before the next run", async () => {
+  const events: string[] = [];
+  const sources = [{ url: "component-a.wasm" }];
+  const rdp = {
+    wasmSources: async () => sources,
+    wasmModuleDebugInfo: async () => ["dwarf"],
+  } as unknown as RdpWasmSession;
+  const target = {
+    modules: async () => sources.map(({ url }) => ({ id: url, url, debugInfo: ["dwarf"] })),
+    close: () => {
+      events.push("target:close");
+    },
+  };
+  const runtime = await SourceDebuggerSessionRuntime.load({
+    target,
+    getRdpSession: () => rdp,
+    loaders: [
+      routedDiscoveryLoader("component-a", events),
+      routedDiscoveryLoader("component-b", events),
+    ],
+  });
+
+  assert.deepEqual(
+    runtime.components.map(({ id }) => id),
+    ["component-a"]
+  );
+  await runtime.activate();
+  await runtime.session.modules();
+
+  sources.push({ url: "component-b.wasm" });
+  const modules = await runtime.session.modules();
+  assert.deepEqual(
+    modules.map(({ owner }) => owner),
+    ["component-a", "component-b"]
+  );
+  assert.deepEqual(
+    runtime.components.map(({ id }) => id),
+    ["component-a", "component-b"]
+  );
+  assert.deepEqual(
+    (await runtime.session.components()).map(({ id }) => id),
+    ["component-a", "component-b"]
+  );
+  assert.ok(
+    events.indexOf("instantiate:component-b:component-b") < events.indexOf("activate:component-b"),
+    "the selected late definition is instantiated before it is attached"
+  );
+
+  await runtime.close();
+  assert.equal(events.at(-1), "target:close");
+});
+
 function fakeLoader(
   id: string,
   events: string[],
@@ -177,6 +230,33 @@ function discoveryLoader(
             confidence: supported ? 90 : 0,
             reason: supported ? "selected format" : "different format",
           };
+        },
+      };
+      return {
+        id,
+        definition,
+        probeModule: definition.probeModule,
+        close: () => {},
+      };
+    },
+    async instantiate(host) {
+      events.push(`instantiate:${id}:${host.componentId}`);
+      return fakeLoadedComponent(id, events);
+    },
+  };
+}
+
+function routedDiscoveryLoader(id: string, events: string[]): SourceDebuggerComponentLoader {
+  return {
+    id,
+    async loadDefinition() {
+      events.push(`definition:${id}`);
+      const definition: SourceDebuggerComponentDefinition = {
+        describe: async () => descriptor(id),
+        probeModule: async (module) => {
+          events.push(`probe:${id}:${module.id}`);
+          const supported = module.url.includes(id);
+          return { supported, confidence: supported ? 100 : 0 };
         },
       };
       return {

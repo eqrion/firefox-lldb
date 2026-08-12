@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Late Wasm Component</title>
+</head>
+<body>
+  <script src="math.js"></script>
+  <script>
+    let factorialA;
+    let factorialB;
+    let loadBPromise;
+
+    MathModule({ locateFile: path => `${path}?component=a` }).then(a => {
+      factorialA = a.cwrap('compute_factorial', 'number', ['number']);
+    });
+
+    function loadB() {
+      return loadBPromise ??= MathModule({ locateFile: path => `${path}?component=b` }).then(b => {
+        factorialB = b.cwrap('compute_factorial', 'number', ['number']);
+      });
+    }
+
+    function runA() {
+      return factorialA(10);
+    }
+
+    function runB() {
+      return factorialB(8);
+    }
+  </script>
+</body>
+</html>

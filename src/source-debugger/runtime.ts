@@ -46,10 +46,11 @@ export interface SourceDebuggerSessionRuntimeOptions {
  * tear everything down in dependency order. */
 export class SourceDebuggerSessionRuntime {
   readonly session: SourceDebuggerSession;
-  readonly components: readonly LoadedSourceDebuggerComponent[];
   readonly catalog: SourceDebuggerComponentCatalog;
   readonly #host: SourceDebuggerSessionHost;
   readonly #target: SourceDebuggerDiscoveryTarget | undefined;
+  readonly #components: LoadedSourceDebuggerComponent[];
+  readonly #lateActivations = new Map<string, Promise<LoadedSourceDebuggerComponent>>();
   #activationPromise: Promise<SourceDebuggerComponentActivation> | undefined;
   #closePromise: Promise<void> | undefined;
 
@@ -63,14 +64,19 @@ export class SourceDebuggerSessionRuntime {
     this.#host = host;
     this.#target = options.target;
     this.catalog = catalog;
-    this.components = components;
+    this.#components = components;
     this.session = new SourceDebuggerSession({
       components: components.map(({ component }) => component),
       debuggeeHost: host,
       getRdpSession: options.getRdpSession,
       resolveModuleOwner,
+      ensureComponent: async (id) => (await this.#ensureComponent(id)).component,
       logger: options.logger,
     });
+  }
+
+  get components(): readonly LoadedSourceDebuggerComponent[] {
+    return this.#components;
   }
 
   static async load(
@@ -152,6 +158,7 @@ export class SourceDebuggerSessionRuntime {
 
   async #close(): Promise<void> {
     const errors: unknown[] = [];
+    await Promise.allSettled(this.#lateActivations.values());
     try {
       await this.session.close();
     } catch (error) {
@@ -176,6 +183,56 @@ export class SourceDebuggerSessionRuntime {
       errors.push(error);
     }
     if (errors.length) throw new AggregateError(errors, "source debugger runtime cleanup failed");
+  }
+
+  #ensureComponent(id: string): Promise<LoadedSourceDebuggerComponent> {
+    const existing = this.#components.find((component) => component.id === id);
+    if (existing) return Promise.resolve(existing);
+    if (this.#closePromise) {
+      return Promise.reject(new Error("SourceDebuggerSessionRuntime is closed"));
+    }
+    if (!this.#activationPromise) {
+      return Promise.reject(
+        new Error(
+          `cannot activate late SourceDebuggerComponent ${id} before the session runtime is active`
+        )
+      );
+    }
+
+    const pending = this.#lateActivations.get(id);
+    if (pending) return pending;
+    const activation = this.#activateLateComponent(id).finally(() => {
+      this.#lateActivations.delete(id);
+    });
+    this.#lateActivations.set(id, activation);
+    return activation;
+  }
+
+  async #activateLateComponent(id: string): Promise<LoadedSourceDebuggerComponent> {
+    await this.#activationPromise;
+    const existing = this.#components.find((component) => component.id === id);
+    if (existing) return existing;
+    if (this.#closePromise) throw new Error("SourceDebuggerSessionRuntime is closed");
+
+    const entry = this.catalog.entry(id);
+    const loaded = await entry.loader.instantiate(this.#host.forComponent(id));
+    if (loaded.id !== id) {
+      await loaded.close();
+      throw new Error(
+        `SourceDebuggerComponent loader id ${id} does not match loaded component id ${loaded.id}`
+      );
+    }
+    try {
+      await loaded.activate();
+      if (this.#closePromise) {
+        throw new Error("SourceDebuggerSessionRuntime closed during late component activation");
+      }
+      this.#components.push(loaded);
+      return loaded;
+    } catch (error) {
+      await Promise.resolve(loaded.close()).catch(() => {});
+      throw error;
+    }
   }
 }
 

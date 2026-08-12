@@ -690,3 +690,90 @@ test("module refresh assigns one owner and reports additions and removals", asyn
   await session.modules();
   assert.equal(ownershipRequests, 3, "a reloaded module is probed again");
 });
+
+test("run control waits for a late component activation and module handoff", async () => {
+  const events: string[] = [];
+  let urls = ["https://example.test/component-a.wasm"];
+  const rdp = {
+    wasmSources: async () => urls.map((url, index) => ({ actor: String(index), url })),
+    wasmModuleDebugInfo: async () => ["dwarf"],
+  } as unknown as RdpWasmSession;
+  let announceEnsure: (() => void) | undefined;
+  const ensureStarted = new Promise<void>((resolve) => {
+    announceEnsure = resolve;
+  });
+  let finishEnsure: ((component: SourceDebuggerComponentInstance) => void) | undefined;
+  const ensured = new Promise<SourceDebuggerComponentInstance>((resolve) => {
+    finishEnsure = resolve;
+  });
+  const session = new SourceDebuggerSession({
+    components: [fakeComponent("component-a", { events })],
+    getRdpSession: () => rdp,
+    resolveModuleOwner: async (module) =>
+      module.url.includes("component-b") ? "component-b" : "component-a",
+    ensureComponent: async () => {
+      events.push("ensure:component-b");
+      announceEnsure?.();
+      return ensured;
+    },
+  });
+  await session.modules();
+
+  urls = [...urls, "https://example.test/component-b.wasm"];
+  const refresh = session.modules();
+  await ensureStarted;
+  const run = session.continue("component-a");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(
+    events.some((event) => event.startsWith("start:")),
+    false,
+    "run control started while the late component was still attaching"
+  );
+
+  finishEnsure?.(fakeComponent("component-b", { events }));
+  await refresh;
+  await run;
+  assert.ok(
+    events.indexOf("add:component-b:https://example.test/component-b.wasm") <
+      events.indexOf("start:component-b:observer:continue")
+  );
+});
+
+test("a module which appears during an active run is assigned at the next stop", async () => {
+  let urls = ["https://example.test/component-a.wasm"];
+  const rdp = {
+    wasmSources: async () => urls.map((url, index) => ({ actor: String(index), url })),
+    wasmModuleDebugInfo: async () => ["dwarf"],
+  } as unknown as RdpWasmSession;
+  const driver = fakeComponent("component-a");
+  let announceWait: (() => void) | undefined;
+  const waitStarted = new Promise<void>((resolve) => {
+    announceWait = resolve;
+  });
+  let finishRun: ((stop: ComponentStop) => void) | undefined;
+  driver.waitForStop = async () => {
+    announceWait?.();
+    return new Promise<ComponentStop>((resolve) => {
+      finishRun = resolve;
+    });
+  };
+  const session = new SourceDebuggerSession({
+    components: [driver],
+    getRdpSession: () => rdp,
+    resolveModuleOwner: async () => "component-a",
+  });
+  await session.modules();
+
+  const run = session.continue();
+  await waitStarted;
+  urls = [...urls, "https://example.test/component-b.wasm"];
+  await assert.rejects(session.modules(), /cannot assign newly loaded Wasm module.*active run/);
+
+  finishRun?.({
+    runId: "run-1",
+    disposition: "accepted",
+    reason: { kind: "breakpoint" },
+  });
+  await run;
+  assert.equal((await session.modules()).length, 2);
+});

@@ -104,10 +104,13 @@ third generic port carries the component's imported
 `SourceDebuggerComponentLoader` in two phases. `loadDefinition()` contributes
 only discovery exports to `SourceDebuggerComponentCatalog`;
 `instantiate(host)` receives a component-scoped binding only after that
-definition wins an initial module. `SourceDebuggerSessionRuntime` constructs
-the broker from selected instances, activates their target connections in
-catalog order, and tears down the broker, target handles, definitions, and
-isolates in dependency order. The production CLI does not directly create an
+definition wins a module. `SourceDebuggerSessionRuntime` constructs the broker
+from selected instances, activates their target connections in catalog order,
+and tears down the broker, target handles, definitions, and isolates in
+dependency order. A stopped module refresh can select a definition which was
+not needed at startup. The runtime serializes its instantiation and target
+attach with run control, adds its modules, and only then lets the new component
+join subsequent observer barriers. The production CLI does not directly create an
 LLDB platform server, bridge RSP ports, attach an LLDB process, or retain LLDB
 run-control objects. Those operations live in `lldb-loader.ts`, behind the same
 lifecycle another installed ecosystem would implement. The LLDB control
@@ -142,8 +145,10 @@ observation before navigation, waits briefly for initial modules, inspects
 their normalized debug metadata, and establishes the shared physical stop.
 The catalog then probes all installed definitions and creates a wasm LLDB
 worker only if LLDB owns a module (or is explicitly configured as an eager
-compatibility observer). `SourceDebuggerSessionRuntime` presents selected
-components through `SourceDebuggerSession`; LLDB's target adapter owns each
+compatibility observer). A module loaded later repeats that selection at a
+stopped refresh and can add another isolated LLDB without restarting the
+session. `SourceDebuggerSessionRuntime` presents selected components through
+`SourceDebuggerSession`; LLDB's target adapter owns each
 `IsolatedLldbComponentRuntime` and its platform/attach lifecycle. The outer
 isolate owns an `EmbeddedLldbComponentRuntime`. Because
 the wasm LLDB cannot open TCP sockets, the host opens each RSP connection it

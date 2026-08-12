@@ -99,7 +99,10 @@ platform servers, attach commands, shared-RDP wiring, and run control no longer
 appear in the CLI lifecycle. Firefox now starts and exposes normalized Wasm
 metadata before any debugger engine is created. The catalog probes lightweight
 installed definitions and instantiates only initial module owners; an e2e proof
-verifies that an unsupported installed ecosystem is never instantiated.
+verifies that an unsupported installed ecosystem is never instantiated. If a
+later stopped module refresh selects another definition, the runtime creates
+and attaches that component at the current physical stop before allowing the
+next run. The new debugger then joins the normal observer barrier.
 
 At the `(sdb)` prompt, qualify ambiguous commands with the component ID:
 

@@ -34,6 +34,9 @@ export interface SourceDebuggerSessionOptions {
   components: SourceDebuggerComponentInstance[];
   getRdpSession?: () => RdpWasmSession | undefined;
   resolveModuleOwner?: ModuleOwnerResolver;
+  /** Lazily create and attach an installed component selected for a module
+   * which appeared after initial discovery. Called only while stopped. */
+  ensureComponent?: (componentId: ComponentId) => Promise<SourceDebuggerComponentInstance>;
   /** Imported debuggee capabilities owned and revoked with this session. */
   debuggeeHost?: SourceDebuggerSessionHost;
   logger?: Logger;
@@ -61,6 +64,9 @@ export class SourceDebuggerSession {
   readonly #componentById: Map<ComponentId, SourceDebuggerComponentInstance>;
   readonly #getRdpSession: () => RdpWasmSession | undefined;
   readonly #resolveModuleOwner: ModuleOwnerResolver;
+  readonly #ensureComponent:
+    | ((componentId: ComponentId) => Promise<SourceDebuggerComponentInstance>)
+    | undefined;
   readonly #debuggeeHost: SourceDebuggerSessionHost | undefined;
   readonly #logger: Logger;
   readonly #frames = new Map<LogicalFrameId, LogicalFrame>();
@@ -86,6 +92,7 @@ export class SourceDebuggerSession {
     }
     this.#getRdpSession = options.getRdpSession ?? (() => undefined);
     this.#resolveModuleOwner = options.resolveModuleOwner ?? (async () => this.#components[0].id);
+    this.#ensureComponent = options.ensureComponent;
     this.#debuggeeHost = options.debuggeeHost;
     this.#logger = options.logger ?? noopLogger;
     this.#stateComponentId = this.#components[0].id;
@@ -375,6 +382,11 @@ export class SourceDebuggerSession {
         next.set(existing.id, existing);
         continue;
       }
+      if (this.#activeRunId) {
+        throw new Error(
+          `cannot assign newly loaded Wasm module ${source.url} during active run ${this.#activeRunId}`
+        );
+      }
 
       const debugInfo = await rdp?.wasmModuleDebugInfo?.(source.url);
       const module = {
@@ -386,6 +398,21 @@ export class SourceDebuggerSession {
       // discovery on every refresh could silently move it between debuggers if
       // a component is installed, removed, or changes its probe result.
       const owner = await this.#resolveModuleOwner(module);
+      if (!this.#componentById.has(owner)) {
+        if (!this.#ensureComponent) {
+          throw new Error(`unknown SourceDebuggerComponent ${owner}`);
+        }
+        const component = await this.#ensureComponent(owner);
+        if (component.id !== owner) {
+          throw new Error(
+            `requested SourceDebuggerComponent ${owner} but activation returned ${component.id}`
+          );
+        }
+        if (!this.#componentById.has(owner)) {
+          this.#components.push(component);
+          this.#componentById.set(owner, component);
+        }
+      }
       this.#knownComponent(owner);
       next.set(module.id, { ...module, owner });
     }
@@ -429,6 +456,10 @@ export class SourceDebuggerSession {
     action: ComponentRunAction,
     driverId?: ComponentId
   ): Promise<SessionState & { output?: string }> {
+    // A late component attaches to the target at the current physical stop.
+    // Never let a new run begin until an in-progress stopped module refresh,
+    // activation, and addModules() handoff finish.
+    await this.#moduleSync;
     const active = this.#activeComponents();
     if (active.length === 0) throw new Error("all SourceDebuggerComponents are quarantined");
     const driver = driverId ? this.#component(driverId) : active[0];

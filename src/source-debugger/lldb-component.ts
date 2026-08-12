@@ -187,13 +187,16 @@ export class LldbSourceDebuggerComponentInstance implements SourceDebuggerCompon
 
   async frames(_stopId: StopId, _threadId: ThreadId): Promise<ComponentFrame[]> {
     const frames = await this.#client.sessionFrames();
+    const ownedModuleIndices = this.#exclusiveModules
+      ? await this.#ownedModuleIndices()
+      : undefined;
     return frames
       .filter(
         (frame) =>
           !(frame.function === "??" && /^0x0+$/.test(frame.pc) && frame.file === undefined) &&
           !frame.file?.endsWith("__source_debugger_foreign__.wasm") &&
           !frame.file?.endsWith("__source_debugger_abort__.wasm") &&
-          (!this.#exclusiveModules || wasmModuleIndex(frame.pc) < this.#moduleIds.size)
+          (!ownedModuleIndices || ownedModuleIndices.has(wasmModuleIndex(frame.pc)))
       )
       .map((frame) => ({
         id: String(frame.index),
@@ -312,14 +315,23 @@ export class LldbSourceDebuggerComponentInstance implements SourceDebuggerCompon
         if (result.status >= LLDB_FAILED_STATUS)
           throw new Error(result.error || `${command} failed`);
         const reason = reasonFromLldb(await this.#client.sessionState());
+        // The driver can publish the shared physical stop and ask observers to
+        // synchronize before a slower observer has finished classifying that
+        // same stop. Never let that race hide a user breakpoint registered by
+        // this component. Foreign breakpoints and the private abort sentinel
+        // are not in #breakpoints, so they retain synchronization semantics.
+        const ownsBreakpoint =
+          reason.kind === "breakpoint" &&
+          reason.breakpointId !== undefined &&
+          this.#breakpoints.has(reason.breakpointId);
         const disposition =
           request.role === "driver"
             ? ("accepted" as const)
-            : this.#runControl?.isSynchronizing(request.runId)
-              ? ("synchronized" as const)
-              : isPreemptingObserverReason(reason)
-                ? ("preempted" as const)
-                : ("synchronized" as const);
+            : ownsBreakpoint ||
+                (!this.#runControl?.isSynchronizing(request.runId) &&
+                  isPreemptingObserverReason(reason))
+              ? ("preempted" as const)
+              : ("synchronized" as const);
         this.#logger.debug(
           `[${this.id}] ${request.runId} ${request.role} stopped as ${reason.kind} (${disposition})`
         );
@@ -390,6 +402,25 @@ export class LldbSourceDebuggerComponentInstance implements SourceDebuggerCompon
     return result.status < LLDB_FAILED_STATUS || result.output
       ? parseFrameVariables(result.output)
       : new Map();
+  }
+
+  async #ownedModuleIndices(): Promise<Set<number>> {
+    const result = await this.command("image list");
+    if (result.status >= LLDB_FAILED_STATUS) {
+      throw new Error(result.error || "could not enumerate LLDB images");
+    }
+    const indices = new Set<number>();
+    for (const line of result.output.split("\n")) {
+      const match = line.match(/^\[\s*(\d+)\]\s+/);
+      if (
+        match &&
+        !line.includes("__source_debugger_foreign__.wasm") &&
+        !line.includes("__source_debugger_abort__.wasm")
+      ) {
+        indices.add(Number(match[1]));
+      }
+    }
+    return indices;
   }
 
   #ensureAbortBreakpoint(): Promise<void> {
