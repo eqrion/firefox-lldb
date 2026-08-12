@@ -6,6 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { SourceDebuggerSession } from "../../src/source-debugger/session.js";
 import type { SourceDebuggerComponentInstance } from "../../src/source-debugger/component.js";
+import type { RdpWasmSession } from "../../src/rdp/session.js";
 import type {
   ComponentRunRequest,
   ComponentStop,
@@ -34,8 +35,12 @@ function fakeComponent(
         stepOut: true,
       },
     }),
-    addModules: async () => {},
-    removeModules: async () => {},
+    addModules: async (modules) => {
+      options.events?.push(`add:${id}:${modules.map(({ id: moduleId }) => moduleId).join(",")}`);
+    },
+    removeModules: async (moduleIds) => {
+      options.events?.push(`remove:${id}:${moduleIds.join(",")}`);
+    },
     sources: async () => [],
     state: async (stopId) => ({
       stopId,
@@ -94,6 +99,9 @@ function fakeComponent(
       const run = runs.get(runId);
       if (!run) throw new Error(`missing ${runId}`);
       return run;
+    },
+    synchronizeRun: async () => {
+      options.events?.push(`sync:${id}`);
     },
     cancelRun: async () => {},
     command: async () => ({ output: "", error: "", status: 0 }),
@@ -171,4 +179,61 @@ test("multi-component breakpoints require and retain an explicit owner", async (
     target: { kind: "function", name: "compute" },
   });
   assert.equal(breakpoint.id, "b:1");
+});
+
+test("the first component stop synchronizes observers before the session commits", async () => {
+  const events: string[] = [];
+  const driver = fakeComponent("driver", { events });
+  const observer = fakeComponent("observer", { events });
+  let resolveObserver!: (stop: ComponentStop) => void;
+
+  driver.waitForStop = async (runId) => ({
+    runId,
+    disposition: "accepted",
+    reason: { kind: "breakpoint" },
+  });
+  observer.waitForStop = (_runId) =>
+    new Promise((resolve) => {
+      resolveObserver = resolve;
+    });
+  observer.synchronizeRun = async (runId) => {
+    events.push("sync:observer");
+    resolveObserver({
+      runId,
+      disposition: "synchronized",
+      reason: { kind: "interrupt" },
+    });
+  };
+
+  const session = new SourceDebuggerSession({ components: [driver, observer] });
+  const stop = await session.continue("driver");
+  assert.equal(stop.reason.kind, "breakpoint");
+  assert.ok(events.includes("sync:observer"));
+});
+
+test("module refresh assigns one owner and reports additions and removals", async () => {
+  const events: string[] = [];
+  let urls = ["https://example.test/a.wasm", "https://example.test/b.wasm"];
+  const rdp = {
+    wasmSources: async () => urls.map((url, index) => ({ actor: String(index), url })),
+  } as unknown as RdpWasmSession;
+  const session = new SourceDebuggerSession({
+    components: [fakeComponent("a", { events }), fakeComponent("b", { events })],
+    getRdpSession: () => rdp,
+    selectModuleOwner: (module) => (module.url.endsWith("b.wasm") ? "b" : "a"),
+  });
+
+  assert.deepEqual(
+    (await session.modules()).map(({ id, owner }) => [id, owner]),
+    [
+      ["https://example.test/a.wasm", "a"],
+      ["https://example.test/b.wasm", "b"],
+    ]
+  );
+  assert.ok(events.includes("add:a:https://example.test/a.wasm"));
+  assert.ok(events.includes("add:b:https://example.test/b.wasm"));
+
+  urls = ["https://example.test/b.wasm"];
+  await session.modules();
+  assert.ok(events.includes("remove:a:https://example.test/a.wasm"));
 });

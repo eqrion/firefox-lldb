@@ -45,6 +45,8 @@ export class SourceDebuggerSession {
   readonly #selectModuleOwner: (module: Omit<ModuleDescriptor, "owner">) => ComponentId;
   readonly #frames = new Map<LogicalFrameId, LogicalFrame>();
   readonly #breakpointRoutes = new Map<BreakpointId, BreakpointRoute>();
+  #moduleById = new Map<string, ModuleDescriptor>();
+  #moduleSync: Promise<ModuleDescriptor[]> | undefined;
   #stopNumber = 0;
   #runNumber = 0;
   #stopId: StopId = "stop-0";
@@ -76,13 +78,9 @@ export class SourceDebuggerSession {
   }
 
   async modules(): Promise<ModuleDescriptor[]> {
-    const sources = await this.#getRdpSession()?.wasmSources();
-    return (sources ?? []).map((source) => {
-      const module = { id: source.url, url: source.url };
-      const owner = this.#selectModuleOwner(module);
-      this.#component(owner);
-      return { ...module, owner };
-    });
+    return (this.#moduleSync ??= this.#refreshModules().finally(() => {
+      this.#moduleSync = undefined;
+    }));
   }
 
   async state(): Promise<SessionState> {
@@ -94,6 +92,7 @@ export class SourceDebuggerSession {
   }
 
   async frames(threadId?: ThreadId): Promise<LogicalFrame[]> {
+    await this.modules();
     const state = await this.state();
     const selectedThread =
       threadId ?? ("threadId" in state.reason ? state.reason.threadId : undefined) ?? "1";
@@ -148,6 +147,7 @@ export class SourceDebuggerSession {
   }
 
   async setBreakpoint(request: SessionBreakpointRequest): Promise<SourceBreakpoint> {
+    await this.modules();
     const component = request.componentId
       ? this.#component(request.componentId)
       : this.#unambiguousComponent("breakpoint");
@@ -227,6 +227,36 @@ export class SourceDebuggerSession {
     await Promise.all(this.#components.map((component) => component.dispose()));
     this.#frames.clear();
     this.#breakpointRoutes.clear();
+    this.#moduleById.clear();
+  }
+
+  async #refreshModules(): Promise<ModuleDescriptor[]> {
+    const sources = await this.#getRdpSession()?.wasmSources();
+    const next = new Map<string, ModuleDescriptor>();
+    for (const source of sources ?? []) {
+      const module = { id: source.url, url: source.url };
+      const owner = this.#selectModuleOwner(module);
+      this.#component(owner);
+      next.set(module.id, { ...module, owner });
+    }
+
+    for (const component of this.#components) {
+      const removed = [...this.#moduleById.values()]
+        .filter(
+          (module) => module.owner === component.id && next.get(module.id)?.owner !== component.id
+        )
+        .map(({ id }) => id);
+      if (removed.length) await component.removeModules(removed);
+
+      const added = [...next.values()].filter(
+        (module) =>
+          module.owner === component.id && this.#moduleById.get(module.id)?.owner !== component.id
+      );
+      if (added.length) await component.addModules(added, this.#stopId);
+    }
+
+    this.#moduleById = next;
+    return [...next.values()];
   }
 
   async #run(
@@ -250,9 +280,16 @@ export class SourceDebuggerSession {
         )
       );
       await driver.startRun({ runId, role: "driver", action });
-      const stops = await Promise.all(
-        this.#components.map((component) => component.waitForStop(runId))
+      const waits = this.#components.map((component) =>
+        component.waitForStop(runId).then((stop) => ({ component, stop }))
       );
+      const first = await Promise.race(waits);
+      await Promise.all(
+        this.#components
+          .filter((component) => component !== first.component)
+          .map((component) => component.synchronizeRun?.(runId))
+      );
+      const stops = (await Promise.all(waits)).map(({ stop }) => stop);
       const stop =
         stops.find((candidate) => candidate.disposition === "accepted") ??
         stops[this.#components.indexOf(driver)];

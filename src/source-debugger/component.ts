@@ -59,6 +59,7 @@ export interface SourceDebuggerComponentInstance {
 
   startRun(request: ComponentRunRequest): Promise<void>;
   waitForStop(runId: RunId): Promise<ComponentStop>;
+  synchronizeRun?(runId: RunId): Promise<void>;
   cancelRun(runId: RunId): Promise<void>;
 
   // Optional debugger-native escape hatch. It is intentionally not used by

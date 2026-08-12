@@ -12,96 +12,28 @@
 // servers through in-memory channels: LLDB connects to "inprocess://<id>" and
 // we pump bytes between channel <id> and a localhost socket.
 
-import net from "node:net";
 import { readFile } from "node:fs/promises";
-import { LLDBClient } from "lldb-wasm";
 import { parseCliArgs, startPlatformServer } from "../core/platform-session.js";
 import { focusFirefoxWindow } from "../rdp/firefox.js";
 import { quietLogger } from "./logger.js";
 import { runRepl } from "./repl.js";
 import type { RdpWasmSession } from "../rdp/session.js";
 import { debugEnvEnabled } from "../config.js";
-import type { Logger } from "../logging.js";
-import { LldbSourceDebuggerComponentInstance } from "../source-debugger/lldb-component.js";
+import { EmbeddedLldbComponentRuntime } from "../source-debugger/lldb-runtime.js";
 import { SourceDebuggerSession } from "../source-debugger/session.js";
-
-// lldb::ReturnStatus values at or above this are failures. Keep the automatic
-// attach retry local to the CLI: an uncontrolled page reload can invalidate the
-// first per-tab server while `process attach` is in flight, but the platform is
-// ready to launch a fresh one as soon as the replacement target arrives.
-const LLDB_FAILED_STATUS = 6;
-const AUTO_ATTACH_ATTEMPTS = 4;
-
-async function attachWithRetry(
-  client: LLDBClient,
-  pid: number,
-  onRetry?: (attempt: number) => void
-): Promise<string> {
-  let lastError = "unknown attach failure";
-  for (let attempt = 1; attempt <= AUTO_ATTACH_ATTEMPTS; attempt++) {
-    const result = await client.sessionCommand(`process attach --plugin wasm --pid ${pid}`);
-    if (result.status < LLDB_FAILED_STATUS) {
-      const state = await client.sessionState();
-      if (state.reason !== "none" && state.reason !== "exited") {
-        return (result.output + result.error).trimEnd();
-      }
-      lastError = `process did not stop (state ${state.reason})`;
-    } else {
-      lastError = (result.error || result.output).trim() || lastError;
-    }
-    if (attempt < AUTO_ATTACH_ATTEMPTS) {
-      onRetry?.(attempt);
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    }
-  }
-  throw new Error(`automatic attach failed after ${AUTO_ATTACH_ATTEMPTS} attempts: ${lastError}`);
-}
-
-// Open bridge sockets, tracked so we can tear them down on exit (otherwise
-// net.Server.close() blocks on the live connections).
-const bridgeSockets = new Set<net.Socket>();
-
-// Bridge a localhost TCP RSP server to an in-process channel the wasm LLDB
-// connects to via "inprocess://<id>". Returns the channel ID.
-async function bridgeTcp(client: LLDBClient, port: number, logger: Logger): Promise<number> {
-  const channelId = await client.createChannel();
-  const socket = net.connect(port, "127.0.0.1");
-  bridgeSockets.add(socket);
-  socket.on("close", () => bridgeSockets.delete(socket));
-  socket.setNoDelay(true);
-  // Capture the connect result now: the loopback connect can complete during the
-  // bridgeChannel await below, and a listener attached after that would miss the
-  // one-shot "connect" event and hang forever.
-  const connected = new Promise<void>((resolve, reject) => {
-    socket.once("connect", resolve);
-    socket.once("error", reject);
-  });
-  // server -> LLDB
-  socket.on("data", (d) => {
-    void client.channelServerWrite(channelId, new Uint8Array(d)).catch((err) => {
-      logger.error(
-        `[bridge] server-to-LLDB write failed: ${err instanceof Error ? err.message : String(err)}`
-      );
-      socket.destroy();
-    });
-  });
-  socket.on("error", (err) => logger.warn(`[bridge] socket error: ${err.message}`));
-  // LLDB -> server
-  await client.bridgeChannel(channelId, (data) => void socket.write(Buffer.from(data)));
-  await connected;
-  return channelId;
-}
 
 async function main(): Promise<void> {
   const args = parseCliArgs(process.argv.slice(2));
   const verbose = args.verbose || debugEnvEnabled();
   const logger = quietLogger(verbose);
 
-  const client = await LLDBClient.create();
-  client.setFileProvider((path) => readFile(path).catch(() => null));
+  const runtime = await EmbeddedLldbComponentRuntime.create({
+    logger,
+    fileProvider: (path) => readFile(path).catch(() => null),
+  });
   let session: RdpWasmSession | undefined;
   const sourceDebuggerSession = new SourceDebuggerSession({
-    components: [new LldbSourceDebuggerComponentInstance(client)],
+    components: [runtime.component],
     getRdpSession: () => session,
   });
 
@@ -110,8 +42,7 @@ async function main(): Promise<void> {
   const cleanup = async (code = 0) => {
     if (exiting) return;
     exiting = true;
-    for (const s of bridgeSockets) s.destroy();
-    for (const work of [sourceDebuggerSession.close(), handle?.shutdown(), client.destroy()]) {
+    for (const work of [sourceDebuggerSession.close(), handle?.shutdown(), runtime.close()]) {
       try {
         await work;
       } catch (err) {
@@ -149,7 +80,8 @@ async function main(): Promise<void> {
   // wasm LLDB connects to inprocess://<id> (PlatformWasmRemoteGDBServer::MakeUrl).
   try {
     handle = await startPlatformServer(args, {
-      wrapConnectPort: (port) => bridgeTcp(client, port, logger),
+      wrapConnectPort: runtime.bridgeTcp,
+      runControl: runtime.runControl,
       logger,
       onTab: (tab, pid) => repl.print(`tab available: ${tab.url}\n  attach --pid ${pid}`),
       onSession: (s, interrupt) => {
@@ -174,8 +106,8 @@ async function main(): Promise<void> {
           repl.print("the attached tab was closed; detaching.");
           session = undefined;
           triggerInterrupt = undefined;
-          void client
-            .sessionCommand("process detach")
+          void runtime
+            .command("process detach")
             .catch((err) => logger.debug(`[cleanup] LLDB detach failed: ${String(err)}`));
         });
       },
@@ -190,20 +122,19 @@ async function main(): Promise<void> {
     // Bridge the platform connection itself, then drive the platform setup the
     // native wrapper used to pass via `-o`. These produce noisy connect chatter,
     // so we run them quietly and only surface the attach / tab list.
-    const platformChannel = await bridgeTcp(client, handle.port, logger);
-    await client.sessionCommand("platform select remote-gdb-server");
-    await client.sessionCommand(`platform connect inprocess://${platformChannel}`);
-    await client.sessionCommand("command alias attach process attach --plugin wasm");
+    await runtime.connectPlatform(handle.port);
+    await runtime.command("command alias attach process attach --plugin wasm");
 
     let intro =
       "firefox-lldb source debugger — `attach --pid N` to attach, `help` for generic commands.";
     if (args.url) {
       repl.print(intro + "\nattaching...");
-      intro = await attachWithRetry(client, 1, (attempt) =>
-        repl.print(`automatic attach attempt ${attempt} was interrupted; retrying...`)
-      );
+      intro = await runtime.attach(1, {
+        onRetry: (attempt) =>
+          repl.print(`automatic attach attempt ${attempt} was interrupted; retrying...`),
+      });
     } else {
-      const res = await client.sessionCommand("platform process list");
+      const res = await runtime.command("platform process list");
       intro += "\n" + res.output.trimEnd();
     }
     repl.start(intro);

@@ -30,9 +30,11 @@ The first implementation lives under `src/source-debugger/`:
 - `types.ts` defines structured-cloneable protocol records and opaque IDs.
 - `component.ts` defines the imported/exported component contracts.
 - `lldb-component.ts` adapts the real wasm-compiled LLDB and its public API.
+- `lldb-runtime.ts` owns one isolated LLDB worker, pthread pool, in-process
+  channels, and the sockets bridging them to its RSP endpoints.
 - `session.ts` composes component frame projections, routes frame/value work,
-  owns logical breakpoint IDs, invalidates stop-scoped handles, and implements
-  the driver/observer run barrier.
+  owns module assignments and logical breakpoint IDs, invalidates stop-scoped
+  handles, and implements the driver/observer run and stop barriers.
 
 The `firefox-lldb` CLI now presents a language-generic `(sdb)` prompt. Its core
 commands call only `SourceDebuggerSession`:
@@ -57,27 +59,45 @@ finish
 Existing LLDB commands continue to work during the migration. `lldb <command>`
 makes the debugger-specific escape hatch explicit.
 
-The initial e2e test proves the generic API against a real Firefox, gdbstub,
-RSP transport, and embedded LLDB. Deterministic unit tests already exercise
-two component projections and observer-before-driver ordering.
+The first e2e proves the generic API against a real Firefox, gdbstub, RSP
+transport, and embedded LLDB. A second proof now creates two independent LLDB
+wasm workers and filtered RSP/gdbstub projections over one shared physical RDP
+debuggee session. Two query-distinguished Wasm modules are assigned to LLDB-A
+and LLDB-B; both resolve independent breakpoint 1, observers arm before the
+driver releases the shared run lease, stops fan out to both LLDBs, and each
+source backtrace excludes opaque foreign activations.
+
+The proof performs three consecutive continues with driver handoffs from A to
+B and back to A. This is significant because the previous driver internally
+single-steps off its old breakpoint before it issues its semantic observer
+continue. The shared RDP host lets it arm those local waits without physically
+resuming Firefox; the new driver alone holds the run lease and its breakpoint
+stop brings both LLDBs to a consistent state. The stopped frames and locals
+(`n = 10`, then `8`, then `10`) are read through the generic session API.
+
+LLDB scopes use the structured public variable API. Expression evaluation
+retains a narrow command-output adapter because the current SB wrapper cannot
+materialize wasm locals which the session command interpreter evaluates
+correctly.
 
 ## Staged path to two isolated LLDBs
 
-1. **Complete the LLDB source adapter.** Extend the wasm LLDB SB wrapper with
+1. **Complete the LLDB source adapter (in progress).** Extend the wasm LLDB SB wrapper with
    structured thread, source, breakpoint-location, scope, and lazy `SBValue`
    operations. Remove presentation parsing from `lldb-component.ts`.
-2. **Move raw debuggee ownership into the session.** Replace the current
-   per-tab single gdbstub construction with a central Firefox debuggee host
-   that creates a scoped virtual debuggee/RSP endpoint per component.
-3. **Make module assignment explicit.** Probe components when modules arrive,
+2. **Move raw debuggee ownership into the session (shared-host proof complete).** The
+   platform can now lend one physical `RdpWasmSession` to multiple filtered
+   gdbstub projections without transferring its lifetime. Extract that into a
+   first-class session-owned debuggee host rather than a platform option.
+3. **Make module assignment explicit (prototype complete).** Probe components when modules arrive,
    assign one owner, expose foreign frames opaquely, and reject breakpoint
    mutations outside the owner's module set.
-4. **Instantiate two LLDB components.** Each gets a separate LLDB worker,
+4. **Instantiate two LLDB components (prototype complete).** Each gets a separate LLDB worker,
    gdbstub, RSP endpoint, pthread pool, and disjoint module set. Both observe
    the same physical Firefox process.
-5. **Synchronize stops and continues.** Arm every observer, let one component
-   hold the run-control lease, route candidate breakpoint stops to the module
-   owner, and commit accepted stops to every component.
+5. **Synchronize stops and continues (handoff prototype complete).** Arm every observer,
+   let one component hold the physical run-control lease, fan out stops, and
+   synchronize debugger-internal resume sequences before committing the stop.
 6. **Compose the real mixed stack in the TUI.** Merge projections by physical
    frame position and route scopes/evaluation back through the selected
    logical frame's component.
@@ -95,6 +115,12 @@ Stable activation IDs are deliberately not a prerequisite for the two-LLDB
 prototype. Stop-scoped IDs built from `(stop, thread, physical frame position,
 inline position, component)` are sufficient for the TUI, frame selection,
 variables, and the initial cross-component control experiments.
+
+The next milestone is a genuinely interleaved stack: make module A call module
+B (with JavaScript frames between them), verify physical-frame ordering across
+both projections, and drive step-in/step-out ownership handoff from the generic
+REPL. The current two-module fixture invokes A and B separately, which proves
+consecutive run-control handoff but not cross-component stack composition.
 
 ## Proof target
 

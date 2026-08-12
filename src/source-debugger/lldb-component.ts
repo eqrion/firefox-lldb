@@ -18,7 +18,6 @@ import type {
   SourceBreakpointRequest,
   SourceDebuggerComponentDescriptor,
   SourceFile,
-  SourceProperty,
   SourceScope,
   SourceValue,
   StopId,
@@ -36,6 +35,15 @@ const LLDB_FAILED_STATUS = 6;
 export interface LldbSourceDebuggerComponentOptions {
   id?: ComponentId;
   name?: string;
+  onDispose?: () => void | Promise<void>;
+  runControl?: LldbComponentRunControl;
+  exclusiveModules?: boolean;
+}
+
+export interface LldbComponentRunControl {
+  beginRun(request: ComponentRunRequest): Promise<void>;
+  endRun(runId: RunId): void;
+  synchronizeRun(runId: RunId): void;
 }
 
 function reasonFromLldb(reason: StopReason): SessionStopReason {
@@ -82,24 +90,6 @@ function breakpointId(result: CommandResult): string | undefined {
   return result.output.match(/\bBreakpoint\s+(\d+):/)?.[1];
 }
 
-function parseValues(output: string): SourceProperty[] {
-  const values: SourceProperty[] = [];
-  for (const line of output.split("\n")) {
-    const match = line.match(/^\s*\((.+)\)\s+([^\s=]+)\s*=\s*(.*)$/);
-    if (!match) continue;
-    values.push({
-      name: match[2],
-      value: {
-        name: match[2],
-        type: match[1],
-        display: match[3],
-        hasChildren: /^(?:\{|\[)/.test(match[3]),
-      },
-    });
-  }
-  return values;
-}
-
 export class LldbSourceDebuggerComponent implements SourceDebuggerComponent {
   readonly #client: LLDBClient;
   readonly #options: LldbSourceDebuggerComponentOptions;
@@ -128,20 +118,34 @@ export class LldbSourceDebuggerComponentInstance implements SourceDebuggerCompon
   readonly #name: string;
   readonly #runs = new Map<RunId, Promise<ComponentStop>>();
   readonly #breakpoints = new Map<string, SourceBreakpoint>();
+  readonly #onDispose: (() => void | Promise<void>) | undefined;
+  readonly #runControl: LldbComponentRunControl | undefined;
+  readonly #exclusiveModules: boolean;
+  readonly #moduleIds = new Set<string>();
 
   constructor(client: LLDBClient, options: LldbSourceDebuggerComponentOptions = {}) {
     this.#client = client;
     this.id = options.id ?? "lldb";
     this.#name = options.name ?? "LLDB";
+    this.#onDispose = options.onDispose;
+    this.#runControl = options.runControl;
+    this.#exclusiveModules = options.exclusiveModules ?? false;
   }
 
   async describe(): Promise<SourceDebuggerComponentDescriptor> {
     return descriptor({ id: this.id, name: this.#name });
   }
 
-  async addModules(_modules: ModuleDescriptor[], _initialStop: StopId): Promise<void> {}
+  async addModules(modules: ModuleDescriptor[], _initialStop: StopId): Promise<void> {
+    for (const module of modules) {
+      if (module.owner !== this.id) throw new Error(`component ${this.id} cannot own ${module.id}`);
+      this.#moduleIds.add(module.id);
+    }
+  }
 
-  async removeModules(_moduleIds: string[]): Promise<void> {}
+  async removeModules(moduleIds: string[]): Promise<void> {
+    for (const id of moduleIds) this.#moduleIds.delete(id);
+  }
 
   async sources(_moduleId?: string): Promise<SourceFile[]> {
     // LLDB discovers compile units lazily. Source enumeration will move to a
@@ -166,38 +170,47 @@ export class LldbSourceDebuggerComponentInstance implements SourceDebuggerCompon
 
   async frames(_stopId: StopId, _threadId: ThreadId): Promise<ComponentFrame[]> {
     const frames = await this.#client.sessionFrames();
-    return frames.map((frame) => ({
-      id: String(frame.index),
-      physicalFrameIndex: frame.index,
-      inlineFrameIndex: 0,
-      functionName: frame.function,
-      ...(frame.file && frame.line
-        ? {
-            location: {
-              sourceId: frame.file,
-              line: frame.line,
-            },
-          }
-        : {}),
-      pc: frame.pc,
-      inline: false,
-    }));
+    return frames
+      .filter(
+        (frame) =>
+          !(frame.function === "??" && /^0x0+$/.test(frame.pc) && frame.file === undefined) &&
+          !frame.file?.endsWith("__source_debugger_foreign__.wasm") &&
+          (!this.#exclusiveModules || wasmModuleIndex(frame.pc) < this.#moduleIds.size)
+      )
+      .map((frame) => ({
+        id: String(frame.index),
+        physicalFrameIndex: frame.index,
+        inlineFrameIndex: 0,
+        functionName: frame.function,
+        ...(frame.file && frame.line
+          ? {
+              location: {
+                sourceId: frame.file,
+                line: frame.line,
+              },
+            }
+          : {}),
+        pc: frame.pc,
+        inline: false,
+      }));
   }
 
   async scopes(_stopId: StopId, frameId: string): Promise<SourceScope[]> {
     const index = parseFrameIndex(frameId);
-    const selected = await this.command(`frame select ${index}`);
-    if (selected.status >= LLDB_FAILED_STATUS) throw new Error(selected.error || "invalid frame");
-    const result = await this.command("frame variable");
-    if (result.status >= LLDB_FAILED_STATUS && !result.output) {
-      throw new Error(result.error || "could not read variables");
-    }
+    const variables = await this.#client.getVariables(index);
     return [
       {
         name: "Locals",
         kind: "locals",
-        values: parseValues(result.output),
-        presentation: result.output.trimEnd(),
+        values: variables.map((variable) => ({
+          name: variable.name,
+          value: {
+            name: variable.name,
+            type: variable.type,
+            display: variable.value,
+            hasChildren: /^(?:\{|\[)/.test(variable.value),
+          },
+        })),
       },
     ];
   }
@@ -208,12 +221,18 @@ export class LldbSourceDebuggerComponentInstance implements SourceDebuggerCompon
     expression: string
   ): Promise<SourceValue | null> {
     const index = parseFrameIndex(frameId);
+    // The public SB expression wrapper cannot yet materialize wasm local
+    // expressions and leaves the expression context unusable for a retry.
+    // Preserve debugger parity through the working session interpreter until
+    // lldb-wasm exposes that evaluator as structured data.
     const selected = await this.command(`frame select ${index}`);
     if (selected.status >= LLDB_FAILED_STATUS) throw new Error(selected.error || "invalid frame");
     const result = await this.command(`expression -- ${expression}`);
-    if (result.status >= LLDB_FAILED_STATUS) throw new Error(result.error || "evaluation failed");
-    const value = parseValues(result.output)[0]?.value;
-    return value ?? { display: result.output.trim(), hasChildren: false };
+    if (result.status >= LLDB_FAILED_STATUS) {
+      throw new Error(result.error || "evaluation failed");
+    }
+    const parsed = parseExpressionResult(result.output);
+    return parsed ?? { display: result.output.trim(), hasChildren: false };
   }
 
   async setBreakpoint(request: SourceBreakpointRequest): Promise<SourceBreakpoint> {
@@ -253,17 +272,25 @@ export class LldbSourceDebuggerComponentInstance implements SourceDebuggerCompon
 
   async startRun(request: ComponentRunRequest): Promise<void> {
     if (this.#runs.has(request.runId)) throw new Error(`run ${request.runId} already exists`);
+    const ready = this.#runControl?.beginRun(request) ?? Promise.resolve();
     const command = commandForRun(request);
-    const operation = this.command(command).then(async (result) => {
-      if (result.status >= LLDB_FAILED_STATUS) throw new Error(result.error || `${command} failed`);
-      return {
-        runId: request.runId,
-        disposition: "accepted" as const,
-        reason: reasonFromLldb(await this.#client.sessionState()),
-        output: (result.output + result.error).trimEnd(),
-      };
-    });
+    const operation = this.command(command)
+      .then(async (result) => {
+        if (result.status >= LLDB_FAILED_STATUS)
+          throw new Error(result.error || `${command} failed`);
+        return {
+          runId: request.runId,
+          disposition:
+            request.role === "driver" ? ("accepted" as const) : ("synchronized" as const),
+          reason: reasonFromLldb(await this.#client.sessionState()),
+          output: (result.output + result.error).trimEnd(),
+        };
+      })
+      .finally(() => this.#runControl?.endRun(request.runId));
     this.#runs.set(request.runId, operation);
+    // startRun is the session's arm barrier. Do not return until the LLDB
+    // command has reached its debuggee resume call (or failed before it).
+    await Promise.race([ready, operation.then(() => undefined)]);
   }
 
   async waitForStop(runId: RunId): Promise<ComponentStop> {
@@ -281,6 +308,10 @@ export class LldbSourceDebuggerComponentInstance implements SourceDebuggerCompon
     await this.#client.pause();
   }
 
+  async synchronizeRun(runId: RunId): Promise<void> {
+    this.#runControl?.synchronizeRun(runId);
+  }
+
   command(command: string): Promise<CommandResult> {
     return this.#client.sessionCommand(command);
   }
@@ -288,6 +319,8 @@ export class LldbSourceDebuggerComponentInstance implements SourceDebuggerCompon
   async dispose(): Promise<void> {
     this.#runs.clear();
     this.#breakpoints.clear();
+    this.#moduleIds.clear();
+    await this.#onDispose?.();
   }
 }
 
@@ -313,6 +346,24 @@ function parseFrameIndex(frameId: string): number {
   const index = Number(frameId);
   if (!Number.isInteger(index) || index < 0) throw new Error(`invalid LLDB frame ${frameId}`);
   return index;
+}
+
+function wasmModuleIndex(pc: string): number {
+  try {
+    return Number((BigInt(pc) >> 32n) & 0x0fffffffn);
+  } catch {
+    return Number.MAX_SAFE_INTEGER;
+  }
+}
+
+function parseExpressionResult(output: string): SourceValue | null {
+  const match = output.match(/^\s*\((.+)\)\s+\$\d+\s*=\s*(.*)$/m);
+  if (!match) return null;
+  return {
+    type: match[1],
+    display: match[2],
+    hasChildren: /^(?:\{|\[)/.test(match[2]),
+  };
 }
 
 function commandForRun(request: ComponentRunRequest): string {

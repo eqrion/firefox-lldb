@@ -20,6 +20,7 @@ import {
   type TabInfo,
 } from "../rdp/session.js";
 import { RdpDebuggee } from "../gdb/rdp-debuggee.js";
+import type { RdpDebuggeeRunControl } from "../gdb/rdp-debuggee.js";
 import { launchFirefox, type FirefoxChannel, type FirefoxHandle } from "../rdp/firefox.js";
 // @ts-expect-error - .mjs host has no type declarations
 import { startGdbServer } from "../gdb/worker/host.mjs";
@@ -215,6 +216,13 @@ export interface StartOptions {
    * The second argument interrupts the running target: sends RDP pauses to all
    * threads and immediately unblocks the gdbstub's EventFuture.finish. */
   onSession?: (session: RdpWasmSession, interrupt: () => void) => void;
+  /** Optional physical run-control gate for a multi-component debugger. */
+  runControl?: RdpDebuggeeRunControl;
+  /** Restrict the modules projected through this debugger endpoint. */
+  moduleFilter?: (url: string) => boolean;
+  /** Reuse one already-paused physical debuggee connection for another
+   * debugger component. The platform server borrows rather than closes it. */
+  sharedRdpSession?: RdpWasmSession;
 }
 
 export interface PlatformServerHandle {
@@ -244,7 +252,7 @@ function createTabLauncher(
     // Actor IDs are scoped to an RDP connection. The watcher uses a separate
     // connection from the launcher, so re-resolve by position in currentTabs.
     let resolvedActor = tabActor;
-    if (tabActor) {
+    if (tabActor && !opts.sharedRdpSession) {
       const currentTabs = getCurrentTabs();
       const idx = currentTabs.findIndex((t) => t.actor === tabActor);
       if (idx !== -1) {
@@ -258,9 +266,12 @@ function createTabLauncher(
       }
     }
 
-    const session = launching
-      ? await connectWithRetry(args.rdpPort, resolvedActor, logger)
-      : await RdpWasmSession.start(args.rdpPort, "127.0.0.1", resolvedActor, logger);
+    const session =
+      opts.sharedRdpSession ??
+      (launching
+        ? await connectWithRetry(args.rdpPort, resolvedActor, logger)
+        : await RdpWasmSession.start(args.rdpPort, "127.0.0.1", resolvedActor, logger));
+    const ownsSession = opts.sharedRdpSession === undefined;
     let debuggee: RdpDebuggee | undefined;
     let gdbServer: ReturnType<typeof startGdbServer> | undefined;
 
@@ -317,6 +328,8 @@ function createTabLauncher(
       const liveDebuggee = new RdpDebuggee(session, {
         ...(onFirstContinue ? { onFirstContinue } : {}),
         logger,
+        runControl: opts.runControl,
+        moduleFilter: opts.moduleFilter,
       });
       debuggee = liveDebuggee;
       opts.onSession?.(session, () => liveDebuggee.triggerInterrupt());
@@ -325,7 +338,10 @@ function createTabLauncher(
       // The component's startup update_on_stop reads the stop state once; priming
       // here means it captures a real pause with real frames instead of a
       // synthetic "stopped" with no pause behind it (issue #21).
-      if (session.hasThreads()) await liveDebuggee.primeStop();
+      if (session.hasThreads()) {
+        if (ownsSession) await liveDebuggee.primeStop();
+        else await liveDebuggee.snapshotCurrentStop();
+      }
 
       // The component presents an already-attached, stopped process on connect,
       // which works for `process connect` but breaks LLDB's `process attach`
@@ -369,7 +385,7 @@ function createTabLauncher(
                 errors.push(err);
               }
               debuggee?.dispose();
-              session.close();
+              if (ownsSession) session.close();
               if (errors.length) throw new AggregateError(errors, "failed to stop per-tab server");
             })());
         })(),
@@ -385,7 +401,7 @@ function createTabLauncher(
           )
         );
       debuggee?.dispose();
-      session.close();
+      if (ownsSession) session.close();
       throw err;
     }
   };

@@ -65,6 +65,8 @@ function urlKey(url: string): string {
   return createHash("sha256").update(url).digest("hex").slice(0, 12);
 }
 
+const FOREIGN_FRAME_SOURCE = "__source_debugger_foreign__.wasm";
+
 export interface RpcRequest {
   type: string;
   id: number;
@@ -124,9 +126,24 @@ interface StopState {
 // signature declares if it doesn't need id/args.
 type Handler = (id: number, args: unknown[]) => unknown;
 
+export type RdpDebuggeeResumeAction =
+  | { kind: "continue" }
+  | { kind: "step"; tid: number; limit: "step" | "next" };
+
+// Optional interception point used when several debugger components observe
+// one physical Firefox process. Each component arms its local gdbstub wait;
+// run control decides which component may arm the shared RDP all-stop and
+// release the physical pause lease.
+export interface RdpDebuggeeRunControl {
+  resume(action: RdpDebuggeeResumeAction, resumePhysicalTarget: () => void): void;
+  installSynchronizeStop?(synchronize: () => void): void;
+}
+
 export class RdpDebuggee {
   #session: RdpWasmSession;
   #logger: Logger;
+  #runControl: RdpDebuggeeRunControl | undefined;
+  #acceptModule: (url: string) => boolean;
   #nextId = 1;
 
   // Stable module identity per source URL.
@@ -135,6 +152,12 @@ export class RdpDebuggee {
 
   // Synthetic modules for JS sources: url -> {bytecode, codeOffset}.
   #syntheticByUrl = new Map<string, { bytecode: Uint8Array; codeOffset: number }>();
+
+  // Foreign frames remain in the RSP call chain as opaque synthetic modules.
+  // LLDB needs a valid activation to commit a stop owned by another debugger,
+  // but must not load that module's real symbols or expose its source semantics.
+  #opaqueUrlByForeignUrl = new Map<string, string>();
+  #foreignModuleUrlByFrameActor = new Map<string, string>();
 
   // Cache of bytecode served to LLDB per wasm URL. For modules that ship a
   // source map instead of DWARF, this holds the source-map-derived bytecode.
@@ -183,6 +206,33 @@ export class RdpDebuggee {
   // #scheduleResyncCheck).
   #resyncTimer: ReturnType<typeof setTimeout> | null = null;
   #disposed = false;
+  #handleStopped = (event: StoppedEvent): void => {
+    this.#clearResyncTimer();
+    const pending = this.#stop.pending;
+    if (!pending) return;
+    this.#stop.reason = this.#stop.hostInterruptPending
+      ? "signal"
+      : this.#stop.forcingResync
+        ? "breakpoint"
+        : ((event.pausePacket as { why?: { type?: string } })?.why?.type ?? "breakpoint");
+    this.#stop.hostInterruptPending = false;
+    this.#stop.forcingResync = false;
+    pending.resolve(event);
+    this.#stop.pending = null;
+  };
+  #handleSessionClose = (): void => {
+    this.#clearResyncTimer();
+    // Unblock any pending EventFuture.finish / primeStop so the gdbstub
+    // worker thread doesn't hang when the RDP connection drops mid-session.
+    this.#stop.pending?.reject(new Error("session closed"));
+    this.#stop.pending = null;
+    this.#stop.hostInterruptPending = false;
+    this.#stop.forcingResync = false;
+  };
+  #handleNavigated = (): void => this.#onNavigated();
+  #handleTarget = (info: ThreadInfo): void => {
+    if (info.isTopLevel) this.#scheduleResyncCheck(info.tid);
+  };
   #removeTempDir = (): void => {
     try {
       rmSync(this.#tmpDir, { recursive: true, force: true });
@@ -193,39 +243,28 @@ export class RdpDebuggee {
     }
   };
 
-  constructor(session: RdpWasmSession, opts?: { onFirstContinue?: () => void; logger?: Logger }) {
+  constructor(
+    session: RdpWasmSession,
+    opts?: {
+      onFirstContinue?: () => void;
+      logger?: Logger;
+      runControl?: RdpDebuggeeRunControl;
+      moduleFilter?: (url: string) => boolean;
+    }
+  ) {
     this.#session = session;
     this.#logger = opts?.logger ?? noopLogger;
     this.#onFirstContinue = opts?.onFirstContinue ?? null;
+    this.#runControl = opts?.runControl;
+    this.#acceptModule = opts?.moduleFilter ?? (() => true);
+    this.#runControl?.installSynchronizeStop?.(() => this.#synchronizeStop());
 
-    session.on("stopped", (e: StoppedEvent) => {
-      this.#clearResyncTimer();
-      const pending = this.#stop.pending;
-      if (!pending) return;
-      this.#stop.reason = this.#stop.hostInterruptPending
-        ? "signal"
-        : this.#stop.forcingResync
-          ? "breakpoint"
-          : ((e.pausePacket as { why?: { type?: string } })?.why?.type ?? "breakpoint");
-      this.#stop.hostInterruptPending = false;
-      this.#stop.forcingResync = false;
-      pending.resolve(e);
-      this.#stop.pending = null;
-    });
-
-    session.on("close", () => {
-      this.#clearResyncTimer();
-      // Unblock any pending EventFuture.finish / primeStop so the gdbstub
-      // worker thread doesn't hang when the RDP connection drops mid-session.
-      this.#stop.pending?.reject(new Error("session closed"));
-      this.#stop.pending = null;
-      this.#stop.hostInterruptPending = false;
-      this.#stop.forcingResync = false;
-    });
+    session.on("stopped", this.#handleStopped);
+    session.on("close", this.#handleSessionClose);
 
     // A navigation (driven or page-triggered) invalidates every per-URL cache
     // below — the actors/bodies they hold belonged to the destroyed target.
-    session.on("navigated", () => this.#onNavigated());
+    session.on("navigated", this.#handleNavigated);
 
     // Give the new page a chance to pause on its own (a buffered breakpoint
     // firing), then force it paused if it doesn't — see #scheduleResyncCheck.
@@ -234,9 +273,7 @@ export class RdpDebuggee {
     // this point, which only arrives once the new page's `load` event fires
     // — interrupting the thread right now would freeze it before `load` can
     // ever fire, deadlocking that await forever.
-    session.on("target", (info: ThreadInfo) => {
-      if (info.isTopLevel) this.#scheduleResyncCheck(info.tid);
-    });
+    session.on("target", this.#handleTarget);
 
     process.once("exit", this.#removeTempDir);
   }
@@ -246,6 +283,10 @@ export class RdpDebuggee {
     if (this.#disposed) return;
     this.#disposed = true;
     this.#clearResyncTimer();
+    this.#session.off("stopped", this.#handleStopped);
+    this.#session.off("close", this.#handleSessionClose);
+    this.#session.off("navigated", this.#handleNavigated);
+    this.#session.off("target", this.#handleTarget);
     process.off("exit", this.#removeTempDir);
     this.#removeTempDir();
   }
@@ -311,7 +352,7 @@ export class RdpDebuggee {
   async #allModules(): Promise<Ref[]> {
     // wasmSources() also keeps the session's actor->url mapping current.
     const wasmSources = await this.#session.wasmSources();
-    for (const s of wasmSources) {
+    for (const s of wasmSources.filter((source) => this.#acceptModule(source.url))) {
       this.#moduleRef(s.url);
     }
     // Return refs for all registered modules — wasm plus synthetic JS modules
@@ -491,7 +532,8 @@ export class RdpDebuggee {
   // --- instances -----------------------------------------------------------
   async #allInstances(): Promise<Ref[]> {
     const sources = await this.#session.wasmSources();
-    return sources.length ? [this.#instanceRef(sources[0].url)] : [];
+    const source = sources.find(({ url }) => this.#acceptModule(url));
+    return source ? [this.#instanceRef(source.url)] : [];
   }
 
   #instanceGetMemory(id: number, memIndex: number): Ref | Promise<never> {
@@ -512,6 +554,7 @@ export class RdpDebuggee {
   async #snapshotAll(): Promise<void> {
     this.#frameInfoById.clear();
     this.#envCacheByActor.clear();
+    this.#foreignModuleUrlByFrameActor.clear();
     const tids = this.#session.listTids();
     const snapshots = new Map<number, FrameForm[]>();
 
@@ -540,32 +583,66 @@ export class RdpDebuggee {
     for (const tid of tids) {
       const frames = snapshots.get(tid) ?? [];
       this.#framesByTid.set(tid, frames);
-      this.#topFrameActorByTid.set(tid, frames.find((f) => f.type === "wasmcall")?.actor ?? null);
+      this.#topFrameActorByTid.set(
+        tid,
+        frames.find(
+          (frame) =>
+            frame.type === "wasmcall" &&
+            !this.#foreignModuleUrlByFrameActor.has(frame.where?.actor ?? "")
+        )?.actor ?? null
+      );
     }
   }
 
   async #snapshotFrames(tid: number): Promise<FrameForm[]> {
-    let frames: FrameForm[];
+    let candidates: FrameForm[];
     try {
-      frames = (await this.#session.frames(tid)).filter(
+      candidates = (await this.#session.frames(tid)).filter(
         (frame) => (frame.type === "wasmcall" || frame.type === "call") && frame.where
       );
     } catch {
       return [];
     }
-    for (const frame of frames) {
-      if (frame.type !== "call") continue;
+    const frames: FrameForm[] = [];
+    for (const frame of candidates) {
       const actor = frame.where!.actor;
-      if (this.#session.urlForSourceActor(actor) === undefined) {
+      if (frame.type === "call" && this.#session.urlForSourceActor(actor) === undefined) {
         // Not yet known — jsSources() populates the session's actor->url
         // mapping as a side effect.
         await this.#session.jsSources();
       }
       const url = this.#session.urlForSourceActor(actor) ?? actor;
-      const calleeName = frame.callee?.displayName || frame.callee?.name;
-      await this.#ensureSynthetic(url, actor, calleeName);
+      if (!this.#acceptModule(url)) {
+        this.#ensureOpaqueForeignFrame(url, actor);
+        frames.push(frame);
+        continue;
+      }
+      if (frame.type === "call") {
+        const calleeName = frame.callee?.displayName || frame.callee?.name;
+        await this.#ensureSynthetic(url, actor, calleeName);
+      }
+      frames.push(frame);
     }
     return frames;
+  }
+
+  #ensureOpaqueForeignFrame(url: string, actor: string): void {
+    let opaqueUrl = this.#opaqueUrlByForeignUrl.get(url);
+    if (!opaqueUrl) {
+      opaqueUrl = `source-debugger-foreign://${urlKey(url)}/${FOREIGN_FRAME_SOURCE}`;
+      this.#opaqueUrlByForeignUrl.set(url, opaqueUrl);
+      this.#syntheticByUrl.set(
+        opaqueUrl,
+        buildSyntheticModule({
+          name: FOREIGN_FRAME_SOURCE,
+          compDir: "/",
+          lineCount: 1,
+          subprogramName: "<foreign wasm frame>",
+        })
+      );
+      this.#moduleRef(opaqueUrl);
+    }
+    this.#foreignModuleUrlByFrameActor.set(actor, opaqueUrl);
   }
 
   async #ensureSynthetic(url: string, actor: string, calleeName?: string): Promise<void> {
@@ -609,7 +686,9 @@ export class RdpDebuggee {
   // late for LLDB to load and symbolicate it (issue #45). Register the page's
   // current JS sources before the component performs its initial module scan.
   async #preloadJsSources(): Promise<void> {
-    for (const source of await this.#session.jsSources()) {
+    for (const source of (await this.#session.jsSources()).filter(({ url }) =>
+      this.#acceptModule(url)
+    )) {
       await this.#ensureSynthetic(source.url, source.actor);
     }
   }
@@ -637,6 +716,10 @@ export class RdpDebuggee {
     const fi = this.#frameInfoById.get(id);
     const frame = fi ? this.#framesByTid.get(fi.tid)?.[fi.index] : undefined;
     const line = frame?.where?.line ?? 0;
+    const opaqueUrl = frame
+      ? this.#foreignModuleUrlByFrameActor.get(frame.where?.actor ?? "")
+      : undefined;
+    if (opaqueUrl) return 1 + (this.#syntheticByUrl.get(opaqueUrl)?.codeOffset ?? 0);
     if (frame?.type === "call") {
       const url = this.#session.urlForSourceActor(frame.where!.actor) ?? frame.where!.actor;
       return line + (this.#syntheticByUrl.get(url)?.codeOffset ?? 0);
@@ -649,7 +732,10 @@ export class RdpDebuggee {
     const frames = fi ? (this.#framesByTid.get(fi.tid) ?? []) : [];
     const frame = fi ? frames[fi.index] : undefined;
     const actor = frame?.where?.actor ?? "";
-    const url = this.#session.urlForSourceActor(actor) ?? actor;
+    const url =
+      this.#foreignModuleUrlByFrameActor.get(actor) ??
+      this.#session.urlForSourceActor(actor) ??
+      actor;
     return this.#instanceRef(url);
   }
 
@@ -666,7 +752,13 @@ export class RdpDebuggee {
     if (!fi) return [];
     const frames = this.#framesByTid.get(fi.tid) ?? [];
     const frame = frames[fi.index];
-    if (!frame || frame.type === "call") return [];
+    if (
+      !frame ||
+      frame.type === "call" ||
+      this.#foreignModuleUrlByFrameActor.has(frame.where?.actor ?? "")
+    ) {
+      return [];
+    }
     type VarBindings = Record<string, { value?: unknown }>;
     if (!this.#envCacheByActor.has(frame.actor)) {
       // Cache the environment per frame actor per stop. Without this, each
@@ -833,16 +925,23 @@ export class RdpDebuggee {
           this.#session.close();
         });
       } else {
-        this.#session.armAllStop();
-        this.#session.resumeAll().catch((err) => {
-          this.#logger.error(
-            `[rdp] resume failed: ${err instanceof Error ? err.message : String(err)}`
-          );
-          this.#session.close();
-        });
-        const cb = this.#onFirstContinue;
-        this.#onFirstContinue = null;
-        cb?.();
+        const resume = () => {
+          // Arm the physical all-stop only when run control grants this
+          // component the resume lease. Observer components share the stop
+          // event but must not install duplicate coordinators on one session.
+          this.#session.armAllStop();
+          this.#session.resumeAll().catch((err) => {
+            this.#logger.error(
+              `[rdp] resume failed: ${err instanceof Error ? err.message : String(err)}`
+            );
+            this.#session.close();
+          });
+          const cb = this.#onFirstContinue;
+          this.#onFirstContinue = null;
+          cb?.();
+        };
+        if (this.#runControl) this.#runControl.resume({ kind: "continue" }, resume);
+        else resume();
       }
     }
     return this.#eventFutureRef();
@@ -872,7 +971,6 @@ export class RdpDebuggee {
         });
         return this.#eventFutureRef();
       }
-      this.#session.armAllStop();
       // A JS (`call`) innermost frame is JIT-compiled: RDP "step" advances one
       // wasm instruction, which jumps an arbitrary number of JS source lines.
       // Use "next" (RDP step-over by source line) so a step lands on the next
@@ -880,7 +978,12 @@ export class RdpDebuggee {
       // synthetic modules can't distinguish JS functions anyway).
       const innermost = this.#framesByTid.get(tid)?.[0];
       const limit = innermost?.type === "call" ? "next" : "step";
-      this.#session.stepOne(tid, limit);
+      const resume = () => {
+        this.#session.armAllStop();
+        this.#session.stepOne(tid, limit);
+      };
+      if (this.#runControl) this.#runControl.resume({ kind: "step", tid, limit }, resume);
+      else resume();
     }
     return this.#eventFutureRef();
   }
@@ -921,6 +1024,19 @@ export class RdpDebuggee {
     await this.#preloadJsSources();
   }
 
+  /**
+   * Initialize a newly-created debugger projection from an already-paused
+   * shared RDP session. Unlike primeStop(), this does not interrupt Firefox or
+   * emit another physical stop.
+   */
+  async snapshotCurrentStop(): Promise<void> {
+    if (!this.#session.paused()) {
+      throw new Error("cannot snapshot a shared debuggee while it is running");
+    }
+    await this.#snapshotAll();
+    await this.#preloadJsSources();
+  }
+
   /** Request a genuine Firefox all-stop when the user presses Ctrl-C. */
   triggerInterrupt(): void {
     // A real interrupt supersedes any in-flight resync check: cancel it so
@@ -931,6 +1047,34 @@ export class RdpDebuggee {
     this.#stop.hostInterruptPending = true;
     this.#stop.forcingResync = false;
     if (this.#stop.pending) this.#interruptForHost();
+  }
+
+  // Another debugger endpoint observed the physical stop. RDP reports a
+  // breakpoint only to the connection which installed it, so manufacture a
+  // local pause event for this endpoint while its LLDB is waiting. Marking it
+  // as a forced synchronization makes gdbstub report a normal stop instead of
+  // treating it as an LLDB-originated interrupt and silently resuming it.
+  #synchronizeStop(): void {
+    if (!this.#stop.pending) return;
+    this.#stop.forcingResync = true;
+    if (this.#session.paused()) {
+      // The shared physical session has already witnessed the driver's stop.
+      // Re-emit its current state for this observer; arming another all-stop
+      // here would leave a stale pause listener behind for the next run.
+      void this.#session.adoptPausedState().catch((error) => {
+        this.#logger.error(
+          `[rdp] could not synchronize shared stop: ${error instanceof Error ? error.message : String(error)}`
+        );
+        this.#session.close();
+      });
+      return;
+    }
+
+    // A legacy component on a separate RDP endpoint did not receive the
+    // driver's connection-scoped breakpoint event. Force a local pause.
+    this.#session.armAllStop();
+    const tid = this.#session.preferredInterruptTid();
+    if (tid !== undefined) this.#session.interrupt(tid);
   }
 
   #armStopped(): void {
@@ -1021,6 +1165,8 @@ export class RdpDebuggee {
     this.#syntheticByUrl.clear();
     this.#moduleByUrl.clear();
     this.#moduleById.clear();
+    this.#opaqueUrlByForeignUrl.clear();
+    this.#foreignModuleUrlByFrameActor.clear();
   }
 
   #eventFutureRef(): Ref {

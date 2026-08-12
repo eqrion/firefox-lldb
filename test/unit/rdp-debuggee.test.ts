@@ -8,13 +8,19 @@ import { EventEmitter } from "node:events";
 import { RdpDebuggee } from "../../src/gdb/rdp-debuggee.js";
 import type { RdpWasmSession } from "../../src/rdp/session.js";
 
-test("RdpDebuggee.dispose removes its process-exit cleanup listener", () => {
+test("RdpDebuggee.dispose removes process and shared-session listeners", () => {
   const before = process.listenerCount("exit");
   const session = new EventEmitter() as RdpWasmSession;
   const debuggee = new RdpDebuggee(session);
   assert.equal(process.listenerCount("exit"), before + 1);
+  for (const event of ["stopped", "close", "navigated", "target"]) {
+    assert.equal(session.listenerCount(event), 1);
+  }
 
   debuggee.dispose();
   debuggee.dispose();
   assert.equal(process.listenerCount("exit"), before);
+  for (const event of ["stopped", "close", "navigated", "target"]) {
+    assert.equal(session.listenerCount(event), 0);
+  }
 });

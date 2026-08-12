@@ -18,8 +18,9 @@ The bridge sits between two protocols:
 - **Firefox Remote Debug Protocol** (RDP) — outbound, to the browser
 
 The **primary** entry point is `firefox-lldb`, which embeds LLDB compiled to
-WebAssembly and runs everything (REPL, platform server, per-tab GDB server, RDP
-client) in a single Node process:
+WebAssembly behind the language-generic `(sdb)` REPL and runs everything
+(session, component runtime, platform server, per-tab GDB server, RDP client)
+in a single Node process:
 
 ```
 REPL (src/cli/repl.ts)
@@ -41,12 +42,20 @@ servers and listens on a real TCP port for an external native wasm-plugin lldb.
 The two paths share everything from the per-tab GDB server inward; they differ
 only in how the RSP bytes reach it.
 
+The multi-component prototype creates a separate wasm LLDB worker and filtered
+gdbstub/RSP projection for each `SourceDebuggerComponent`, but lends every
+projection the same physical `RdpWasmSession`. Only the session-selected driver
+may release that shared Firefox run lease. Observer LLDBs still execute their
+own state-machine transitions and consume the same stop notification, so an
+LLDB-internal step-off cannot race a second RDP controller.
+
 ### Embedded wasm LLDB (`firefox-lldb`)
 
 The `firefox-lldb` command does not spawn a native lldb. It runs the platform
 server in-process and drives LLDB compiled to WebAssembly (the `lldb-wasm`
-package, built from `../llvm-project/lldb/tools/lldb-wasm`) as a real
-interactive `(lldb)` prompt. Because the wasm LLDB cannot open TCP sockets, each
+package, built from `../llvm-project/lldb/tools/lldb-wasm`) through an
+`EmbeddedLldbComponentRuntime` and `SourceDebuggerSession`. Because the wasm
+LLDB cannot open TCP sockets, each
 RSP connection it would normally make (the platform connection and every per-tab
 GDB server) is bridged through an in-memory channel: LLDB connects to
 `inprocess://<channelId>` and `firefox-lldb` pumps bytes between that channel and

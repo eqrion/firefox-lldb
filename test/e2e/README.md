@@ -84,6 +84,8 @@ Requires Firefox installed in a standard location (see `findFirefoxBinary` in
 - `threaded_worker_sequence.test.mjs` — four futex-coordinated workers stop in order on distinct tids; worker instruction-step and resume also work.
 - `wasm_trap.test.mjs` — wasm traps (divide-by-zero, unreachable, out-of-bounds, call_indirect mismatch) pause as a signal stop; trapping frame is inspectable.
 - `mcp.test.mjs` — real MCP launch/command flow, including automatic-attach recovery across an initial page reload and the bounded default wait for a command that does not return a prompt.
+- `source_debugger_session.test.mjs` — language-generic `(sdb)` commands routed through one real LLDB SourceDebuggerComponent.
+- `two_lldb_components.test.mjs` — two isolated LLDB workers own disjoint Wasm modules over one shared physical RDP session, then hand the run-control driver A → B → A across consecutive breakpoint stops.
 - `large.test.mjs` — large SQLite module symbols plus snapped source/function breakpoint attribution and argument availability.
 
 ### Navigation (survival, re-sync, and ergonomics across a top-level target swap)
