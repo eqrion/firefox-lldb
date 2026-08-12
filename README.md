@@ -95,7 +95,9 @@ At the `(sdb)` prompt, qualify ambiguous commands with the component ID:
 Frame-relative commands such as `locals`, `p`, `step`, `next`, and `finish`
 route through the selected frame's component automatically.
 `step` can hand off through opaque JavaScript into a Wasm frame owned by a
-different component; `finish` can return through the same mixed stack.
+different component; `finish` can return through the same mixed stack. `next`
+suppresses foreign activations, but a real breakpoint owned by the foreign
+component preempts the step and exposes the composed cross-component stack.
 
 ### Preparing your wasm
 

@@ -65,6 +65,9 @@ export interface SourceDebuggerComponentInstance {
   waitForPhysicalResume?(runId: RunId, afterSequence: number): Promise<number | undefined>;
   releasePhysicalResume?(runId: RunId, sequence: number): Promise<void>;
   synchronizeRun?(runId: RunId): Promise<void>;
+  /** Abort this component's active source plan at an already-observed physical
+   * stop. Used when a sibling component owns a preempting breakpoint. */
+  abortRun?(runId: RunId): Promise<void>;
   cancelRun(runId: RunId): Promise<void>;
 
   // Optional debugger-native escape hatch. It is intentionally not used by

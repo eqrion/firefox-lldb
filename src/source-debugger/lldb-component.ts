@@ -29,6 +29,7 @@ import type {
   SourceDebuggerComponentHost,
   SourceDebuggerComponentInstance,
 } from "./component.js";
+import { noopLogger, type Logger } from "../logging.js";
 
 const LLDB_FAILED_STATUS = 6;
 
@@ -38,6 +39,8 @@ export interface LldbSourceDebuggerComponentOptions {
   onDispose?: () => void | Promise<void>;
   runControl?: LldbComponentRunControl;
   exclusiveModules?: boolean;
+  abortBreakpointFunction?: string;
+  logger?: Logger;
 }
 
 export interface LldbComponentRunControl {
@@ -46,6 +49,7 @@ export interface LldbComponentRunControl {
   waitForPhysicalResume(runId: RunId, afterSequence: number): Promise<number | undefined>;
   releasePhysicalResume(runId: RunId, sequence: number): void;
   synchronizeRun(runId: RunId): void;
+  abortRun(runId: RunId): void;
 }
 
 function reasonFromLldb(reason: StopReason): SessionStopReason {
@@ -123,7 +127,10 @@ export class LldbSourceDebuggerComponentInstance implements SourceDebuggerCompon
   readonly #onDispose: (() => void | Promise<void>) | undefined;
   readonly #runControl: LldbComponentRunControl | undefined;
   readonly #exclusiveModules: boolean;
+  readonly #abortBreakpointFunction: string | undefined;
   readonly #moduleIds = new Set<string>();
+  readonly #logger: Logger;
+  #abortBreakpointSetup: Promise<void> | undefined;
 
   constructor(client: LLDBClient, options: LldbSourceDebuggerComponentOptions = {}) {
     this.#client = client;
@@ -132,6 +139,8 @@ export class LldbSourceDebuggerComponentInstance implements SourceDebuggerCompon
     this.#onDispose = options.onDispose;
     this.#runControl = options.runControl;
     this.#exclusiveModules = options.exclusiveModules ?? false;
+    this.#abortBreakpointFunction = options.abortBreakpointFunction;
+    this.#logger = options.logger ?? noopLogger;
   }
 
   async describe(): Promise<SourceDebuggerComponentDescriptor> {
@@ -177,6 +186,7 @@ export class LldbSourceDebuggerComponentInstance implements SourceDebuggerCompon
         (frame) =>
           !(frame.function === "??" && /^0x0+$/.test(frame.pc) && frame.file === undefined) &&
           !frame.file?.endsWith("__source_debugger_foreign__.wasm") &&
+          !frame.file?.endsWith("__source_debugger_abort__.wasm") &&
           (!this.#exclusiveModules || wasmModuleIndex(frame.pc) < this.#moduleIds.size)
       )
       .map((frame) => ({
@@ -265,6 +275,8 @@ export class LldbSourceDebuggerComponentInstance implements SourceDebuggerCompon
 
   async startRun(request: ComponentRunRequest): Promise<void> {
     if (this.#runs.has(request.runId)) throw new Error(`run ${request.runId} already exists`);
+    await this.#ensureAbortBreakpoint();
+    let temporaryBreakpointId: string | undefined;
     if (request.action.kind !== "continue" && request.action.frameId !== undefined) {
       const selected = await this.command(
         `frame select ${parseFrameIndex(request.action.frameId)}`
@@ -273,21 +285,49 @@ export class LldbSourceDebuggerComponentInstance implements SourceDebuggerCompon
         throw new Error(selected.error || `could not select frame ${request.action.frameId}`);
       }
     }
+    if (request.action.kind === "prepare-frame") {
+      const frameIndex = parseFrameIndex(request.action.frameId);
+      const frame = (await this.#client.sessionFrames()).find(({ index }) => index === frameIndex);
+      if (!frame || frame.function === "??") {
+        throw new Error(`could not resolve entry frame ${request.action.frameId}`);
+      }
+      const breakpoint = await this.command(
+        `breakpoint set -n ${escapeLldbArgument(frame.function)} -o true`
+      );
+      temporaryBreakpointId = breakpointId(breakpoint);
+      if (breakpoint.status >= LLDB_FAILED_STATUS || !temporaryBreakpointId) {
+        throw new Error(breakpoint.error || `could not prepare entry for ${frame.function}`);
+      }
+    }
     const ready = this.#runControl?.beginRun(request) ?? Promise.resolve();
     const command = commandForRun(request);
     const operation = this.command(command)
       .then(async (result) => {
         if (result.status >= LLDB_FAILED_STATUS)
           throw new Error(result.error || `${command} failed`);
+        const reason = reasonFromLldb(await this.#client.sessionState());
+        const disposition =
+          request.role === "driver"
+            ? ("accepted" as const)
+            : isPreemptingObserverReason(reason)
+              ? ("preempted" as const)
+              : ("synchronized" as const);
+        this.#logger.debug(
+          `[${this.id}] ${request.runId} ${request.role} stopped as ${reason.kind} (${disposition})`
+        );
         return {
           runId: request.runId,
-          disposition:
-            request.role === "driver" ? ("accepted" as const) : ("synchronized" as const),
-          reason: reasonFromLldb(await this.#client.sessionState()),
+          disposition,
+          reason,
           output: (result.output + result.error).trimEnd(),
         };
       })
-      .finally(() => this.#runControl?.endRun(request.runId));
+      .finally(async () => {
+        this.#runControl?.endRun(request.runId);
+        if (temporaryBreakpointId) {
+          await this.command(`breakpoint delete ${temporaryBreakpointId}`).catch(() => {});
+        }
+      });
     this.#runs.set(request.runId, operation);
     // startRun is the session's arm barrier. Do not return until the LLDB
     // command has reached its debuggee resume call (or failed before it).
@@ -316,11 +356,17 @@ export class LldbSourceDebuggerComponentInstance implements SourceDebuggerCompon
 
   async cancelRun(runId: RunId): Promise<void> {
     if (!this.#runs.has(runId)) return;
+    this.#logger.debug(`[${this.id}] cancelling ${runId}`);
     await this.#client.pause();
+    this.#logger.debug(`[${this.id}] cancellation delivered for ${runId}`);
   }
 
   async synchronizeRun(runId: RunId): Promise<void> {
     this.#runControl?.synchronizeRun(runId);
+  }
+
+  async abortRun(runId: RunId): Promise<void> {
+    this.#runControl?.abortRun(runId);
   }
 
   command(command: string): Promise<CommandResult> {
@@ -336,6 +382,21 @@ export class LldbSourceDebuggerComponentInstance implements SourceDebuggerCompon
     return result.status < LLDB_FAILED_STATUS || result.output
       ? parseFrameVariables(result.output)
       : new Map();
+  }
+
+  #ensureAbortBreakpoint(): Promise<void> {
+    const functionName = this.#abortBreakpointFunction;
+    if (!functionName) return Promise.resolve();
+    return (this.#abortBreakpointSetup ??= (async () => {
+      const result = await this.command(`breakpoint set -n ${escapeLldbArgument(functionName)}`);
+      if (
+        result.status >= LLDB_FAILED_STATUS ||
+        !breakpointId(result) ||
+        /no locations/i.test(result.output)
+      ) {
+        throw new Error(result.error || `could not install source debugger abort breakpoint`);
+      }
+    })());
   }
 
   async dispose(): Promise<void> {
@@ -423,5 +484,21 @@ function commandForRun(request: ComponentRunRequest): string {
       return "thread step-over";
     case "step-out":
       return "thread step-out";
+    case "prepare-frame":
+      return "process continue";
+  }
+}
+
+function isPreemptingObserverReason(reason: SessionStopReason): boolean {
+  switch (reason.kind) {
+    case "breakpoint":
+    case "exception":
+    case "interrupt":
+    case "exited":
+      return true;
+    case "signal":
+      return reason.signal !== "SIGTRAP" && reason.signal !== "SIGSTOP";
+    default:
+      return false;
   }
 }

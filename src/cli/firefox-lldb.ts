@@ -56,6 +56,7 @@ async function main(): Promise<void> {
     components: runtimes.map(({ component }) => component),
     getRdpSession: () => session,
     selectModuleOwner: (module) => componentForModuleUrl(routes, module.url).id,
+    logger,
   });
 
   const handles: Awaited<ReturnType<typeof startPlatformServer>>[] = [];

@@ -28,4 +28,10 @@ int32_t call_other_factorial(int32_t n) {
     return call_other_factorial_js(n - 1);
 }
 
+EMSCRIPTEN_KEEPALIVE
+int32_t call_other_then_adjust(int32_t n) {
+    int32_t result = call_other_factorial_js(n - 1);
+    return result + n;
+}
+
 }

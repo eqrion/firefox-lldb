@@ -1573,6 +1573,7 @@ function call_other_factorial_js(n) { return globalThis.factorialBForDebugger(n)
 // Imports from the Wasm binary.
 var _compute_factorial = Module['_compute_factorial'] = makeInvalidEarlyAccess('_compute_factorial');
 var _call_other_factorial = Module['_call_other_factorial'] = makeInvalidEarlyAccess('_call_other_factorial');
+var _call_other_then_adjust = Module['_call_other_then_adjust'] = makeInvalidEarlyAccess('_call_other_then_adjust');
 var _fflush = makeInvalidEarlyAccess('_fflush');
 var _emscripten_stack_init = makeInvalidEarlyAccess('_emscripten_stack_init');
 var _emscripten_stack_get_free = makeInvalidEarlyAccess('_emscripten_stack_get_free');
@@ -1588,6 +1589,7 @@ var wasmMemory = makeInvalidEarlyAccess('wasmMemory');
 function assignWasmExports(wasmExports) {
   assert(typeof wasmExports['compute_factorial'] != 'undefined', 'missing Wasm export: compute_factorial');
   assert(typeof wasmExports['call_other_factorial'] != 'undefined', 'missing Wasm export: call_other_factorial');
+  assert(typeof wasmExports['call_other_then_adjust'] != 'undefined', 'missing Wasm export: call_other_then_adjust');
   assert(typeof wasmExports['fflush'] != 'undefined', 'missing Wasm export: fflush');
   assert(typeof wasmExports['emscripten_stack_init'] != 'undefined', 'missing Wasm export: emscripten_stack_init');
   assert(typeof wasmExports['emscripten_stack_get_free'] != 'undefined', 'missing Wasm export: emscripten_stack_get_free');
@@ -1600,6 +1602,7 @@ function assignWasmExports(wasmExports) {
   assert(typeof wasmExports['__indirect_function_table'] != 'undefined', 'missing Wasm export: __indirect_function_table');
   _compute_factorial = Module['_compute_factorial'] = createExportWrapper('compute_factorial', wasmExports['compute_factorial'], 1);
   _call_other_factorial = Module['_call_other_factorial'] = createExportWrapper('call_other_factorial', wasmExports['call_other_factorial'], 1);
+  _call_other_then_adjust = Module['_call_other_then_adjust'] = createExportWrapper('call_other_then_adjust', wasmExports['call_other_then_adjust'], 1);
   _fflush = createExportWrapper('fflush', wasmExports['fflush'], 1);
   _emscripten_stack_init = wasmExports['emscripten_stack_init'];
   _emscripten_stack_get_free = wasmExports['emscripten_stack_get_free'];

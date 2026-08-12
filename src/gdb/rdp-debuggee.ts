@@ -66,6 +66,9 @@ function urlKey(url: string): string {
 }
 
 const FOREIGN_FRAME_SOURCE = "__source_debugger_foreign__.wasm";
+const ABORT_FRAME_SOURCE = "__source_debugger_abort__.wasm";
+const ABORT_FRAME_URL = `source-debugger-internal://abort/${ABORT_FRAME_SOURCE}`;
+export const SOURCE_DEBUGGER_ABORT_FUNCTION = "__source_debugger_abort__";
 
 export interface RpcRequest {
   type: string;
@@ -119,6 +122,13 @@ interface StopState {
   // triggerInterrupt()) so it never survives to mislabel a later,
   // unrelated stop.
   forcingResync: boolean;
+  // A sibling debugger owns a user-visible stop and this local debugger must
+  // abandon its active thread plan. Report the private sentinel breakpoint to
+  // LLDB; the session publishes the sibling's real stop reason instead.
+  forcingAbort: boolean;
+  // The aborting debugger must stabilize at its first owned activation. Its
+  // sibling still projects the true foreign top frame into the logical stack.
+  projectOwnedFrames: boolean;
 }
 
 // One handler per WIT method, keyed "Interface.method" (matches dispatch()'s
@@ -135,6 +145,9 @@ export type RdpDebuggeeResumeAction =
 // run control decides which component may arm the shared RDP all-stop and
 // release the physical pause lease.
 export interface RdpDebuggeeRunControl {
+  /** This endpoint participates in cross-component plan preemption and needs
+   * the private logical breakpoint used to stop its debugger engine. */
+  usesAbortSentinel?: boolean;
   resume(action: RdpDebuggeeResumeAction, resumePhysicalTarget: () => void): void;
   /** Adjust the RDP granularity chosen for an LLDB single-step. Multi-component
    * source step-in uses instruction stepping at opaque JS boundaries so it can
@@ -142,12 +155,14 @@ export interface RdpDebuggeeRunControl {
    * over that call as one JavaScript source line. */
   adjustStepLimit?(tid: number, proposed: "step" | "next"): "step" | "next";
   installSynchronizeStop?(synchronize: () => void): void;
+  installAbortStop?(abort: () => void): void;
 }
 
 export class RdpDebuggee {
   #session: RdpWasmSession;
   #logger: Logger;
   #runControl: RdpDebuggeeRunControl | undefined;
+  #usesAbortSentinel: boolean;
   #acceptModule: (url: string, kind: "wasm" | "javascript") => boolean;
   #nextId = 1;
 
@@ -200,6 +215,8 @@ export class RdpDebuggee {
     reason: "breakpoint",
     hostInterruptPending: false,
     forcingResync: false,
+    forcingAbort: false,
+    projectOwnedFrames: false,
   };
 
   // Fired once on LLDB's first continue (drives the page's wasm export
@@ -215,13 +232,15 @@ export class RdpDebuggee {
     this.#clearResyncTimer();
     const pending = this.#stop.pending;
     if (!pending) return;
+    this.#stop.projectOwnedFrames = this.#stop.forcingAbort;
     this.#stop.reason = this.#stop.hostInterruptPending
       ? "signal"
-      : this.#stop.forcingResync
+      : this.#stop.forcingAbort || this.#stop.forcingResync
         ? "breakpoint"
         : ((event.pausePacket as { why?: { type?: string } })?.why?.type ?? "breakpoint");
     this.#stop.hostInterruptPending = false;
     this.#stop.forcingResync = false;
+    this.#stop.forcingAbort = false;
     pending.resolve(event);
     this.#stop.pending = null;
   };
@@ -233,6 +252,8 @@ export class RdpDebuggee {
     this.#stop.pending = null;
     this.#stop.hostInterruptPending = false;
     this.#stop.forcingResync = false;
+    this.#stop.forcingAbort = false;
+    this.#stop.projectOwnedFrames = false;
   };
   #handleNavigated = (): void => this.#onNavigated();
   #handleTarget = (info: ThreadInfo): void => {
@@ -261,8 +282,12 @@ export class RdpDebuggee {
     this.#logger = opts?.logger ?? noopLogger;
     this.#onFirstContinue = opts?.onFirstContinue ?? null;
     this.#runControl = opts?.runControl;
+    this.#usesAbortSentinel = opts?.runControl?.usesAbortSentinel ?? false;
     this.#acceptModule = opts?.moduleFilter ?? (() => true);
     this.#runControl?.installSynchronizeStop?.(() => this.#synchronizeStop());
+    if (this.#usesAbortSentinel) {
+      this.#runControl?.installAbortStop?.(() => this.#abortStop());
+    }
 
     session.on("stopped", this.#handleStopped);
     session.on("close", this.#handleSessionClose);
@@ -360,6 +385,9 @@ export class RdpDebuggee {
     for (const s of wasmSources.filter((source) => this.#acceptModule(source.url, "wasm"))) {
       this.#moduleRef(s.url);
     }
+    // Internal modules follow owned Wasm modules so routed LLDBs retain their
+    // compact 0..N owned-module index range.
+    if (this.#usesAbortSentinel) this.#registerAbortModule();
     // Return refs for all registered modules — wasm plus synthetic JS modules
     // preloaded at attach or built lazily during the last #snapshotAll. The
     // component calls allModules() after #snapshotAll() returns, so synthetics
@@ -507,6 +535,7 @@ export class RdpDebuggee {
   async #moduleAddBreakpoint(id: number, pc: number): Promise<number> {
     const entry = this.#requireModule(id);
     if (!entry) return pc;
+    if (entry.url === ABORT_FRAME_URL) return pc;
     const syn = this.#syntheticByUrl.get(entry.url);
     if (syn) {
       await this.#session.setJsBreakpoint(entry.url, pc - syn.codeOffset);
@@ -525,6 +554,7 @@ export class RdpDebuggee {
   async #moduleRemoveBreakpoint(id: number, pc: number): Promise<null> {
     const entry = this.#requireModule(id);
     if (!entry) return null;
+    if (entry.url === ABORT_FRAME_URL) return null;
     const syn = this.#syntheticByUrl.get(entry.url);
     if (syn) {
       await this.#session.removeJsBreakpoint(entry.url, pc - syn.codeOffset);
@@ -700,6 +730,7 @@ export class RdpDebuggee {
 
   async #exitFrames(tid: number): Promise<Ref[]> {
     const frames = this.#framesByTid.get(tid) ?? [];
+    if (this.#stop.projectOwnedFrames) return [this.#frameRef(tid, -1)];
     return frames.length ? [this.#frameRef(tid, 0)] : [];
   }
 
@@ -713,12 +744,21 @@ export class RdpDebuggee {
     const fi = this.#frameInfoById.get(id);
     if (!fi) return null;
     const frames = this.#framesByTid.get(fi.tid) ?? [];
+    if (fi.index === -1) {
+      const firstOwned = frames.findIndex(
+        (frame) => !this.#foreignModuleUrlByFrameActor.has(frame.where?.actor ?? "")
+      );
+      return firstOwned >= 0 ? this.#frameRef(fi.tid, firstOwned) : null;
+    }
     if (fi.index + 1 >= frames.length) return null;
     return this.#frameRef(fi.tid, fi.index + 1);
   }
 
   #frameGetPc(id: number): number {
     const fi = this.#frameInfoById.get(id);
+    if (fi?.index === -1) {
+      return 1 + (this.#syntheticByUrl.get(ABORT_FRAME_URL)?.codeOffset ?? 0);
+    }
     const frame = fi ? this.#framesByTid.get(fi.tid)?.[fi.index] : undefined;
     const line = frame?.where?.line ?? 0;
     const opaqueUrl = frame
@@ -734,6 +774,7 @@ export class RdpDebuggee {
 
   #frameInstance(frameId: number): Ref {
     const fi = this.#frameInfoById.get(frameId);
+    if (fi?.index === -1) return this.#instanceRef(ABORT_FRAME_URL);
     const frames = fi ? (this.#framesByTid.get(fi.tid) ?? []) : [];
     const frame = fi ? frames[fi.index] : undefined;
     const actor = frame?.where?.actor ?? "";
@@ -1083,6 +1124,24 @@ export class RdpDebuggee {
     if (tid !== undefined) this.#session.interrupt(tid);
   }
 
+  #abortStop(): void {
+    if (!this.#stop.pending) return;
+    this.#stop.forcingAbort = true;
+    this.#stop.forcingResync = false;
+    if (this.#session.paused()) {
+      void this.#session.adoptPausedState().catch((error) => {
+        this.#logger.error(
+          `[rdp] could not abort at shared stop: ${error instanceof Error ? error.message : String(error)}`
+        );
+        this.#session.close();
+      });
+      return;
+    }
+    this.#session.armAllStop();
+    const tid = this.#session.preferredInterruptTid();
+    if (tid !== undefined) this.#session.interrupt(tid);
+  }
+
   #armStopped(): void {
     this.#stop.promise = new Promise((resolve, reject) => {
       this.#stop.pending = { resolve, reject };
@@ -1173,6 +1232,19 @@ export class RdpDebuggee {
     this.#moduleById.clear();
     this.#opaqueUrlByForeignUrl.clear();
     this.#foreignModuleUrlByFrameActor.clear();
+  }
+
+  #registerAbortModule(): void {
+    this.#syntheticByUrl.set(
+      ABORT_FRAME_URL,
+      buildSyntheticModule({
+        name: ABORT_FRAME_SOURCE,
+        compDir: "/",
+        lineCount: 1,
+        subprogramName: SOURCE_DEBUGGER_ABORT_FUNCTION,
+      })
+    );
+    this.#moduleRef(ABORT_FRAME_URL);
   }
 
   #eventFutureRef(): Ref {

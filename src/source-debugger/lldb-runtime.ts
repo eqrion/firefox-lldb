@@ -5,7 +5,11 @@
 import net from "node:net";
 import { LLDBClient, type FileProvider } from "lldb-wasm";
 import { noopLogger, type Logger } from "../logging.js";
-import type { RdpDebuggeeResumeAction, RdpDebuggeeRunControl } from "../gdb/rdp-debuggee.js";
+import {
+  SOURCE_DEBUGGER_ABORT_FUNCTION,
+  type RdpDebuggeeResumeAction,
+  type RdpDebuggeeRunControl,
+} from "../gdb/rdp-debuggee.js";
 import type { ComponentRunRequest, RunId } from "./types.js";
 import {
   LldbSourceDebuggerComponentInstance,
@@ -19,6 +23,7 @@ interface PendingRun {
   request: ComponentRunRequest;
   resolveReady: () => void;
   synchronizeRequested: boolean;
+  abortRequested: boolean;
   resumeSequence: number;
   resumeCallbacks: Map<number, () => void>;
   resumeWaiters: Array<{
@@ -28,15 +33,19 @@ interface PendingRun {
 }
 
 class LldbRuntimeRunControl implements LldbComponentRunControl, RdpDebuggeeRunControl {
+  readonly usesAbortSentinel: boolean;
   #pending: PendingRun | undefined;
   #synchronizeStop: (() => void) | undefined;
+  #abortStop: (() => void) | undefined;
 
   constructor(
     private readonly id: string,
     private readonly logger: Logger,
     private readonly observerResumesTarget: boolean,
     private readonly crossComponentStepping: boolean
-  ) {}
+  ) {
+    this.usesAbortSentinel = crossComponentStepping;
+  }
 
   beginRun(request: ComponentRunRequest): Promise<void> {
     if (this.#pending) throw new Error(`run ${this.#pending.request.runId} is already active`);
@@ -46,6 +55,7 @@ class LldbRuntimeRunControl implements LldbComponentRunControl, RdpDebuggeeRunCo
         request,
         resolveReady,
         synchronizeRequested: false,
+        abortRequested: false,
         resumeSequence: 0,
         resumeCallbacks: new Map(),
         resumeWaiters: [],
@@ -81,7 +91,8 @@ class LldbRuntimeRunControl implements LldbComponentRunControl, RdpDebuggeeRunCo
     // step-off and its following semantic continue. Keep synchronization
     // latched so every later local wait in this run observes the already-
     // paused shared target instead of sleeping forever.
-    if (pending.synchronizeRequested) this.#synchronizeStop?.();
+    if (pending.abortRequested) this.#abortStop?.();
+    else if (pending.synchronizeRequested) this.#synchronizeStop?.();
   }
 
   adjustStepLimit(_tid: number, proposed: "step" | "next"): "step" | "next" {
@@ -123,11 +134,22 @@ class LldbRuntimeRunControl implements LldbComponentRunControl, RdpDebuggeeRunCo
     this.#synchronizeStop = synchronize;
   }
 
+  installAbortStop(abort: () => void): void {
+    this.#abortStop = abort;
+  }
+
   synchronizeRun(runId: RunId): void {
     if (this.#pending?.request.runId !== runId) return;
     this.logger.debug(`[${this.id}] synchronizing ${runId}`);
     this.#pending.synchronizeRequested = true;
     this.#synchronizeStop?.();
+  }
+
+  abortRun(runId: RunId): void {
+    if (this.#pending?.request.runId !== runId) return;
+    this.logger.debug(`[${this.id}] aborting ${runId} at shared stop`);
+    this.#pending.abortRequested = true;
+    this.#abortStop?.();
   }
 }
 
@@ -169,6 +191,10 @@ export class EmbeddedLldbComponentRuntime {
       onDispose: () => this.close(),
       runControl: this.#runtimeRunControl,
       exclusiveModules: options.exclusiveModules,
+      abortBreakpointFunction: options.exclusiveModules
+        ? SOURCE_DEBUGGER_ABORT_FUNCTION
+        : undefined,
+      logger: this.#logger,
     });
   }
 

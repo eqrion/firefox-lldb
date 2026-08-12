@@ -251,8 +251,12 @@ test("step-in lets a destination owner adopt a raw foreign-entry trap", async ()
 
   assert.equal(stop.reason.kind, "step");
   assert.deepEqual(
-    events.filter((event) => event.includes(":driver:step-into")),
-    ["start:outer:driver:step-into", "start:outer:driver:step-into", "start:inner:driver:step-into"]
+    events.filter((event) => event.includes(":driver:")),
+    [
+      "start:outer:driver:step-into",
+      "start:outer:driver:step-into",
+      "start:inner:driver:prepare-frame",
+    ]
   );
 });
 
@@ -420,6 +424,91 @@ test("an observer's internal continue satisfies the intermediate re-arm barrier"
   assert.equal(stop.reason.kind, "step");
   assert.equal(events.filter((event) => event === "arm:observer").length, 1);
   assert.ok(events.indexOf("ready:observer:2") < events.indexOf("release:driver:2"));
+});
+
+test("an observer breakpoint aborts a driver's active source plan", async () => {
+  const events: string[] = [];
+  const driver = fakeComponent("driver");
+  const observer = fakeComponent("observer");
+  let resolveDriver!: (stop: ComponentStop) => void;
+  let resolveObserver!: (stop: ComponentStop) => void;
+
+  driver.waitForStop = async () =>
+    new Promise((resolve) => {
+      resolveDriver = resolve;
+    });
+  driver.waitForPhysicalResume = async (_runId, afterSequence) =>
+    afterSequence === 0 ? 1 : new Promise<number | undefined>(() => {});
+  driver.releasePhysicalResume = async (runId, sequence) => {
+    events.push(`release:driver:${sequence}`);
+    resolveObserver({
+      runId,
+      disposition: "preempted",
+      reason: { kind: "breakpoint", breakpointId: "9" },
+    });
+  };
+  driver.abortRun = async (runId) => {
+    events.push("abort:driver");
+    resolveDriver({
+      runId,
+      disposition: "accepted",
+      reason: { kind: "stopped" },
+    });
+  };
+  observer.waitForStop = async () =>
+    new Promise((resolve) => {
+      resolveObserver = resolve;
+    });
+
+  const session = new SourceDebuggerSession({ components: [driver, observer] });
+  const stop = await session.stepOver();
+
+  assert.equal(stop.reason.kind, "breakpoint");
+  assert.deepEqual(events, ["release:driver:1", "abort:driver"]);
+});
+
+test("an ended observer resume stream still classifies its final preempting stop", async () => {
+  const events: string[] = [];
+  const driver = fakeComponent("driver");
+  const observer = fakeComponent("observer");
+  let resolveDriver!: (stop: ComponentStop) => void;
+  let resolveObserver!: (stop: ComponentStop) => void;
+
+  driver.waitForStop = async () =>
+    new Promise((resolve) => {
+      resolveDriver = resolve;
+    });
+  driver.waitForPhysicalResume = async (_runId, afterSequence) =>
+    afterSequence === 0 ? 1 : afterSequence === 1 ? 2 : new Promise<number | undefined>(() => {});
+  driver.releasePhysicalResume = async (runId, sequence) => {
+    events.push(`release:driver:${sequence}`);
+    if (sequence === 1) {
+      resolveObserver({
+        runId,
+        disposition: "preempted",
+        reason: { kind: "breakpoint", breakpointId: "9" },
+      });
+    }
+  };
+  driver.synchronizeRun = async (runId) => {
+    events.push("sync:driver");
+    resolveDriver({
+      runId,
+      disposition: "accepted",
+      reason: { kind: "stopped" },
+    });
+  };
+  observer.waitForStop = async () =>
+    new Promise((resolve) => {
+      resolveObserver = resolve;
+    });
+  observer.waitForPhysicalResume = async () => undefined;
+
+  const session = new SourceDebuggerSession({ components: [driver, observer] });
+  const stop = await session.stepOver();
+
+  assert.equal(stop.reason.kind, "breakpoint");
+  assert.deepEqual(events, ["release:driver:1", "sync:driver"]);
 });
 
 test("module refresh assigns one owner and reports additions and removals", async () => {

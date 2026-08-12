@@ -10,6 +10,7 @@
     let factorialA;
     let factorialB;
     let interleavedA;
+    let stepOverA;
 
     Promise.all([
       MathModule({ locateFile: path => `${path}?component=a` }),
@@ -19,6 +20,7 @@
       factorialB = b.cwrap('compute_factorial', 'number', ['number']);
       globalThis.factorialBForDebugger = factorialB;
       interleavedA = a.cwrap('call_other_factorial', 'number', ['number']);
+      stepOverA = a.cwrap('call_other_then_adjust', 'number', ['number']);
     });
 
     function runA() {
@@ -27,6 +29,10 @@
 
     function runInterleaved() {
       return interleavedA(7);
+    }
+
+    function runStepOver() {
+      return stepOverA(7);
     }
   </script>
 </body>

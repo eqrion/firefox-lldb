@@ -3,6 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 import type { RdpWasmSession } from "../rdp/session.js";
+import { noopLogger, type Logger } from "../logging.js";
 import type { SourceDebuggerComponentInstance } from "./component.js";
 import type {
   BreakpointId,
@@ -28,6 +29,7 @@ export interface SourceDebuggerSessionOptions {
   components: SourceDebuggerComponentInstance[];
   getRdpSession?: () => RdpWasmSession | undefined;
   selectModuleOwner?: (module: Omit<ModuleDescriptor, "owner">) => ComponentId;
+  logger?: Logger;
 }
 
 interface BreakpointRoute {
@@ -52,6 +54,7 @@ export class SourceDebuggerSession {
   readonly #componentById: Map<ComponentId, SourceDebuggerComponentInstance>;
   readonly #getRdpSession: () => RdpWasmSession | undefined;
   readonly #selectModuleOwner: (module: Omit<ModuleDescriptor, "owner">) => ComponentId;
+  readonly #logger: Logger;
   readonly #frames = new Map<LogicalFrameId, LogicalFrame>();
   readonly #breakpointRoutes = new Map<BreakpointId, BreakpointRoute>();
   #moduleById = new Map<string, ModuleDescriptor>();
@@ -72,6 +75,7 @@ export class SourceDebuggerSession {
     }
     this.#getRdpSession = options.getRdpSession ?? (() => undefined);
     this.#selectModuleOwner = options.selectModuleOwner ?? (() => this.#components[0].id);
+    this.#logger = options.logger ?? noopLogger;
   }
 
   currentStopId(): StopId {
@@ -204,7 +208,10 @@ export class SourceDebuggerSession {
 
     for (let transition = 0; transition <= MAX_TRANSPARENT_STEP_IN_STOPS; transition++) {
       const stop = await this.#run(
-        { kind: "step-into", frameId: frame.componentFrameId },
+        {
+          kind: adoptingForeignEntry ? "prepare-frame" : "step-into",
+          frameId: frame.componentFrameId,
+        },
         frame.componentId
       );
       if (stop.reason.kind !== "step") return stop;
@@ -334,7 +341,9 @@ export class SourceDebuggerSession {
           })
         )
       );
+      this.#logger.debug(`[session] ${runId} observers armed; starting ${driver.id}`);
       await driver.startRun({ runId, role: "driver", action });
+      this.#logger.debug(`[session] ${runId} driver armed`);
       const driverWait = driver.waitForStop(runId).then((stop) => ({ component: driver, stop }));
       const observerWaits: ComponentRunWait[] = await Promise.all(
         observers.map(async (component) => ({
@@ -343,7 +352,9 @@ export class SourceDebuggerSession {
           resumeSequence: (await component.waitForPhysicalResume?.(runId, 0)) ?? 0,
         }))
       );
+      this.#logger.debug(`[session] ${runId} observer resume sequences captured`);
       const firstResume = await driver.waitForPhysicalResume?.(runId, 0);
+      this.#logger.debug(`[session] ${runId} first driver resume ${String(firstResume)}`);
       if (
         firstResume !== undefined &&
         driver.waitForPhysicalResume &&
@@ -352,12 +363,21 @@ export class SourceDebuggerSession {
         await driver.releasePhysicalResume(runId, firstResume);
         let resumeSequence = firstResume;
         for (;;) {
+          this.#logger.debug(`[session] ${runId} waiting after driver resume ${resumeSequence}`);
           const progress = await Promise.race([
             driverWait.then((result) => ({ kind: "complete" as const, result })),
             driver
               .waitForPhysicalResume(runId, resumeSequence)
               .then((sequence) => ({ kind: "resume" as const, sequence })),
+            this.#waitForObserverPreemption(observerWaits).then((result) => ({
+              kind: "preempted" as const,
+              result,
+            })),
           ]);
+          if (progress.kind === "preempted") {
+            this.#logger.debug(`[session] ${runId} preempted by ${progress.result.component.id}`);
+            return this.#commitPreemptedStop(progress.result, driverWait, observerWaits, runId);
+          }
           if (progress.kind === "complete" || progress.sequence === undefined) {
             const result = progress.kind === "complete" ? progress.result : await driverWait;
             await Promise.all(observers.map((component) => component.synchronizeRun?.(runId)));
@@ -373,9 +393,13 @@ export class SourceDebuggerSession {
           // armed its next local stop wait) or completes at this stop and must
           // be started again. In both cases, hold the driver's physical lease
           // until every observer is ready for the next stop.
-          await Promise.all(
+          const prepared = await Promise.all(
             observerWaits.map((observer) => this.#prepareObserverResume(observer, runId))
           );
+          const preempted = prepared.find((result) => result !== undefined);
+          if (preempted) {
+            return this.#commitPreemptedStop(preempted, driverWait, observerWaits, runId);
+          }
           resumeSequence = progress.sequence;
           await driver.releasePhysicalResume(runId, resumeSequence);
         }
@@ -397,10 +421,14 @@ export class SourceDebuggerSession {
     }
   }
 
-  async #prepareObserverResume(observer: ComponentRunWait, runId: RunId): Promise<void> {
+  async #prepareObserverResume(
+    observer: ComponentRunWait,
+    runId: RunId
+  ): Promise<{ component: SourceDebuggerComponentInstance; stop: ComponentStop } | undefined> {
+    let completed: { component: SourceDebuggerComponentInstance; stop: ComponentStop } | undefined;
     if (observer.component.waitForPhysicalResume) {
       const progress = await Promise.race([
-        observer.stop.then(() => ({ kind: "complete" as const })),
+        observer.stop.then((result) => ({ kind: "complete" as const, result })),
         observer.component
           .waitForPhysicalResume(runId, observer.resumeSequence)
           .then((sequence) => ({ kind: "resume" as const, sequence })),
@@ -409,9 +437,12 @@ export class SourceDebuggerSession {
         observer.resumeSequence = progress.sequence;
         return;
       }
+      completed = progress.kind === "complete" ? progress.result : await observer.stop;
     } else {
-      await observer.stop;
+      completed = await observer.stop;
     }
+
+    if (completed?.stop.disposition === "preempted") return completed;
 
     await observer.component.startRun({
       runId,
@@ -424,13 +455,58 @@ export class SourceDebuggerSession {
     observer.resumeSequence = (await observer.component.waitForPhysicalResume?.(runId, 0)) ?? 0;
   }
 
+  #waitForObserverPreemption(
+    observers: ComponentRunWait[]
+  ): Promise<{ component: SourceDebuggerComponentInstance; stop: ComponentStop }> {
+    return Promise.race(
+      observers.map(({ stop }) =>
+        stop.then((result) =>
+          result.stop.disposition === "preempted" ? result : new Promise<never>(() => {})
+        )
+      )
+    );
+  }
+
+  async #commitPreemptedStop(
+    preempted: { component: SourceDebuggerComponentInstance; stop: ComponentStop },
+    driverWait: Promise<{ component: SourceDebuggerComponentInstance; stop: ComponentStop }>,
+    observers: ComponentRunWait[],
+    runId: RunId
+  ): Promise<SessionState & { output?: string }> {
+    const interrupted = this.#components.filter((component) => component !== preempted.component);
+    this.#logger.debug(
+      `[session] ${runId} aborting ${interrupted.map(({ id }) => id).join(", ")} for ${preempted.component.id}`
+    );
+    await Promise.all(
+      interrupted.map((component) =>
+        component.abortRun
+          ? component.abortRun(runId)
+          : component.synchronizeRun
+            ? component.synchronizeRun(runId)
+            : component.cancelRun(runId)
+      )
+    );
+    return this.#commitRunStop([
+      preempted,
+      await driverWait,
+      ...(await Promise.all(
+        observers
+          .filter(({ component }) => component !== preempted.component)
+          .map(({ stop }) => stop)
+      )),
+    ]);
+  }
+
   #commitRunStop(
     results: Array<{
       component: SourceDebuggerComponentInstance;
       stop: Awaited<ReturnType<SourceDebuggerComponentInstance["waitForStop"]>>;
     }>
   ): SessionState & { output?: string } {
-    const accepted = results.find(({ stop }) => stop.disposition === "accepted") ?? results[0];
+    const accepted =
+      results.find(({ stop }) => stop.disposition === "preempted") ??
+      results.find(({ stop }) => stop.disposition === "accepted") ??
+      results[0];
     this.#advanceStop();
     return {
       stopId: this.#stopId,

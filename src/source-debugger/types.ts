@@ -146,7 +146,11 @@ export type ComponentRunAction =
   | { kind: "continue" }
   | { kind: "step-into"; frameId?: ComponentFrameId }
   | { kind: "step-over"; frameId?: ComponentFrameId }
-  | { kind: "step-out"; frameId?: ComponentFrameId };
+  | { kind: "step-out"; frameId?: ComponentFrameId }
+  // Normalize a raw ownership-entry trap before exposing the frame. A
+  // component may use its smallest safe execution unit; this is not a
+  // frontend-visible instruction-step operation.
+  | { kind: "prepare-frame"; frameId: ComponentFrameId };
 
 export interface ComponentRunRequest {
   runId: RunId;
@@ -156,7 +160,9 @@ export interface ComponentRunRequest {
 
 export interface ComponentStop {
   runId: RunId;
-  disposition: "accepted" | "synchronized";
+  // `preempted` means an observer recognized a user-visible stop of its own
+  // while another component was driving a source thread plan.
+  disposition: "accepted" | "synchronized" | "preempted";
   reason: SessionStopReason;
   output?: string;
 }
