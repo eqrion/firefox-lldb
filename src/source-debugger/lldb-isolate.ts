@@ -37,8 +37,8 @@ class IsolatedLldbRunControl implements RdpDebuggeeRunControl {
   readonly usesAbortSentinel: boolean;
   readonly #resumeCallbacks = new Map<number, (action: RdpDebuggeeResumeAction) => void>();
   #nextResumeId = 1;
-  #synchronizeStop: (() => void) | undefined;
-  #abortStop: (() => void) | undefined;
+  #synchronizeStop: ((tid?: number) => void) | undefined;
+  #abortStop: ((tid?: number) => void) | undefined;
 
   constructor(
     private readonly send: (message: {
@@ -60,11 +60,11 @@ class IsolatedLldbRunControl implements RdpDebuggeeRunControl {
     this.send({ type: "lldb-isolate-resume", id, action });
   }
 
-  installSynchronizeStop(synchronize: () => void): void {
+  installSynchronizeStop(synchronize: (tid?: number) => void): void {
     this.#synchronizeStop = synchronize;
   }
 
-  installAbortStop(abort: () => void): void {
+  installAbortStop(abort: (tid?: number) => void): void {
     this.#abortStop = abort;
   }
 
@@ -75,12 +75,12 @@ class IsolatedLldbRunControl implements RdpDebuggeeRunControl {
     resume(action);
   }
 
-  synchronizeStop(): void {
-    this.#synchronizeStop?.();
+  synchronizeStop(tid?: number): void {
+    this.#synchronizeStop?.(tid);
   }
 
-  abortStop(): void {
-    this.#abortStop?.();
+  abortStop(tid?: number): void {
+    this.#abortStop?.(tid);
   }
 
   close(): void {
@@ -282,10 +282,10 @@ class LldbIsolateChannel {
         this.runControl.release(message.id, message.action);
         return;
       case "lldb-isolate-synchronize-stop":
-        this.runControl.synchronizeStop();
+        this.runControl.synchronizeStop(message.tid);
         return;
       case "lldb-isolate-abort-stop":
-        this.runControl.abortStop();
+        this.runControl.abortStop(message.tid);
         return;
     }
   };

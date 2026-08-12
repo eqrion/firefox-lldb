@@ -122,13 +122,20 @@ interface StopState {
   // triggerInterrupt()) so it never survives to mislabel a later,
   // unrelated stop.
   forcingResync: boolean;
+  // A sibling component owns the physical stop. Complete this observer's
+  // local operation on its active thread without presenting a breakpoint.
+  forcingSynchronizeTid: number | undefined;
   // A sibling debugger owns a user-visible stop and this local debugger must
   // abandon its active thread plan. Report the private sentinel breakpoint to
   // LLDB; the session publishes the sibling's real stop reason instead.
   forcingAbort: boolean;
-  // The aborting debugger must stabilize at its first owned activation. Its
-  // sibling still projects the true foreign top frame into the logical stack.
-  projectOwnedFrames: boolean;
+  // The debugger thread whose active plan should see the abort sentinel. This
+  // can differ from the physical thread which triggered a sibling's stop.
+  forcingAbortTid: number | undefined;
+  // The aborting debugger must stabilize only the thread whose active plan is
+  // being cancelled. Projecting the sentinel on every pthread makes LLDB try
+  // to step it off idle/futex-blocked peers on the next continue.
+  abortTid: number | undefined;
 }
 
 // One handler per WIT method, keyed "Interface.method" (matches dispatch()'s
@@ -155,8 +162,8 @@ export interface RdpDebuggeeRunControl {
     action: RdpDebuggeeResumeAction,
     resumePhysicalTarget: (action: RdpDebuggeeResumeAction) => void
   ): void;
-  installSynchronizeStop?(synchronize: () => void): void;
-  installAbortStop?(abort: () => void): void;
+  installSynchronizeStop?(synchronize: (tid?: number) => void): void;
+  installAbortStop?(abort: (tid?: number) => void): void;
 }
 
 export class RdpDebuggee {
@@ -216,8 +223,10 @@ export class RdpDebuggee {
     reason: "breakpoint",
     hostInterruptPending: false,
     forcingResync: false,
+    forcingSynchronizeTid: undefined,
     forcingAbort: false,
-    projectOwnedFrames: false,
+    forcingAbortTid: undefined,
+    abortTid: undefined,
   };
 
   // Fired once on LLDB's first continue (drives the page's wasm export
@@ -233,7 +242,9 @@ export class RdpDebuggee {
     this.#clearResyncTimer();
     const pending = this.#stop.pending;
     if (!pending) return;
-    this.#stop.projectOwnedFrames = this.#stop.forcingAbort;
+    this.#stop.abortTid = this.#stop.forcingAbort
+      ? (this.#stop.forcingAbortTid ?? event.tid)
+      : undefined;
     this.#stop.reason = this.#stop.hostInterruptPending
       ? "signal"
       : this.#stop.forcingAbort || this.#stop.forcingResync
@@ -242,6 +253,7 @@ export class RdpDebuggee {
     this.#stop.hostInterruptPending = false;
     this.#stop.forcingResync = false;
     this.#stop.forcingAbort = false;
+    this.#stop.forcingAbortTid = undefined;
     pending.resolve(event);
     this.#stop.pending = null;
   };
@@ -253,8 +265,10 @@ export class RdpDebuggee {
     this.#stop.pending = null;
     this.#stop.hostInterruptPending = false;
     this.#stop.forcingResync = false;
+    this.#stop.forcingSynchronizeTid = undefined;
     this.#stop.forcingAbort = false;
-    this.#stop.projectOwnedFrames = false;
+    this.#stop.forcingAbortTid = undefined;
+    this.#stop.abortTid = undefined;
   };
   #handleNavigated = (): void => this.#onNavigated();
   #handleTarget = (info: ThreadInfo): void => {
@@ -285,9 +299,9 @@ export class RdpDebuggee {
     this.#runControl = opts?.runControl;
     this.#usesAbortSentinel = opts?.runControl?.usesAbortSentinel ?? false;
     this.#acceptModule = opts?.moduleFilter ?? (() => true);
-    this.#runControl?.installSynchronizeStop?.(() => this.#synchronizeStop());
+    this.#runControl?.installSynchronizeStop?.((tid) => this.#synchronizeStop(tid));
     if (this.#usesAbortSentinel) {
-      this.#runControl?.installAbortStop?.(() => this.#abortStop());
+      this.#runControl?.installAbortStop?.((tid) => this.#abortStop(tid));
     }
 
     session.on("stopped", this.#handleStopped);
@@ -731,7 +745,7 @@ export class RdpDebuggee {
 
   async #exitFrames(tid: number): Promise<Ref[]> {
     const frames = this.#framesByTid.get(tid) ?? [];
-    if (this.#stop.projectOwnedFrames) return [this.#frameRef(tid, -1)];
+    if (this.#stop.abortTid === tid) return [this.#frameRef(tid, -1)];
     return frames.length ? [this.#frameRef(tid, 0)] : [];
   }
 
@@ -1046,10 +1060,10 @@ export class RdpDebuggee {
     return null;
   }
 
-  async #finishEvent(): Promise<{ tag: string }> {
+  async #finishEvent(): Promise<{ tag: string; val?: number }> {
     await this.#stop.promise;
     await this.#snapshotAll();
-    return { tag: this.#eventTag() };
+    return this.#eventTag();
   }
 
   /**
@@ -1096,6 +1110,7 @@ export class RdpDebuggee {
     this.#clearResyncTimer();
     this.#stop.hostInterruptPending = true;
     this.#stop.forcingResync = false;
+    this.#stop.forcingSynchronizeTid = undefined;
     if (this.#stop.pending) this.#interruptForHost();
   }
 
@@ -1104,9 +1119,9 @@ export class RdpDebuggee {
   // local pause event for this endpoint while its LLDB is waiting. Marking it
   // as a forced synchronization makes gdbstub report a normal stop instead of
   // treating it as an LLDB-originated interrupt and silently resuming it.
-  #synchronizeStop(): void {
+  #synchronizeStop(tid?: number): void {
     if (!this.#stop.pending) return;
-    this.#stop.forcingResync = true;
+    this.#stop.forcingSynchronizeTid = tid ?? this.#session.stoppedTid;
     if (this.#session.paused()) {
       // The shared physical session has already witnessed the driver's stop.
       // Re-emit its current state for this observer; arming another all-stop
@@ -1123,13 +1138,14 @@ export class RdpDebuggee {
     // A legacy component on a separate RDP endpoint did not receive the
     // driver's connection-scoped breakpoint event. Force a local pause.
     this.#session.armAllStop();
-    const tid = this.#session.preferredInterruptTid();
-    if (tid !== undefined) this.#session.interrupt(tid);
+    const interruptTid = this.#session.preferredInterruptTid();
+    if (interruptTid !== undefined) this.#session.interrupt(interruptTid);
   }
 
-  #abortStop(): void {
+  #abortStop(tid?: number): void {
     if (!this.#stop.pending) return;
     this.#stop.forcingAbort = true;
+    this.#stop.forcingAbortTid = tid;
     this.#stop.forcingResync = false;
     if (this.#session.paused()) {
       void this.#session.adoptPausedState().catch((error) => {
@@ -1141,8 +1157,8 @@ export class RdpDebuggee {
       return;
     }
     this.#session.armAllStop();
-    const tid = this.#session.preferredInterruptTid();
-    if (tid !== undefined) this.#session.interrupt(tid);
+    const interruptTid = this.#session.preferredInterruptTid();
+    if (interruptTid !== undefined) this.#session.interrupt(interruptTid);
   }
 
   #armStopped(): void {
@@ -1254,12 +1270,15 @@ export class RdpDebuggee {
     return { $res: "EventFuture", id: this.#nextId++ };
   }
 
-  #eventTag(): string {
+  #eventTag(): { tag: string; val?: number } {
+    const synchronizeTid = this.#stop.forcingSynchronizeTid;
+    this.#stop.forcingSynchronizeTid = undefined;
+    if (synchronizeTid !== undefined) return { tag: "synchronized", val: synchronizeTid };
     switch (this.#stop.reason) {
       case "exception":
-        return "trap";
+        return { tag: "trap" };
       case "interrupted":
-        return "interrupted";
+        return { tag: "interrupted" };
       default:
         // "signal" (triggerInterrupt's Ctrl-C) deliberately has no case of
         // its own here and falls through to "breakpoint". The component's
@@ -1269,7 +1288,7 @@ export class RdpDebuggee {
         // method over RSP. A host-manufactured Ctrl-C never sets that, so
         // tagging it "interrupted" would make the component treat it as
         // spurious and silently resume instead of actually stopping.
-        return "breakpoint";
+        return { tag: "breakpoint" };
     }
   }
 }

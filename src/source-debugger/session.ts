@@ -68,6 +68,7 @@ export class SourceDebuggerSession {
   #runNumber = 0;
   #stopId: StopId = "stop-0";
   #activeRunId: RunId | undefined;
+  #stateComponentId: ComponentId;
 
   constructor(options: SourceDebuggerSessionOptions) {
     if (options.components.length === 0) {
@@ -81,6 +82,7 @@ export class SourceDebuggerSession {
     this.#getRdpSession = options.getRdpSession ?? (() => undefined);
     this.#selectModuleOwner = options.selectModuleOwner ?? (() => this.#components[0].id);
     this.#logger = options.logger ?? noopLogger;
+    this.#stateComponentId = this.#components[0].id;
   }
 
   currentStopId(): StopId {
@@ -136,11 +138,19 @@ export class SourceDebuggerSession {
   }
 
   async state(): Promise<SessionState> {
-    return this.#firstAvailable("state", (component) => component.state(this.#stopId));
+    return this.#firstAvailable(
+      "state",
+      (component) => component.state(this.#stopId),
+      this.#stateComponentId
+    );
   }
 
   async threads(): Promise<SessionThread[]> {
-    return this.#firstAvailable("threads", (component) => component.threads(this.#stopId));
+    return this.#firstAvailable(
+      "threads",
+      (component) => component.threads(this.#stopId),
+      this.#stateComponentId
+    );
   }
 
   async frames(threadId?: ThreadId): Promise<LogicalFrame[]> {
@@ -319,7 +329,10 @@ export class SourceDebuggerSession {
       : this.#unambiguousComponent("native command");
     if (!component.command) throw new Error(`component ${component.id} has no native command API`);
     const result = await this.#invoke(component, "command", () => component.command!(command));
-    if (isRunControlCommand(command)) this.#advanceStop();
+    if (isRunControlCommand(command)) {
+      this.#stateComponentId = component.id;
+      this.#advanceStop();
+    }
     return result;
   }
 
@@ -619,6 +632,7 @@ export class SourceDebuggerSession {
       results.find(({ stop }) => stop.disposition === "preempted") ??
       results.find(({ stop }) => stop.disposition === "accepted") ??
       results[0];
+    this.#stateComponentId = accepted.component.id;
     this.#advanceStop();
     return {
       stopId: this.#stopId,
@@ -687,9 +701,15 @@ export class SourceDebuggerSession {
 
   async #firstAvailable<T>(
     operation: string,
-    invoke: (component: SourceDebuggerComponentInstance) => Promise<T>
+    invoke: (component: SourceDebuggerComponentInstance) => Promise<T>,
+    preferredId?: ComponentId
   ): Promise<T> {
-    for (const component of this.#activeComponents()) {
+    const active = this.#activeComponents();
+    const preferred = preferredId ? active.find(({ id }) => id === preferredId) : undefined;
+    const ordered = preferred
+      ? [preferred, ...active.filter((component) => component !== preferred)]
+      : active;
+    for (const component of ordered) {
       try {
         return await this.#invoke(component, operation, () => invoke(component));
       } catch (error) {

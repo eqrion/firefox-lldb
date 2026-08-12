@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Multi-component pthread debugger test</title>
+  </head>
+  <body>
+    <div id="status">Loading Wasm modules…</div>
+    <script src="/__fixtures__/threaded/matmul.js"></script>
+    <script src="/__fixtures__/two-components/math.js"></script>
+    <script>
+      let threaded;
+      let factorial;
+
+      Promise.all([
+        MatMulModule({
+          locateFile: (name) => `/__fixtures__/threaded/${name}`,
+        }),
+        MathModule({
+          locateFile: (name) => `/__fixtures__/two-components/${name}?component=main`,
+        }),
+      ]).then(([threadedModule, mathModule]) => {
+        threaded = threadedModule;
+        factorial = mathModule.cwrap("compute_factorial", "number", ["number"]);
+        document.getElementById("status").textContent = "Ready.";
+      });
+
+      function runWorkerCheckpoint() {
+        threaded.cwrap("start_probe_workers", null, ["number", "number"])(1, 1);
+      }
+
+      function runMainFactorial() {
+        return factorial(8);
+      }
+
+      // Schedule the complete worker -> main -> worker sequence while the page
+      // thread is still selected. Once a pthread owns the stop, debugger-side
+      // evaluation correctly runs in that worker's global and cannot call page
+      // helpers directly.
+      function runWorkerMainWorkerSequence() {
+        runWorkerCheckpoint();
+        setTimeout(() => {
+          runMainFactorial();
+          setTimeout(runWorkerCheckpoint, 100);
+        }, 100);
+      }
+    </script>
+  </body>
+</html>

@@ -17,7 +17,7 @@ import { focusFirefoxWindow } from "../rdp/firefox.js";
 import { quietLogger } from "./logger.js";
 import { runRepl } from "./repl.js";
 import type { RdpWasmSession } from "../rdp/session.js";
-import { debugEnvEnabled } from "../config.js";
+import { debugEnvEnabled, sourceDebuggerTraceEnabled } from "../config.js";
 import { IsolatedLldbComponentRuntime } from "../source-debugger/lldb-isolate.js";
 import { SourceDebuggerSession } from "../source-debugger/session.js";
 import { componentForModuleUrl, parseComponentRoutes } from "../source-debugger/config.js";
@@ -25,7 +25,9 @@ import { componentForModuleUrl, parseComponentRoutes } from "../source-debugger/
 async function main(): Promise<void> {
   const args = parseCliArgs(process.argv.slice(2));
   const verbose = args.verbose || debugEnvEnabled();
+  const sourceTrace = sourceDebuggerTraceEnabled();
   const logger = quietLogger(verbose);
+  const sourceLogger = verbose ? logger : quietLogger(sourceTrace);
   const routes = parseComponentRoutes(args.components);
   const routedComponents = args.components.length > 0;
   if (routes.length > 1 && !args.url) {
@@ -39,10 +41,10 @@ async function main(): Promise<void> {
         await IsolatedLldbComponentRuntime.create({
           id: route.id,
           name: routes.length === 1 && route.id === "lldb" ? "LLDB" : `LLDB (${route.id})`,
-          logger,
+          logger: sourceLogger,
           observerResumesTarget: routes.length === 1,
           exclusiveModules: routedComponents,
-          verbose,
+          verbose: verbose || sourceTrace,
         })
       );
     }
@@ -55,7 +57,7 @@ async function main(): Promise<void> {
     components: runtimes.map(({ component }) => component),
     getRdpSession: () => session,
     selectModuleOwner: (module) => componentForModuleUrl(routes, module.url).id,
-    logger,
+    logger: sourceLogger,
   });
 
   const handles: Awaited<ReturnType<typeof startPlatformServer>>[] = [];

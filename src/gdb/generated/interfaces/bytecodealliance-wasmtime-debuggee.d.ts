@@ -47,7 +47,7 @@ export interface ResumptionValueEarlyReturn {
   tag: 'early-return',
   val: Array<WasmValue>,
 }
-export type Event = EventComplete | EventTrap | EventBreakpoint | EventInterrupted | EventException | EventInjectedCallReturn;
+export type Event = EventComplete | EventTrap | EventBreakpoint | EventInterrupted | EventSynchronized | EventException | EventInjectedCallReturn;
 export interface EventComplete {
   tag: 'complete',
 }
@@ -59,6 +59,10 @@ export interface EventBreakpoint {
 }
 export interface EventInterrupted {
   tag: 'interrupted',
+}
+export interface EventSynchronized {
+  tag: 'synchronized',
+  val: number,
 }
 export interface EventException {
   tag: 'exception',

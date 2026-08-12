@@ -4958,532 +4958,6 @@ let gen = (function* _initGenerator () {
   }
   _trampoline15.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#unwrapF64';
   
-  const handleTable5 = [T_FLAG, 0];
-  handleTable5._createdReps = new Set();
-  
-  
-  const captureTable5= new Map();
-  let captureCnt5= 0;
-  
-  HANDLE_TABLES[5] = handleTable5;
-  
-  const _trampoline18 = function(arg0) {
-    var handle1 = arg0;
-    
-    var rep2 = handleTable5[(handle1 << 1) + 1] & ~T_FLAG;
-    var rsc0 = captureTable5.get(rep2);
-    if (!rsc0) {
-      rsc0 = Object.create(Module.prototype);
-      Object.defineProperty(rsc0, symbolRscHandle, { writable: true, value: handle1});
-      Object.defineProperty(rsc0, symbolRscRep, { writable: true, value: rep2});
-    }
-    
-    curResourceBorrows.push(rsc0);
-    _debugLog('[iface="bytecodealliance:wasmtime/debuggee@44.0.0", function="[method]module.unique-id"] [Instruction::CallInterface] (sync, @ enter)');
-    const hostProvided = true;
-    
-    let parentTask;
-    let task;
-    let subtask;
-    
-    const createTask = () => {
-      const results = createNewCurrentTask({
-        componentIdx: -1,
-        isAsync: false,
-        entryFnName: 'uniqueId',
-        getCallbackFn: () => null,
-        callbackFnName: null,
-        errHandling: 'none',
-        callingWasmExport: false,
-      });
-      task = results[0];
-    };
-    
-    taskCreation: {
-      parentTask = getCurrentTask(
-      0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
-      )?.task;
-      
-      if (!parentTask) {
-        createTask();
-        break taskCreation;
-      }
-      
-      createTask();
-      
-      if (hostProvided) {
-        subtask = parentTask.getLatestSubtask();
-        if (!subtask) {
-          throw new Error(`Missing subtask (in parent task [${parentTask.id()}]) for host import, has the import been lowered? (ensure asyncImports are set properly)`);
-        }
-        task.setParentSubtask(subtask);
-      }
-    }
-    
-    const started = task.enterSync();
-    
-    let ret;
-    
-    try {
-      ret = _withGlobalCurrentTaskMeta({
-        componentIdx: task.componentIdx(),
-        taskID: task.id(),
-        fn: () => rsc0.uniqueId(),
-      })
-      ;
-    } catch (err) {
-      
-      _debugLog('[Instruction::CallInterface] error during sync call', {
-        taskID: task.id(),
-        subtaskID: currentSubtask?.id(),
-        err,
-      });
-      task.setErrored(err);
-      task.reject(err);
-      task.exit();
-      throw err;
-      
-    }
-    
-    for (const rsc of curResourceBorrows) {
-      rsc[symbolRscHandle] = undefined;
-    }
-    curResourceBorrows = [];
-    _debugLog('[iface="bytecodealliance:wasmtime/debuggee@44.0.0", function="[method]module.unique-id"][Instruction::Return]', {
-      funcName: '[method]module.unique-id',
-      paramCount: 1,
-      async: false,
-      postReturn: false
-    });
-    task.resolve([toUint64(ret)]);
-    task.exit();
-    return toUint64(ret);
-  }
-  _trampoline18.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#uniqueId';
-  
-  const _trampoline19 = function(arg0) {
-    var handle1 = arg0;
-    
-    var rep2 = handleTable5[(handle1 << 1) + 1] & ~T_FLAG;
-    var rsc0 = captureTable5.get(rep2);
-    if (!rsc0) {
-      rsc0 = Object.create(Module.prototype);
-      Object.defineProperty(rsc0, symbolRscHandle, { writable: true, value: handle1});
-      Object.defineProperty(rsc0, symbolRscRep, { writable: true, value: rep2});
-    }
-    
-    curResourceBorrows.push(rsc0);
-    _debugLog('[iface="bytecodealliance:wasmtime/debuggee@44.0.0", function="[method]module.clone"] [Instruction::CallInterface] (sync, @ enter)');
-    const hostProvided = true;
-    
-    let parentTask;
-    let task;
-    let subtask;
-    
-    const createTask = () => {
-      const results = createNewCurrentTask({
-        componentIdx: -1,
-        isAsync: false,
-        entryFnName: 'clone',
-        getCallbackFn: () => null,
-        callbackFnName: null,
-        errHandling: 'none',
-        callingWasmExport: false,
-      });
-      task = results[0];
-    };
-    
-    taskCreation: {
-      parentTask = getCurrentTask(
-      0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
-      )?.task;
-      
-      if (!parentTask) {
-        createTask();
-        break taskCreation;
-      }
-      
-      createTask();
-      
-      if (hostProvided) {
-        subtask = parentTask.getLatestSubtask();
-        if (!subtask) {
-          throw new Error(`Missing subtask (in parent task [${parentTask.id()}]) for host import, has the import been lowered? (ensure asyncImports are set properly)`);
-        }
-        task.setParentSubtask(subtask);
-      }
-    }
-    
-    const started = task.enterSync();
-    
-    let ret;
-    
-    try {
-      ret = _withGlobalCurrentTaskMeta({
-        componentIdx: task.componentIdx(),
-        taskID: task.id(),
-        fn: () => rsc0.clone(),
-      })
-      ;
-    } catch (err) {
-      
-      _debugLog('[Instruction::CallInterface] error during sync call', {
-        taskID: task.id(),
-        subtaskID: currentSubtask?.id(),
-        err,
-      });
-      task.setErrored(err);
-      task.reject(err);
-      task.exit();
-      throw err;
-      
-    }
-    
-    for (const rsc of curResourceBorrows) {
-      rsc[symbolRscHandle] = undefined;
-    }
-    curResourceBorrows = [];
-    
-    if (!(ret instanceof Module)) {
-      throw new TypeError('Resource error: Not a valid \"Module\" resource.');
-    }
-    var handle3 = ret[symbolRscHandle];
-    if (!handle3) {
-      const rep = ret[symbolRscRep] || ++captureCnt5;
-      captureTable5.set(rep, ret);
-      handle3 = rscTableCreateOwn(handleTable5, rep);
-    }
-    
-    _debugLog('[iface="bytecodealliance:wasmtime/debuggee@44.0.0", function="[method]module.clone"][Instruction::Return]', {
-      funcName: '[method]module.clone',
-      paramCount: 1,
-      async: false,
-      postReturn: false
-    });
-    task.resolve([handle3]);
-    task.exit();
-    return handle3;
-  }
-  _trampoline19.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#clone';
-  
-  const handleTable2 = [T_FLAG, 0];
-  handleTable2._createdReps = new Set();
-  
-  
-  const captureTable2= new Map();
-  let captureCnt2= 0;
-  
-  HANDLE_TABLES[2] = handleTable2;
-  
-  const _trampoline20 = function(arg0) {
-    var handle1 = arg0;
-    
-    var rep2 = handleTable2[(handle1 << 1) + 1] & ~T_FLAG;
-    var rsc0 = captureTable2.get(rep2);
-    if (!rsc0) {
-      rsc0 = Object.create(Memory.prototype);
-      Object.defineProperty(rsc0, symbolRscHandle, { writable: true, value: handle1});
-      Object.defineProperty(rsc0, symbolRscRep, { writable: true, value: rep2});
-    }
-    
-    curResourceBorrows.push(rsc0);
-    _debugLog('[iface="bytecodealliance:wasmtime/debuggee@44.0.0", function="[method]memory.unique-id"] [Instruction::CallInterface] (sync, @ enter)');
-    const hostProvided = true;
-    
-    let parentTask;
-    let task;
-    let subtask;
-    
-    const createTask = () => {
-      const results = createNewCurrentTask({
-        componentIdx: -1,
-        isAsync: false,
-        entryFnName: 'uniqueId',
-        getCallbackFn: () => null,
-        callbackFnName: null,
-        errHandling: 'none',
-        callingWasmExport: false,
-      });
-      task = results[0];
-    };
-    
-    taskCreation: {
-      parentTask = getCurrentTask(
-      0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
-      )?.task;
-      
-      if (!parentTask) {
-        createTask();
-        break taskCreation;
-      }
-      
-      createTask();
-      
-      if (hostProvided) {
-        subtask = parentTask.getLatestSubtask();
-        if (!subtask) {
-          throw new Error(`Missing subtask (in parent task [${parentTask.id()}]) for host import, has the import been lowered? (ensure asyncImports are set properly)`);
-        }
-        task.setParentSubtask(subtask);
-      }
-    }
-    
-    const started = task.enterSync();
-    
-    let ret;
-    
-    try {
-      ret = _withGlobalCurrentTaskMeta({
-        componentIdx: task.componentIdx(),
-        taskID: task.id(),
-        fn: () => rsc0.uniqueId(),
-      })
-      ;
-    } catch (err) {
-      
-      _debugLog('[Instruction::CallInterface] error during sync call', {
-        taskID: task.id(),
-        subtaskID: currentSubtask?.id(),
-        err,
-      });
-      task.setErrored(err);
-      task.reject(err);
-      task.exit();
-      throw err;
-      
-    }
-    
-    for (const rsc of curResourceBorrows) {
-      rsc[symbolRscHandle] = undefined;
-    }
-    curResourceBorrows = [];
-    _debugLog('[iface="bytecodealliance:wasmtime/debuggee@44.0.0", function="[method]memory.unique-id"][Instruction::Return]', {
-      funcName: '[method]memory.unique-id',
-      paramCount: 1,
-      async: false,
-      postReturn: false
-    });
-    task.resolve([toUint64(ret)]);
-    task.exit();
-    return toUint64(ret);
-  }
-  _trampoline20.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#uniqueId';
-  
-  const _trampoline21 = function(arg0) {
-    var handle1 = arg0;
-    
-    var rep2 = handleTable2[(handle1 << 1) + 1] & ~T_FLAG;
-    var rsc0 = captureTable2.get(rep2);
-    if (!rsc0) {
-      rsc0 = Object.create(Memory.prototype);
-      Object.defineProperty(rsc0, symbolRscHandle, { writable: true, value: handle1});
-      Object.defineProperty(rsc0, symbolRscRep, { writable: true, value: rep2});
-    }
-    
-    curResourceBorrows.push(rsc0);
-    _debugLog('[iface="bytecodealliance:wasmtime/debuggee@44.0.0", function="[method]memory.clone"] [Instruction::CallInterface] (sync, @ enter)');
-    const hostProvided = true;
-    
-    let parentTask;
-    let task;
-    let subtask;
-    
-    const createTask = () => {
-      const results = createNewCurrentTask({
-        componentIdx: -1,
-        isAsync: false,
-        entryFnName: 'clone',
-        getCallbackFn: () => null,
-        callbackFnName: null,
-        errHandling: 'none',
-        callingWasmExport: false,
-      });
-      task = results[0];
-    };
-    
-    taskCreation: {
-      parentTask = getCurrentTask(
-      0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
-      )?.task;
-      
-      if (!parentTask) {
-        createTask();
-        break taskCreation;
-      }
-      
-      createTask();
-      
-      if (hostProvided) {
-        subtask = parentTask.getLatestSubtask();
-        if (!subtask) {
-          throw new Error(`Missing subtask (in parent task [${parentTask.id()}]) for host import, has the import been lowered? (ensure asyncImports are set properly)`);
-        }
-        task.setParentSubtask(subtask);
-      }
-    }
-    
-    const started = task.enterSync();
-    
-    let ret;
-    
-    try {
-      ret = _withGlobalCurrentTaskMeta({
-        componentIdx: task.componentIdx(),
-        taskID: task.id(),
-        fn: () => rsc0.clone(),
-      })
-      ;
-    } catch (err) {
-      
-      _debugLog('[Instruction::CallInterface] error during sync call', {
-        taskID: task.id(),
-        subtaskID: currentSubtask?.id(),
-        err,
-      });
-      task.setErrored(err);
-      task.reject(err);
-      task.exit();
-      throw err;
-      
-    }
-    
-    for (const rsc of curResourceBorrows) {
-      rsc[symbolRscHandle] = undefined;
-    }
-    curResourceBorrows = [];
-    
-    if (!(ret instanceof Memory)) {
-      throw new TypeError('Resource error: Not a valid \"Memory\" resource.');
-    }
-    var handle3 = ret[symbolRscHandle];
-    if (!handle3) {
-      const rep = ret[symbolRscRep] || ++captureCnt2;
-      captureTable2.set(rep, ret);
-      handle3 = rscTableCreateOwn(handleTable2, rep);
-    }
-    
-    _debugLog('[iface="bytecodealliance:wasmtime/debuggee@44.0.0", function="[method]memory.clone"][Instruction::Return]', {
-      funcName: '[method]memory.clone',
-      paramCount: 1,
-      async: false,
-      postReturn: false
-    });
-    task.resolve([handle3]);
-    task.exit();
-    return handle3;
-  }
-  _trampoline21.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#clone';
-  
-  const _trampoline22 = function(arg0, arg1) {
-    var handle1 = arg0;
-    
-    var rep2 = handleTable2[(handle1 << 1) + 1] & ~T_FLAG;
-    var rsc0 = captureTable2.get(rep2);
-    if (!rsc0) {
-      rsc0 = Object.create(Memory.prototype);
-      Object.defineProperty(rsc0, symbolRscHandle, { writable: true, value: handle1});
-      Object.defineProperty(rsc0, symbolRscRep, { writable: true, value: rep2});
-    }
-    
-    curResourceBorrows.push(rsc0);
-    var handle4 = arg1;
-    
-    var rep5 = handleTable3[(handle4 << 1) + 1] & ~T_FLAG;
-    var rsc3 = captureTable3.get(rep5);
-    if (!rsc3) {
-      rsc3 = Object.create(Debuggee.prototype);
-      Object.defineProperty(rsc3, symbolRscHandle, { writable: true, value: handle4});
-      Object.defineProperty(rsc3, symbolRscRep, { writable: true, value: rep5});
-    }
-    
-    curResourceBorrows.push(rsc3);
-    _debugLog('[iface="bytecodealliance:wasmtime/debuggee@44.0.0", function="[method]memory.size-bytes"] [Instruction::CallInterface] (sync, @ enter)');
-    const hostProvided = true;
-    
-    let parentTask;
-    let task;
-    let subtask;
-    
-    const createTask = () => {
-      const results = createNewCurrentTask({
-        componentIdx: -1,
-        isAsync: false,
-        entryFnName: 'sizeBytes',
-        getCallbackFn: () => null,
-        callbackFnName: null,
-        errHandling: 'none',
-        callingWasmExport: false,
-      });
-      task = results[0];
-    };
-    
-    taskCreation: {
-      parentTask = getCurrentTask(
-      0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
-      )?.task;
-      
-      if (!parentTask) {
-        createTask();
-        break taskCreation;
-      }
-      
-      createTask();
-      
-      if (hostProvided) {
-        subtask = parentTask.getLatestSubtask();
-        if (!subtask) {
-          throw new Error(`Missing subtask (in parent task [${parentTask.id()}]) for host import, has the import been lowered? (ensure asyncImports are set properly)`);
-        }
-        task.setParentSubtask(subtask);
-      }
-    }
-    
-    const started = task.enterSync();
-    
-    let ret;
-    
-    try {
-      ret = _withGlobalCurrentTaskMeta({
-        componentIdx: task.componentIdx(),
-        taskID: task.id(),
-        fn: () => rsc0.sizeBytes(rsc3),
-      })
-      ;
-    } catch (err) {
-      
-      _debugLog('[Instruction::CallInterface] error during sync call', {
-        taskID: task.id(),
-        subtaskID: currentSubtask?.id(),
-        err,
-      });
-      task.setErrored(err);
-      task.reject(err);
-      task.exit();
-      throw err;
-      
-    }
-    
-    for (const rsc of curResourceBorrows) {
-      rsc[symbolRscHandle] = undefined;
-    }
-    curResourceBorrows = [];
-    _debugLog('[iface="bytecodealliance:wasmtime/debuggee@44.0.0", function="[method]memory.size-bytes"][Instruction::Return]', {
-      funcName: '[method]memory.size-bytes',
-      paramCount: 1,
-      async: false,
-      postReturn: false
-    });
-    task.resolve([toUint64(ret)]);
-    task.exit();
-    return toUint64(ret);
-  }
-  _trampoline22.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#sizeBytes';
-  
   const handleTable7 = [T_FLAG, 0];
   handleTable7._createdReps = new Set();
   
@@ -5493,7 +4967,16 @@ let gen = (function* _initGenerator () {
   
   HANDLE_TABLES[7] = handleTable7;
   
-  const _trampoline23 = function(arg0, arg1) {
+  const handleTable5 = [T_FLAG, 0];
+  handleTable5._createdReps = new Set();
+  
+  
+  const captureTable5= new Map();
+  let captureCnt5= 0;
+  
+  HANDLE_TABLES[5] = handleTable5;
+  
+  const _trampoline19 = function(arg0, arg1) {
     var handle1 = arg0;
     
     var rep2 = handleTable7[(handle1 << 1) + 1] & ~T_FLAG;
@@ -5608,7 +5091,524 @@ let gen = (function* _initGenerator () {
     task.exit();
     return handle6;
   }
-  _trampoline23.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#getModule';
+  _trampoline19.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#getModule';
+  
+  const _trampoline20 = function(arg0) {
+    var handle1 = arg0;
+    
+    var rep2 = handleTable5[(handle1 << 1) + 1] & ~T_FLAG;
+    var rsc0 = captureTable5.get(rep2);
+    if (!rsc0) {
+      rsc0 = Object.create(Module.prototype);
+      Object.defineProperty(rsc0, symbolRscHandle, { writable: true, value: handle1});
+      Object.defineProperty(rsc0, symbolRscRep, { writable: true, value: rep2});
+    }
+    
+    curResourceBorrows.push(rsc0);
+    _debugLog('[iface="bytecodealliance:wasmtime/debuggee@44.0.0", function="[method]module.clone"] [Instruction::CallInterface] (sync, @ enter)');
+    const hostProvided = true;
+    
+    let parentTask;
+    let task;
+    let subtask;
+    
+    const createTask = () => {
+      const results = createNewCurrentTask({
+        componentIdx: -1,
+        isAsync: false,
+        entryFnName: 'clone',
+        getCallbackFn: () => null,
+        callbackFnName: null,
+        errHandling: 'none',
+        callingWasmExport: false,
+      });
+      task = results[0];
+    };
+    
+    taskCreation: {
+      parentTask = getCurrentTask(
+      0,
+      _getGlobalCurrentTaskMeta(0)?.taskID,
+      )?.task;
+      
+      if (!parentTask) {
+        createTask();
+        break taskCreation;
+      }
+      
+      createTask();
+      
+      if (hostProvided) {
+        subtask = parentTask.getLatestSubtask();
+        if (!subtask) {
+          throw new Error(`Missing subtask (in parent task [${parentTask.id()}]) for host import, has the import been lowered? (ensure asyncImports are set properly)`);
+        }
+        task.setParentSubtask(subtask);
+      }
+    }
+    
+    const started = task.enterSync();
+    
+    let ret;
+    
+    try {
+      ret = _withGlobalCurrentTaskMeta({
+        componentIdx: task.componentIdx(),
+        taskID: task.id(),
+        fn: () => rsc0.clone(),
+      })
+      ;
+    } catch (err) {
+      
+      _debugLog('[Instruction::CallInterface] error during sync call', {
+        taskID: task.id(),
+        subtaskID: currentSubtask?.id(),
+        err,
+      });
+      task.setErrored(err);
+      task.reject(err);
+      task.exit();
+      throw err;
+      
+    }
+    
+    for (const rsc of curResourceBorrows) {
+      rsc[symbolRscHandle] = undefined;
+    }
+    curResourceBorrows = [];
+    
+    if (!(ret instanceof Module)) {
+      throw new TypeError('Resource error: Not a valid \"Module\" resource.');
+    }
+    var handle3 = ret[symbolRscHandle];
+    if (!handle3) {
+      const rep = ret[symbolRscRep] || ++captureCnt5;
+      captureTable5.set(rep, ret);
+      handle3 = rscTableCreateOwn(handleTable5, rep);
+    }
+    
+    _debugLog('[iface="bytecodealliance:wasmtime/debuggee@44.0.0", function="[method]module.clone"][Instruction::Return]', {
+      funcName: '[method]module.clone',
+      paramCount: 1,
+      async: false,
+      postReturn: false
+    });
+    task.resolve([handle3]);
+    task.exit();
+    return handle3;
+  }
+  _trampoline20.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#clone';
+  
+  const _trampoline21 = function(arg0) {
+    var handle1 = arg0;
+    
+    var rep2 = handleTable5[(handle1 << 1) + 1] & ~T_FLAG;
+    var rsc0 = captureTable5.get(rep2);
+    if (!rsc0) {
+      rsc0 = Object.create(Module.prototype);
+      Object.defineProperty(rsc0, symbolRscHandle, { writable: true, value: handle1});
+      Object.defineProperty(rsc0, symbolRscRep, { writable: true, value: rep2});
+    }
+    
+    curResourceBorrows.push(rsc0);
+    _debugLog('[iface="bytecodealliance:wasmtime/debuggee@44.0.0", function="[method]module.unique-id"] [Instruction::CallInterface] (sync, @ enter)');
+    const hostProvided = true;
+    
+    let parentTask;
+    let task;
+    let subtask;
+    
+    const createTask = () => {
+      const results = createNewCurrentTask({
+        componentIdx: -1,
+        isAsync: false,
+        entryFnName: 'uniqueId',
+        getCallbackFn: () => null,
+        callbackFnName: null,
+        errHandling: 'none',
+        callingWasmExport: false,
+      });
+      task = results[0];
+    };
+    
+    taskCreation: {
+      parentTask = getCurrentTask(
+      0,
+      _getGlobalCurrentTaskMeta(0)?.taskID,
+      )?.task;
+      
+      if (!parentTask) {
+        createTask();
+        break taskCreation;
+      }
+      
+      createTask();
+      
+      if (hostProvided) {
+        subtask = parentTask.getLatestSubtask();
+        if (!subtask) {
+          throw new Error(`Missing subtask (in parent task [${parentTask.id()}]) for host import, has the import been lowered? (ensure asyncImports are set properly)`);
+        }
+        task.setParentSubtask(subtask);
+      }
+    }
+    
+    const started = task.enterSync();
+    
+    let ret;
+    
+    try {
+      ret = _withGlobalCurrentTaskMeta({
+        componentIdx: task.componentIdx(),
+        taskID: task.id(),
+        fn: () => rsc0.uniqueId(),
+      })
+      ;
+    } catch (err) {
+      
+      _debugLog('[Instruction::CallInterface] error during sync call', {
+        taskID: task.id(),
+        subtaskID: currentSubtask?.id(),
+        err,
+      });
+      task.setErrored(err);
+      task.reject(err);
+      task.exit();
+      throw err;
+      
+    }
+    
+    for (const rsc of curResourceBorrows) {
+      rsc[symbolRscHandle] = undefined;
+    }
+    curResourceBorrows = [];
+    _debugLog('[iface="bytecodealliance:wasmtime/debuggee@44.0.0", function="[method]module.unique-id"][Instruction::Return]', {
+      funcName: '[method]module.unique-id',
+      paramCount: 1,
+      async: false,
+      postReturn: false
+    });
+    task.resolve([toUint64(ret)]);
+    task.exit();
+    return toUint64(ret);
+  }
+  _trampoline21.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#uniqueId';
+  
+  const handleTable2 = [T_FLAG, 0];
+  handleTable2._createdReps = new Set();
+  
+  
+  const captureTable2= new Map();
+  let captureCnt2= 0;
+  
+  HANDLE_TABLES[2] = handleTable2;
+  
+  const _trampoline22 = function(arg0, arg1) {
+    var handle1 = arg0;
+    
+    var rep2 = handleTable2[(handle1 << 1) + 1] & ~T_FLAG;
+    var rsc0 = captureTable2.get(rep2);
+    if (!rsc0) {
+      rsc0 = Object.create(Memory.prototype);
+      Object.defineProperty(rsc0, symbolRscHandle, { writable: true, value: handle1});
+      Object.defineProperty(rsc0, symbolRscRep, { writable: true, value: rep2});
+    }
+    
+    curResourceBorrows.push(rsc0);
+    var handle4 = arg1;
+    
+    var rep5 = handleTable3[(handle4 << 1) + 1] & ~T_FLAG;
+    var rsc3 = captureTable3.get(rep5);
+    if (!rsc3) {
+      rsc3 = Object.create(Debuggee.prototype);
+      Object.defineProperty(rsc3, symbolRscHandle, { writable: true, value: handle4});
+      Object.defineProperty(rsc3, symbolRscRep, { writable: true, value: rep5});
+    }
+    
+    curResourceBorrows.push(rsc3);
+    _debugLog('[iface="bytecodealliance:wasmtime/debuggee@44.0.0", function="[method]memory.size-bytes"] [Instruction::CallInterface] (sync, @ enter)');
+    const hostProvided = true;
+    
+    let parentTask;
+    let task;
+    let subtask;
+    
+    const createTask = () => {
+      const results = createNewCurrentTask({
+        componentIdx: -1,
+        isAsync: false,
+        entryFnName: 'sizeBytes',
+        getCallbackFn: () => null,
+        callbackFnName: null,
+        errHandling: 'none',
+        callingWasmExport: false,
+      });
+      task = results[0];
+    };
+    
+    taskCreation: {
+      parentTask = getCurrentTask(
+      0,
+      _getGlobalCurrentTaskMeta(0)?.taskID,
+      )?.task;
+      
+      if (!parentTask) {
+        createTask();
+        break taskCreation;
+      }
+      
+      createTask();
+      
+      if (hostProvided) {
+        subtask = parentTask.getLatestSubtask();
+        if (!subtask) {
+          throw new Error(`Missing subtask (in parent task [${parentTask.id()}]) for host import, has the import been lowered? (ensure asyncImports are set properly)`);
+        }
+        task.setParentSubtask(subtask);
+      }
+    }
+    
+    const started = task.enterSync();
+    
+    let ret;
+    
+    try {
+      ret = _withGlobalCurrentTaskMeta({
+        componentIdx: task.componentIdx(),
+        taskID: task.id(),
+        fn: () => rsc0.sizeBytes(rsc3),
+      })
+      ;
+    } catch (err) {
+      
+      _debugLog('[Instruction::CallInterface] error during sync call', {
+        taskID: task.id(),
+        subtaskID: currentSubtask?.id(),
+        err,
+      });
+      task.setErrored(err);
+      task.reject(err);
+      task.exit();
+      throw err;
+      
+    }
+    
+    for (const rsc of curResourceBorrows) {
+      rsc[symbolRscHandle] = undefined;
+    }
+    curResourceBorrows = [];
+    _debugLog('[iface="bytecodealliance:wasmtime/debuggee@44.0.0", function="[method]memory.size-bytes"][Instruction::Return]', {
+      funcName: '[method]memory.size-bytes',
+      paramCount: 1,
+      async: false,
+      postReturn: false
+    });
+    task.resolve([toUint64(ret)]);
+    task.exit();
+    return toUint64(ret);
+  }
+  _trampoline22.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#sizeBytes';
+  
+  const _trampoline23 = function(arg0) {
+    var handle1 = arg0;
+    
+    var rep2 = handleTable2[(handle1 << 1) + 1] & ~T_FLAG;
+    var rsc0 = captureTable2.get(rep2);
+    if (!rsc0) {
+      rsc0 = Object.create(Memory.prototype);
+      Object.defineProperty(rsc0, symbolRscHandle, { writable: true, value: handle1});
+      Object.defineProperty(rsc0, symbolRscRep, { writable: true, value: rep2});
+    }
+    
+    curResourceBorrows.push(rsc0);
+    _debugLog('[iface="bytecodealliance:wasmtime/debuggee@44.0.0", function="[method]memory.clone"] [Instruction::CallInterface] (sync, @ enter)');
+    const hostProvided = true;
+    
+    let parentTask;
+    let task;
+    let subtask;
+    
+    const createTask = () => {
+      const results = createNewCurrentTask({
+        componentIdx: -1,
+        isAsync: false,
+        entryFnName: 'clone',
+        getCallbackFn: () => null,
+        callbackFnName: null,
+        errHandling: 'none',
+        callingWasmExport: false,
+      });
+      task = results[0];
+    };
+    
+    taskCreation: {
+      parentTask = getCurrentTask(
+      0,
+      _getGlobalCurrentTaskMeta(0)?.taskID,
+      )?.task;
+      
+      if (!parentTask) {
+        createTask();
+        break taskCreation;
+      }
+      
+      createTask();
+      
+      if (hostProvided) {
+        subtask = parentTask.getLatestSubtask();
+        if (!subtask) {
+          throw new Error(`Missing subtask (in parent task [${parentTask.id()}]) for host import, has the import been lowered? (ensure asyncImports are set properly)`);
+        }
+        task.setParentSubtask(subtask);
+      }
+    }
+    
+    const started = task.enterSync();
+    
+    let ret;
+    
+    try {
+      ret = _withGlobalCurrentTaskMeta({
+        componentIdx: task.componentIdx(),
+        taskID: task.id(),
+        fn: () => rsc0.clone(),
+      })
+      ;
+    } catch (err) {
+      
+      _debugLog('[Instruction::CallInterface] error during sync call', {
+        taskID: task.id(),
+        subtaskID: currentSubtask?.id(),
+        err,
+      });
+      task.setErrored(err);
+      task.reject(err);
+      task.exit();
+      throw err;
+      
+    }
+    
+    for (const rsc of curResourceBorrows) {
+      rsc[symbolRscHandle] = undefined;
+    }
+    curResourceBorrows = [];
+    
+    if (!(ret instanceof Memory)) {
+      throw new TypeError('Resource error: Not a valid \"Memory\" resource.');
+    }
+    var handle3 = ret[symbolRscHandle];
+    if (!handle3) {
+      const rep = ret[symbolRscRep] || ++captureCnt2;
+      captureTable2.set(rep, ret);
+      handle3 = rscTableCreateOwn(handleTable2, rep);
+    }
+    
+    _debugLog('[iface="bytecodealliance:wasmtime/debuggee@44.0.0", function="[method]memory.clone"][Instruction::Return]', {
+      funcName: '[method]memory.clone',
+      paramCount: 1,
+      async: false,
+      postReturn: false
+    });
+    task.resolve([handle3]);
+    task.exit();
+    return handle3;
+  }
+  _trampoline23.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#clone';
+  
+  const _trampoline24 = function(arg0) {
+    var handle1 = arg0;
+    
+    var rep2 = handleTable2[(handle1 << 1) + 1] & ~T_FLAG;
+    var rsc0 = captureTable2.get(rep2);
+    if (!rsc0) {
+      rsc0 = Object.create(Memory.prototype);
+      Object.defineProperty(rsc0, symbolRscHandle, { writable: true, value: handle1});
+      Object.defineProperty(rsc0, symbolRscRep, { writable: true, value: rep2});
+    }
+    
+    curResourceBorrows.push(rsc0);
+    _debugLog('[iface="bytecodealliance:wasmtime/debuggee@44.0.0", function="[method]memory.unique-id"] [Instruction::CallInterface] (sync, @ enter)');
+    const hostProvided = true;
+    
+    let parentTask;
+    let task;
+    let subtask;
+    
+    const createTask = () => {
+      const results = createNewCurrentTask({
+        componentIdx: -1,
+        isAsync: false,
+        entryFnName: 'uniqueId',
+        getCallbackFn: () => null,
+        callbackFnName: null,
+        errHandling: 'none',
+        callingWasmExport: false,
+      });
+      task = results[0];
+    };
+    
+    taskCreation: {
+      parentTask = getCurrentTask(
+      0,
+      _getGlobalCurrentTaskMeta(0)?.taskID,
+      )?.task;
+      
+      if (!parentTask) {
+        createTask();
+        break taskCreation;
+      }
+      
+      createTask();
+      
+      if (hostProvided) {
+        subtask = parentTask.getLatestSubtask();
+        if (!subtask) {
+          throw new Error(`Missing subtask (in parent task [${parentTask.id()}]) for host import, has the import been lowered? (ensure asyncImports are set properly)`);
+        }
+        task.setParentSubtask(subtask);
+      }
+    }
+    
+    const started = task.enterSync();
+    
+    let ret;
+    
+    try {
+      ret = _withGlobalCurrentTaskMeta({
+        componentIdx: task.componentIdx(),
+        taskID: task.id(),
+        fn: () => rsc0.uniqueId(),
+      })
+      ;
+    } catch (err) {
+      
+      _debugLog('[Instruction::CallInterface] error during sync call', {
+        taskID: task.id(),
+        subtaskID: currentSubtask?.id(),
+        err,
+      });
+      task.setErrored(err);
+      task.reject(err);
+      task.exit();
+      throw err;
+      
+    }
+    
+    for (const rsc of curResourceBorrows) {
+      rsc[symbolRscHandle] = undefined;
+    }
+    curResourceBorrows = [];
+    _debugLog('[iface="bytecodealliance:wasmtime/debuggee@44.0.0", function="[method]memory.unique-id"][Instruction::Return]', {
+      funcName: '[method]memory.unique-id',
+      paramCount: 1,
+      async: false,
+      postReturn: false
+    });
+    task.resolve([toUint64(ret)]);
+    task.exit();
+    return toUint64(ret);
+  }
+  _trampoline24.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#uniqueId';
   
   const _trampoline25 = function(arg0) {
     var handle1 = arg0;
@@ -9149,131 +9149,6 @@ _trampoline55.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#unwrapV128';
 const _trampoline56 = function(arg0, arg1) {
   var handle1 = arg0;
   
-  var rep2 = handleTable5[(handle1 << 1) + 1] & ~T_FLAG;
-  var rsc0 = captureTable5.get(rep2);
-  if (!rsc0) {
-    rsc0 = Object.create(Module.prototype);
-    Object.defineProperty(rsc0, symbolRscHandle, { writable: true, value: handle1});
-    Object.defineProperty(rsc0, symbolRscRep, { writable: true, value: rep2});
-  }
-  
-  curResourceBorrows.push(rsc0);
-  _debugLog('[iface="bytecodealliance:wasmtime/debuggee@44.0.0", function="[method]module.bytecode"] [Instruction::CallInterface] (sync, @ enter)');
-  const hostProvided = true;
-  
-  let parentTask;
-  let task;
-  let subtask;
-  
-  const createTask = () => {
-    const results = createNewCurrentTask({
-      componentIdx: -1,
-      isAsync: false,
-      entryFnName: 'bytecode',
-      getCallbackFn: () => null,
-      callbackFnName: null,
-      errHandling: 'none',
-      callingWasmExport: false,
-    });
-    task = results[0];
-  };
-  
-  taskCreation: {
-    parentTask = getCurrentTask(
-    0,
-    _getGlobalCurrentTaskMeta(0)?.taskID,
-    )?.task;
-    
-    if (!parentTask) {
-      createTask();
-      break taskCreation;
-    }
-    
-    createTask();
-    
-    if (hostProvided) {
-      subtask = parentTask.getLatestSubtask();
-      if (!subtask) {
-        throw new Error(`Missing subtask (in parent task [${parentTask.id()}]) for host import, has the import been lowered? (ensure asyncImports are set properly)`);
-      }
-      task.setParentSubtask(subtask);
-    }
-  }
-  
-  const started = task.enterSync();
-  
-  let ret;
-  
-  try {
-    ret = _withGlobalCurrentTaskMeta({
-      componentIdx: task.componentIdx(),
-      taskID: task.id(),
-      fn: () => rsc0.bytecode(),
-    })
-    ;
-  } catch (err) {
-    
-    _debugLog('[Instruction::CallInterface] error during sync call', {
-      taskID: task.id(),
-      subtaskID: currentSubtask?.id(),
-      err,
-    });
-    task.setErrored(err);
-    task.reject(err);
-    task.exit();
-    throw err;
-    
-  }
-  
-  for (const rsc of curResourceBorrows) {
-    rsc[symbolRscHandle] = undefined;
-  }
-  curResourceBorrows = [];
-  var variant4 = ret;
-  if (variant4 === null || variant4=== undefined) {
-    dataView(memory0).setInt8(arg1 + 0, 0, true);
-  } else {
-    const e = variant4;
-    dataView(memory0).setInt8(arg1 + 0, 1, true);
-    var val3 = e;
-    var len3 = Array.isArray(val3) ? val3.length : val3.byteLength;
-    var ptr3 = realloc0(0, 0, 1, len3 * 1);
-    
-    let valData3;
-    const valLenBytes3 = len3 * 1;
-    if (Array.isArray(val3)) {
-      // Regular array likely containing numbers, write values to memory
-      let offset = 0;
-      const dv3 = new DataView(memory0.buffer);
-      for (const v of val3) {
-        _requireValidNumericPrimitive.bind(null, 'u8')(v);
-        dv3.setUint8(ptr3+ offset, v, true);
-        offset += 1;
-      }
-    } else {
-      // TypedArray / ArrayBuffer-like, direct copy
-      valData3 = new Uint8Array(val3.buffer || val3, val3.byteOffset, valLenBytes3);
-      const out3 = new Uint8Array(memory0.buffer, ptr3, valLenBytes3);
-      out3.set(valData3);
-    }
-    
-    dataView(memory0).setUint32(arg1 + 8, len3, true);
-    dataView(memory0).setUint32(arg1 + 4, ptr3, true);
-  }
-  _debugLog('[iface="bytecodealliance:wasmtime/debuggee@44.0.0", function="[method]module.bytecode"][Instruction::Return]', {
-    funcName: '[method]module.bytecode',
-    paramCount: 0,
-    async: false,
-    postReturn: false
-  });
-  task.resolve([ret]);
-  task.exit();
-}
-_trampoline56.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#bytecode';
-
-const _trampoline57 = function(arg0, arg1) {
-  var handle1 = arg0;
-  
   var rep2 = handleTable3[(handle1 << 1) + 1] & ~T_FLAG;
   var rsc0 = captureTable3.get(rep2);
   if (!rsc0) {
@@ -9383,9 +9258,9 @@ const _trampoline57 = function(arg0, arg1) {
   task.resolve([ret]);
   task.exit();
 }
-_trampoline57.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#allModules';
+_trampoline56.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#allModules';
 
-const _trampoline58 = function(arg0, arg1) {
+const _trampoline57 = function(arg0, arg1) {
   var handle1 = arg0;
   
   var rep2 = handleTable3[(handle1 << 1) + 1] & ~T_FLAG;
@@ -9497,7 +9372,7 @@ const _trampoline58 = function(arg0, arg1) {
   task.resolve([ret]);
   task.exit();
 }
-_trampoline58.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#allInstances';
+_trampoline57.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#allInstances';
 
 const handleTable10 = [T_FLAG, 0];
 handleTable10._createdReps = new Set();
@@ -9526,7 +9401,7 @@ let captureCnt9= 0;
 
 HANDLE_TABLES[9] = handleTable9;
 
-const _trampoline59 = function(arg0, arg1, arg2, arg3, arg4, arg5) {
+const _trampoline58 = function(arg0, arg1, arg2, arg3, arg4, arg5) {
   var handle1 = arg0;
   
   var rep2 = handleTable3[(handle1 << 1) + 1] & ~T_FLAG;
@@ -9736,9 +9611,9 @@ const _trampoline59 = function(arg0, arg1, arg2, arg3, arg4, arg5) {
   task.exit();
   return handle18;
 }
-_trampoline59.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#singleStep';
+_trampoline58.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#singleStep';
 
-const _trampoline60 = function(arg0, arg1, arg2, arg3, arg4) {
+const _trampoline59 = function(arg0, arg1, arg2, arg3, arg4) {
   var handle1 = arg0;
   
   var rep2 = handleTable3[(handle1 << 1) + 1] & ~T_FLAG;
@@ -9948,7 +9823,7 @@ const _trampoline60 = function(arg0, arg1, arg2, arg3, arg4) {
   task.exit();
   return handle18;
 }
-_trampoline60.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#continue';
+_trampoline59.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#continue';
 
 const handleTable4 = [T_FLAG, 0];
 handleTable4._createdReps = new Set();
@@ -9959,7 +9834,7 @@ let captureCnt4= 0;
 
 HANDLE_TABLES[4] = handleTable4;
 
-const _trampoline61 = function(arg0, arg1, arg2) {
+const _trampoline60 = function(arg0, arg1, arg2) {
   var handle1 = arg0;
   
   var rep2 = handleTable3[(handle1 << 1) + 1] & ~T_FLAG;
@@ -10071,9 +9946,9 @@ const _trampoline61 = function(arg0, arg1, arg2) {
   task.resolve([ret]);
   task.exit();
 }
-_trampoline61.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#exitFrames';
+_trampoline60.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#exitFrames';
 
-const _trampoline62 = function(arg0, arg1, arg2) {
+const _trampoline61 = function(arg0, arg1, arg2) {
   var handle1 = arg0;
   
   var rep2 = handleTable9[(handle1 << 1) + 1] & ~T_FLAG;
@@ -10182,9 +10057,15 @@ switch (variant11.tag) {
         dataView(memory0).setInt8(arg2 + 4, 3, true);
         break;
       }
-      case 'exception': {
+      case 'synchronized': {
         const e = variant9.val;
         dataView(memory0).setInt8(arg2 + 4, 4, true);
+        dataView(memory0).setInt32(arg2 + 8, toUint32(e), true);
+        break;
+      }
+      case 'exception': {
+        const e = variant9.val;
+        dataView(memory0).setInt8(arg2 + 4, 5, true);
         
         if (!(e instanceof WasmException)) {
           throw new TypeError('Resource error: Not a valid \"WasmException\" resource.');
@@ -10201,7 +10082,7 @@ switch (variant11.tag) {
       }
       case 'injected-call-return': {
         const e = variant9.val;
-        dataView(memory0).setInt8(arg2 + 4, 5, true);
+        dataView(memory0).setInt8(arg2 + 4, 6, true);
         var vec8 = e;
         var len8 = vec8.length;
         var result8 = realloc0(0, 0, 4, len8 * 4);
@@ -10311,9 +10192,9 @@ _debugLog('[iface="bytecodealliance:wasmtime/debuggee@44.0.0", function="[static
 task.resolve([ret]);
 task.exit();
 }
-_trampoline62.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#EventFuture.finish';
+_trampoline61.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#EventFuture.finish';
 
-const _trampoline63 = function(arg0, arg1, arg2, arg3) {
+const _trampoline62 = function(arg0, arg1, arg2, arg3) {
   var handle1 = arg0;
   
   var rep2 = handleTable7[(handle1 << 1) + 1] & ~T_FLAG;
@@ -10496,7 +10377,7 @@ _debugLog('[iface="bytecodealliance:wasmtime/debuggee@44.0.0", function="[method
 task.resolve([ret]);
 task.exit();
 }
-_trampoline63.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#getMemory';
+_trampoline62.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#getMemory';
 
 const handleTable8 = [T_FLAG, 0];
 handleTable8._createdReps = new Set();
@@ -10507,7 +10388,7 @@ let captureCnt8= 0;
 
 HANDLE_TABLES[8] = handleTable8;
 
-const _trampoline64 = function(arg0, arg1, arg2, arg3) {
+const _trampoline63 = function(arg0, arg1, arg2, arg3) {
   var handle1 = arg0;
   
   var rep2 = handleTable7[(handle1 << 1) + 1] & ~T_FLAG;
@@ -10690,7 +10571,132 @@ _debugLog('[iface="bytecodealliance:wasmtime/debuggee@44.0.0", function="[method
 task.resolve([ret]);
 task.exit();
 }
-_trampoline64.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#getGlobal';
+_trampoline63.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#getGlobal';
+
+const _trampoline64 = function(arg0, arg1) {
+  var handle1 = arg0;
+  
+  var rep2 = handleTable5[(handle1 << 1) + 1] & ~T_FLAG;
+  var rsc0 = captureTable5.get(rep2);
+  if (!rsc0) {
+    rsc0 = Object.create(Module.prototype);
+    Object.defineProperty(rsc0, symbolRscHandle, { writable: true, value: handle1});
+    Object.defineProperty(rsc0, symbolRscRep, { writable: true, value: rep2});
+  }
+  
+  curResourceBorrows.push(rsc0);
+  _debugLog('[iface="bytecodealliance:wasmtime/debuggee@44.0.0", function="[method]module.bytecode"] [Instruction::CallInterface] (sync, @ enter)');
+  const hostProvided = true;
+  
+  let parentTask;
+  let task;
+  let subtask;
+  
+  const createTask = () => {
+    const results = createNewCurrentTask({
+      componentIdx: -1,
+      isAsync: false,
+      entryFnName: 'bytecode',
+      getCallbackFn: () => null,
+      callbackFnName: null,
+      errHandling: 'none',
+      callingWasmExport: false,
+    });
+    task = results[0];
+  };
+  
+  taskCreation: {
+    parentTask = getCurrentTask(
+    0,
+    _getGlobalCurrentTaskMeta(0)?.taskID,
+    )?.task;
+    
+    if (!parentTask) {
+      createTask();
+      break taskCreation;
+    }
+    
+    createTask();
+    
+    if (hostProvided) {
+      subtask = parentTask.getLatestSubtask();
+      if (!subtask) {
+        throw new Error(`Missing subtask (in parent task [${parentTask.id()}]) for host import, has the import been lowered? (ensure asyncImports are set properly)`);
+      }
+      task.setParentSubtask(subtask);
+    }
+  }
+  
+  const started = task.enterSync();
+  
+  let ret;
+  
+  try {
+    ret = _withGlobalCurrentTaskMeta({
+      componentIdx: task.componentIdx(),
+      taskID: task.id(),
+      fn: () => rsc0.bytecode(),
+    })
+    ;
+  } catch (err) {
+    
+    _debugLog('[Instruction::CallInterface] error during sync call', {
+      taskID: task.id(),
+      subtaskID: currentSubtask?.id(),
+      err,
+    });
+    task.setErrored(err);
+    task.reject(err);
+    task.exit();
+    throw err;
+    
+  }
+  
+  for (const rsc of curResourceBorrows) {
+    rsc[symbolRscHandle] = undefined;
+  }
+  curResourceBorrows = [];
+  var variant4 = ret;
+  if (variant4 === null || variant4=== undefined) {
+    dataView(memory0).setInt8(arg1 + 0, 0, true);
+  } else {
+    const e = variant4;
+    dataView(memory0).setInt8(arg1 + 0, 1, true);
+    var val3 = e;
+    var len3 = Array.isArray(val3) ? val3.length : val3.byteLength;
+    var ptr3 = realloc0(0, 0, 1, len3 * 1);
+    
+    let valData3;
+    const valLenBytes3 = len3 * 1;
+    if (Array.isArray(val3)) {
+      // Regular array likely containing numbers, write values to memory
+      let offset = 0;
+      const dv3 = new DataView(memory0.buffer);
+      for (const v of val3) {
+        _requireValidNumericPrimitive.bind(null, 'u8')(v);
+        dv3.setUint8(ptr3+ offset, v, true);
+        offset += 1;
+      }
+    } else {
+      // TypedArray / ArrayBuffer-like, direct copy
+      valData3 = new Uint8Array(val3.buffer || val3, val3.byteOffset, valLenBytes3);
+      const out3 = new Uint8Array(memory0.buffer, ptr3, valLenBytes3);
+      out3.set(valData3);
+    }
+    
+    dataView(memory0).setUint32(arg1 + 8, len3, true);
+    dataView(memory0).setUint32(arg1 + 4, ptr3, true);
+  }
+  _debugLog('[iface="bytecodealliance:wasmtime/debuggee@44.0.0", function="[method]module.bytecode"][Instruction::Return]', {
+    funcName: '[method]module.bytecode',
+    paramCount: 0,
+    async: false,
+    postReturn: false
+  });
+  task.resolve([ret]);
+  task.exit();
+}
+_trampoline64.fnName = 'bytecodealliance:wasmtime/debuggee@44.0.0#bytecode';
 
 const _trampoline65 = function(arg0, arg1, arg2, arg3) {
   var handle1 = arg0;
@@ -15982,47 +15988,19 @@ function trampoline17(handle) {
     }
   }
 }
-let trampoline18 = _trampoline18.manuallyAsync ? new WebAssembly.Suspending(_lowerImportBackwardsCompat.bind(
-null,
-{
-  trampolineIdx: 18,
-  componentIdx: 0,
-  isAsync: false,
-  isManualAsync: _trampoline18.manuallyAsync,
-  paramLiftFns: [_liftFlatBorrow.bind(null, 5)],
-  resultLowerFns: [_lowerFlatU64],
-  hasResultPointer: false,
-  funcTypeIsAsync: false,
-  getCallbackFn: () => null,
-  getPostReturnFn: () => null,
-  isCancellable: false,
-  memoryIdx: null,
-  stringEncoding: 'utf8',
-  getMemoryFn: () => null,
-  getReallocFn: undefined,
-  importFn: _trampoline18,
-},
-)) : _lowerImportBackwardsCompat.bind(
-null,
-{
-  trampolineIdx: 18,
-  componentIdx: 0,
-  isAsync: false,
-  isManualAsync: _trampoline18.manuallyAsync,
-  paramLiftFns: [_liftFlatBorrow.bind(null, 5)],
-  resultLowerFns: [_lowerFlatU64],
-  hasResultPointer: false,
-  funcTypeIsAsync: false,
-  getCallbackFn: () => null,
-  getPostReturnFn: () => null,
-  isCancellable: false,
-  memoryIdx: null,
-  stringEncoding: 'utf8',
-  getMemoryFn: () => null,
-  getReallocFn: undefined,
-  importFn: _trampoline18,
-},
-);
+function trampoline18(handle) {
+  const handleEntry = rscTableRemove(handleTable10, handle);
+  if (handleEntry.own) {
+    
+    const rsc = captureTable10.get(handleEntry.rep);
+    if (rsc) {
+      if (rsc[symbolDispose]) rsc[symbolDispose]();
+      captureTable10.delete(handleEntry.rep);
+    } else if (WasmFunc[symbolCabiDispose]) {
+      WasmFunc[symbolCabiDispose](handleEntry.rep);
+    }
+  }
+}
 let trampoline19 = _trampoline19.manuallyAsync ? new WebAssembly.Suspending(_lowerImportBackwardsCompat.bind(
 null,
 {
@@ -16030,7 +16008,7 @@ null,
   componentIdx: 0,
   isAsync: false,
   isManualAsync: _trampoline19.manuallyAsync,
-  paramLiftFns: [_liftFlatBorrow.bind(null, 5)],
+  paramLiftFns: [_liftFlatBorrow.bind(null, 7),_liftFlatBorrow.bind(null, 3)],
   resultLowerFns: [_lowerFlatOwn({
     componentIdx: 0,
     lowerFn: 
@@ -16066,7 +16044,7 @@ null,
   componentIdx: 0,
   isAsync: false,
   isManualAsync: _trampoline19.manuallyAsync,
-  paramLiftFns: [_liftFlatBorrow.bind(null, 5)],
+  paramLiftFns: [_liftFlatBorrow.bind(null, 7),_liftFlatBorrow.bind(null, 3)],
   resultLowerFns: [_lowerFlatOwn({
     componentIdx: 0,
     lowerFn: 
@@ -16103,8 +16081,24 @@ null,
   componentIdx: 0,
   isAsync: false,
   isManualAsync: _trampoline20.manuallyAsync,
-  paramLiftFns: [_liftFlatBorrow.bind(null, 2)],
-  resultLowerFns: [_lowerFlatU64],
+  paramLiftFns: [_liftFlatBorrow.bind(null, 5)],
+  resultLowerFns: [_lowerFlatOwn({
+    componentIdx: 0,
+    lowerFn: 
+    function lowerImportedOwnedHost_Module(obj) {
+      if (!(obj instanceof Module)) {
+        throw new TypeError('Resource error: Not a valid \"Module\" resource.');
+      }
+      let handle = obj[symbolRscHandle];
+      if (!handle) {
+        const rep = obj[symbolRscRep] || ++captureCnt5;
+        captureTable5.set(rep, obj);
+        handle = rscTableCreateOwn(handleTable5, rep);
+      }
+      return handle;
+    }
+    ,
+  })],
   hasResultPointer: false,
   funcTypeIsAsync: false,
   getCallbackFn: () => null,
@@ -16123,8 +16117,24 @@ null,
   componentIdx: 0,
   isAsync: false,
   isManualAsync: _trampoline20.manuallyAsync,
-  paramLiftFns: [_liftFlatBorrow.bind(null, 2)],
-  resultLowerFns: [_lowerFlatU64],
+  paramLiftFns: [_liftFlatBorrow.bind(null, 5)],
+  resultLowerFns: [_lowerFlatOwn({
+    componentIdx: 0,
+    lowerFn: 
+    function lowerImportedOwnedHost_Module(obj) {
+      if (!(obj instanceof Module)) {
+        throw new TypeError('Resource error: Not a valid \"Module\" resource.');
+      }
+      let handle = obj[symbolRscHandle];
+      if (!handle) {
+        const rep = obj[symbolRscRep] || ++captureCnt5;
+        captureTable5.set(rep, obj);
+        handle = rscTableCreateOwn(handleTable5, rep);
+      }
+      return handle;
+    }
+    ,
+  })],
   hasResultPointer: false,
   funcTypeIsAsync: false,
   getCallbackFn: () => null,
@@ -16144,24 +16154,8 @@ null,
   componentIdx: 0,
   isAsync: false,
   isManualAsync: _trampoline21.manuallyAsync,
-  paramLiftFns: [_liftFlatBorrow.bind(null, 2)],
-  resultLowerFns: [_lowerFlatOwn({
-    componentIdx: 0,
-    lowerFn: 
-    function lowerImportedOwnedHost_Memory(obj) {
-      if (!(obj instanceof Memory)) {
-        throw new TypeError('Resource error: Not a valid \"Memory\" resource.');
-      }
-      let handle = obj[symbolRscHandle];
-      if (!handle) {
-        const rep = obj[symbolRscRep] || ++captureCnt2;
-        captureTable2.set(rep, obj);
-        handle = rscTableCreateOwn(handleTable2, rep);
-      }
-      return handle;
-    }
-    ,
-  })],
+  paramLiftFns: [_liftFlatBorrow.bind(null, 5)],
+  resultLowerFns: [_lowerFlatU64],
   hasResultPointer: false,
   funcTypeIsAsync: false,
   getCallbackFn: () => null,
@@ -16180,24 +16174,8 @@ null,
   componentIdx: 0,
   isAsync: false,
   isManualAsync: _trampoline21.manuallyAsync,
-  paramLiftFns: [_liftFlatBorrow.bind(null, 2)],
-  resultLowerFns: [_lowerFlatOwn({
-    componentIdx: 0,
-    lowerFn: 
-    function lowerImportedOwnedHost_Memory(obj) {
-      if (!(obj instanceof Memory)) {
-        throw new TypeError('Resource error: Not a valid \"Memory\" resource.');
-      }
-      let handle = obj[symbolRscHandle];
-      if (!handle) {
-        const rep = obj[symbolRscRep] || ++captureCnt2;
-        captureTable2.set(rep, obj);
-        handle = rscTableCreateOwn(handleTable2, rep);
-      }
-      return handle;
-    }
-    ,
-  })],
+  paramLiftFns: [_liftFlatBorrow.bind(null, 5)],
+  resultLowerFns: [_lowerFlatU64],
   hasResultPointer: false,
   funcTypeIsAsync: false,
   getCallbackFn: () => null,
@@ -16258,19 +16236,19 @@ null,
   componentIdx: 0,
   isAsync: false,
   isManualAsync: _trampoline23.manuallyAsync,
-  paramLiftFns: [_liftFlatBorrow.bind(null, 7),_liftFlatBorrow.bind(null, 3)],
+  paramLiftFns: [_liftFlatBorrow.bind(null, 2)],
   resultLowerFns: [_lowerFlatOwn({
     componentIdx: 0,
     lowerFn: 
-    function lowerImportedOwnedHost_Module(obj) {
-      if (!(obj instanceof Module)) {
-        throw new TypeError('Resource error: Not a valid \"Module\" resource.');
+    function lowerImportedOwnedHost_Memory(obj) {
+      if (!(obj instanceof Memory)) {
+        throw new TypeError('Resource error: Not a valid \"Memory\" resource.');
       }
       let handle = obj[symbolRscHandle];
       if (!handle) {
-        const rep = obj[symbolRscRep] || ++captureCnt5;
-        captureTable5.set(rep, obj);
-        handle = rscTableCreateOwn(handleTable5, rep);
+        const rep = obj[symbolRscRep] || ++captureCnt2;
+        captureTable2.set(rep, obj);
+        handle = rscTableCreateOwn(handleTable2, rep);
       }
       return handle;
     }
@@ -16294,19 +16272,19 @@ null,
   componentIdx: 0,
   isAsync: false,
   isManualAsync: _trampoline23.manuallyAsync,
-  paramLiftFns: [_liftFlatBorrow.bind(null, 7),_liftFlatBorrow.bind(null, 3)],
+  paramLiftFns: [_liftFlatBorrow.bind(null, 2)],
   resultLowerFns: [_lowerFlatOwn({
     componentIdx: 0,
     lowerFn: 
-    function lowerImportedOwnedHost_Module(obj) {
-      if (!(obj instanceof Module)) {
-        throw new TypeError('Resource error: Not a valid \"Module\" resource.');
+    function lowerImportedOwnedHost_Memory(obj) {
+      if (!(obj instanceof Memory)) {
+        throw new TypeError('Resource error: Not a valid \"Memory\" resource.');
       }
       let handle = obj[symbolRscHandle];
       if (!handle) {
-        const rep = obj[symbolRscRep] || ++captureCnt5;
-        captureTable5.set(rep, obj);
-        handle = rscTableCreateOwn(handleTable5, rep);
+        const rep = obj[symbolRscRep] || ++captureCnt2;
+        captureTable2.set(rep, obj);
+        handle = rscTableCreateOwn(handleTable2, rep);
       }
       return handle;
     }
@@ -16324,19 +16302,47 @@ null,
   importFn: _trampoline23,
 },
 );
-function trampoline24(handle) {
-  const handleEntry = rscTableRemove(handleTable10, handle);
-  if (handleEntry.own) {
-    
-    const rsc = captureTable10.get(handleEntry.rep);
-    if (rsc) {
-      if (rsc[symbolDispose]) rsc[symbolDispose]();
-      captureTable10.delete(handleEntry.rep);
-    } else if (WasmFunc[symbolCabiDispose]) {
-      WasmFunc[symbolCabiDispose](handleEntry.rep);
-    }
-  }
-}
+let trampoline24 = _trampoline24.manuallyAsync ? new WebAssembly.Suspending(_lowerImportBackwardsCompat.bind(
+null,
+{
+  trampolineIdx: 24,
+  componentIdx: 0,
+  isAsync: false,
+  isManualAsync: _trampoline24.manuallyAsync,
+  paramLiftFns: [_liftFlatBorrow.bind(null, 2)],
+  resultLowerFns: [_lowerFlatU64],
+  hasResultPointer: false,
+  funcTypeIsAsync: false,
+  getCallbackFn: () => null,
+  getPostReturnFn: () => null,
+  isCancellable: false,
+  memoryIdx: null,
+  stringEncoding: 'utf8',
+  getMemoryFn: () => null,
+  getReallocFn: undefined,
+  importFn: _trampoline24,
+},
+)) : _lowerImportBackwardsCompat.bind(
+null,
+{
+  trampolineIdx: 24,
+  componentIdx: 0,
+  isAsync: false,
+  isManualAsync: _trampoline24.manuallyAsync,
+  paramLiftFns: [_liftFlatBorrow.bind(null, 2)],
+  resultLowerFns: [_lowerFlatU64],
+  hasResultPointer: false,
+  funcTypeIsAsync: false,
+  getCallbackFn: () => null,
+  getPostReturnFn: () => null,
+  isCancellable: false,
+  memoryIdx: null,
+  stringEncoding: 'utf8',
+  getMemoryFn: () => null,
+  getReallocFn: undefined,
+  importFn: _trampoline24,
+},
+);
 let trampoline25 = _trampoline25.manuallyAsync ? new WebAssembly.Suspending(_lowerImportBackwardsCompat.bind(
 null,
 {
@@ -18233,77 +18239,6 @@ null,
   componentIdx: 0,
   isAsync: false,
   isManualAsync: _trampoline56.manuallyAsync,
-  paramLiftFns: [_liftFlatBorrow.bind(null, 5)],
-  resultLowerFns: [
-  _lowerFlatOption({
-    caseMetas: [
-    [ 'none', null, 0, 0, 0 ],
-    [ 'some', _lowerFlatList({
-      elemLowerFn: _lowerFlatU8,
-      elemSize32: 1,
-      elemAlign32: 1,
-    }), 8, 4, 2],
-    ],
-    variantSize32: 12,
-    variantAlign32: 4,
-    variantPayloadOffset32: 4,
-    variantFlatCount: 3,
-  })
-  ],
-  hasResultPointer: true,
-  funcTypeIsAsync: false,
-  getCallbackFn: () => null,
-  getPostReturnFn: () => null,
-  isCancellable: false,
-  memoryIdx: 0,
-  stringEncoding: 'utf8',
-  getMemoryFn: () => memory0,
-  getReallocFn: () => realloc0,
-  importFn: _trampoline56,
-},
-)) : _lowerImportBackwardsCompat.bind(
-null,
-{
-  trampolineIdx: 56,
-  componentIdx: 0,
-  isAsync: false,
-  isManualAsync: _trampoline56.manuallyAsync,
-  paramLiftFns: [_liftFlatBorrow.bind(null, 5)],
-  resultLowerFns: [
-  _lowerFlatOption({
-    caseMetas: [
-    [ 'none', null, 0, 0, 0 ],
-    [ 'some', _lowerFlatList({
-      elemLowerFn: _lowerFlatU8,
-      elemSize32: 1,
-      elemAlign32: 1,
-    }), 8, 4, 2],
-    ],
-    variantSize32: 12,
-    variantAlign32: 4,
-    variantPayloadOffset32: 4,
-    variantFlatCount: 3,
-  })
-  ],
-  hasResultPointer: true,
-  funcTypeIsAsync: false,
-  getCallbackFn: () => null,
-  getPostReturnFn: () => null,
-  isCancellable: false,
-  memoryIdx: 0,
-  stringEncoding: 'utf8',
-  getMemoryFn: () => memory0,
-  getReallocFn: () => realloc0,
-  importFn: _trampoline56,
-},
-);
-let trampoline57 = _trampoline57.manuallyAsync ? new WebAssembly.Suspending(_lowerImportBackwardsCompat.bind(
-null,
-{
-  trampolineIdx: 57,
-  componentIdx: 0,
-  isAsync: false,
-  isManualAsync: _trampoline57.manuallyAsync,
   paramLiftFns: [_liftFlatBorrow.bind(null, 3)],
   resultLowerFns: [_lowerFlatList({
     elemLowerFn: _lowerFlatOwn({
@@ -18335,15 +18270,15 @@ null,
   stringEncoding: 'utf8',
   getMemoryFn: () => memory0,
   getReallocFn: () => realloc0,
-  importFn: _trampoline57,
+  importFn: _trampoline56,
 },
 )) : _lowerImportBackwardsCompat.bind(
 null,
 {
-  trampolineIdx: 57,
+  trampolineIdx: 56,
   componentIdx: 0,
   isAsync: false,
-  isManualAsync: _trampoline57.manuallyAsync,
+  isManualAsync: _trampoline56.manuallyAsync,
   paramLiftFns: [_liftFlatBorrow.bind(null, 3)],
   resultLowerFns: [_lowerFlatList({
     elemLowerFn: _lowerFlatOwn({
@@ -18358,6 +18293,87 @@ null,
           const rep = obj[symbolRscRep] || ++captureCnt5;
           captureTable5.set(rep, obj);
           handle = rscTableCreateOwn(handleTable5, rep);
+        }
+        return handle;
+      }
+      ,
+    }),
+    elemSize32: 4,
+    elemAlign32: 4,
+  })],
+  hasResultPointer: true,
+  funcTypeIsAsync: false,
+  getCallbackFn: () => null,
+  getPostReturnFn: () => null,
+  isCancellable: false,
+  memoryIdx: 0,
+  stringEncoding: 'utf8',
+  getMemoryFn: () => memory0,
+  getReallocFn: () => realloc0,
+  importFn: _trampoline56,
+},
+);
+let trampoline57 = _trampoline57.manuallyAsync ? new WebAssembly.Suspending(_lowerImportBackwardsCompat.bind(
+null,
+{
+  trampolineIdx: 57,
+  componentIdx: 0,
+  isAsync: false,
+  isManualAsync: _trampoline57.manuallyAsync,
+  paramLiftFns: [_liftFlatBorrow.bind(null, 3)],
+  resultLowerFns: [_lowerFlatList({
+    elemLowerFn: _lowerFlatOwn({
+      componentIdx: 0,
+      lowerFn: 
+      function lowerImportedOwnedHost_Instance(obj) {
+        if (!(obj instanceof Instance)) {
+          throw new TypeError('Resource error: Not a valid \"Instance\" resource.');
+        }
+        let handle = obj[symbolRscHandle];
+        if (!handle) {
+          const rep = obj[symbolRscRep] || ++captureCnt7;
+          captureTable7.set(rep, obj);
+          handle = rscTableCreateOwn(handleTable7, rep);
+        }
+        return handle;
+      }
+      ,
+    }),
+    elemSize32: 4,
+    elemAlign32: 4,
+  })],
+  hasResultPointer: true,
+  funcTypeIsAsync: false,
+  getCallbackFn: () => null,
+  getPostReturnFn: () => null,
+  isCancellable: false,
+  memoryIdx: 0,
+  stringEncoding: 'utf8',
+  getMemoryFn: () => memory0,
+  getReallocFn: () => realloc0,
+  importFn: _trampoline57,
+},
+)) : _lowerImportBackwardsCompat.bind(
+null,
+{
+  trampolineIdx: 57,
+  componentIdx: 0,
+  isAsync: false,
+  isManualAsync: _trampoline57.manuallyAsync,
+  paramLiftFns: [_liftFlatBorrow.bind(null, 3)],
+  resultLowerFns: [_lowerFlatList({
+    elemLowerFn: _lowerFlatOwn({
+      componentIdx: 0,
+      lowerFn: 
+      function lowerImportedOwnedHost_Instance(obj) {
+        if (!(obj instanceof Instance)) {
+          throw new TypeError('Resource error: Not a valid \"Instance\" resource.');
+        }
+        let handle = obj[symbolRscHandle];
+        if (!handle) {
+          const rep = obj[symbolRscRep] || ++captureCnt7;
+          captureTable7.set(rep, obj);
+          handle = rscTableCreateOwn(handleTable7, rep);
         }
         return handle;
       }
@@ -18385,29 +18401,117 @@ null,
   componentIdx: 0,
   isAsync: false,
   isManualAsync: _trampoline58.manuallyAsync,
-  paramLiftFns: [_liftFlatBorrow.bind(null, 3)],
-  resultLowerFns: [_lowerFlatList({
-    elemLowerFn: _lowerFlatOwn({
+  paramLiftFns: [_liftFlatBorrow.bind(null, 3),_liftFlatU32,_liftFlatVariant({
+    caseMetas: [['normal', null, 0, 0, 0],['inject-call', _liftFlatRecord({ fieldMetas: [['callee', _liftFlatOwn({
       componentIdx: 0,
-      lowerFn: 
-      function lowerImportedOwnedHost_Instance(obj) {
-        if (!(obj instanceof Instance)) {
-          throw new TypeError('Resource error: Not a valid \"Instance\" resource.');
+      className: WasmFunc,
+      createResourceFn: 
+      (handle) => {
+        const rep = handleTable10[(handle << 1) + 1] & ~T_FLAG;
+        let resourceObj = captureTable10.get(rep);
+        if (!resourceObj) {
+          resourceObj = Object.create(WasmFunc.prototype);
+          Object.defineProperty(resourceObj, symbolRscHandle, { writable: true, value: handle });
+          Object.defineProperty(resourceObj, symbolRscRep, { writable: true, value: rep });
+        } else {
+          captureTable10.delete(rep);
         }
-        let handle = obj[symbolRscHandle];
-        if (!handle) {
-          const rep = obj[symbolRscRep] || ++captureCnt7;
-          captureTable7.set(rep, obj);
-          handle = rscTableCreateOwn(handleTable7, rep);
-        }
-        return handle;
+        rscTableRemove(handleTable10, handle);
+        return resourceObj;
       }
       ,
-    }),
-    elemSize32: 4,
-    elemAlign32: 4,
+    })
+    , 4, 4],['arguments', _liftFlatList({
+      elemLiftFn: _liftFlatOwn({
+        componentIdx: 0,
+        className: WasmValue,
+        createResourceFn: 
+        (handle) => {
+          const rep = handleTable6[(handle << 1) + 1] & ~T_FLAG;
+          let resourceObj = captureTable6.get(rep);
+          if (!resourceObj) {
+            resourceObj = Object.create(WasmValue.prototype);
+            Object.defineProperty(resourceObj, symbolRscHandle, { writable: true, value: handle });
+            Object.defineProperty(resourceObj, symbolRscRep, { writable: true, value: rep });
+          } else {
+            captureTable6.delete(rep);
+          }
+          rscTableRemove(handleTable6, handle);
+          return resourceObj;
+        }
+        ,
+      })
+      ,
+      elemAlign32: 4,
+      elemSize32: 4,
+      typedArray: undefined,
+    }), 8, 4],], size32: 12, align32: 4 }), 12, 4, 3],['throw-exception', _liftFlatOwn({
+      componentIdx: 0,
+      className: WasmException,
+      createResourceFn: 
+      (handle) => {
+        const rep = handleTable1[(handle << 1) + 1] & ~T_FLAG;
+        let resourceObj = captureTable1.get(rep);
+        if (!resourceObj) {
+          resourceObj = Object.create(WasmException.prototype);
+          Object.defineProperty(resourceObj, symbolRscHandle, { writable: true, value: handle });
+          Object.defineProperty(resourceObj, symbolRscRep, { writable: true, value: rep });
+        } else {
+          captureTable1.delete(rep);
+        }
+        rscTableRemove(handleTable1, handle);
+        return resourceObj;
+      }
+      ,
+    })
+    , 4, 4, 1],['early-return', _liftFlatList({
+      elemLiftFn: _liftFlatOwn({
+        componentIdx: 0,
+        className: WasmValue,
+        createResourceFn: 
+        (handle) => {
+          const rep = handleTable6[(handle << 1) + 1] & ~T_FLAG;
+          let resourceObj = captureTable6.get(rep);
+          if (!resourceObj) {
+            resourceObj = Object.create(WasmValue.prototype);
+            Object.defineProperty(resourceObj, symbolRscHandle, { writable: true, value: handle });
+            Object.defineProperty(resourceObj, symbolRscRep, { writable: true, value: rep });
+          } else {
+            captureTable6.delete(rep);
+          }
+          rscTableRemove(handleTable6, handle);
+          return resourceObj;
+        }
+        ,
+      })
+      ,
+      elemAlign32: 4,
+      elemSize32: 4,
+      typedArray: undefined,
+    }), 8, 4, 2],],
+    variantSize32: 16,
+    variantAlign32: 4,
+    variantPayloadOffset32: 4,
+    variantFlatCount: 4,
+  } )],
+  resultLowerFns: [_lowerFlatOwn({
+    componentIdx: 0,
+    lowerFn: 
+    function lowerImportedOwnedHost_EventFuture(obj) {
+      if (!(obj instanceof EventFuture)) {
+        throw new TypeError('Resource error: Not a valid \"EventFuture\" resource.');
+      }
+      let handle = obj[symbolRscHandle];
+      if (!handle) {
+        const rep = obj[symbolRscRep] || ++captureCnt9;
+        captureTable9.set(rep, obj);
+        handle = rscTableCreateOwn(handleTable9, rep);
+      }
+      return handle;
+    }
+    ,
   })],
-  hasResultPointer: true,
+  hasResultPointer: false,
   funcTypeIsAsync: false,
   getCallbackFn: () => null,
   getPostReturnFn: () => null,
@@ -18415,7 +18519,7 @@ null,
   memoryIdx: 0,
   stringEncoding: 'utf8',
   getMemoryFn: () => memory0,
-  getReallocFn: () => realloc0,
+  getReallocFn: undefined,
   importFn: _trampoline58,
 },
 )) : _lowerImportBackwardsCompat.bind(
@@ -18425,29 +18529,117 @@ null,
   componentIdx: 0,
   isAsync: false,
   isManualAsync: _trampoline58.manuallyAsync,
-  paramLiftFns: [_liftFlatBorrow.bind(null, 3)],
-  resultLowerFns: [_lowerFlatList({
-    elemLowerFn: _lowerFlatOwn({
+  paramLiftFns: [_liftFlatBorrow.bind(null, 3),_liftFlatU32,_liftFlatVariant({
+    caseMetas: [['normal', null, 0, 0, 0],['inject-call', _liftFlatRecord({ fieldMetas: [['callee', _liftFlatOwn({
       componentIdx: 0,
-      lowerFn: 
-      function lowerImportedOwnedHost_Instance(obj) {
-        if (!(obj instanceof Instance)) {
-          throw new TypeError('Resource error: Not a valid \"Instance\" resource.');
+      className: WasmFunc,
+      createResourceFn: 
+      (handle) => {
+        const rep = handleTable10[(handle << 1) + 1] & ~T_FLAG;
+        let resourceObj = captureTable10.get(rep);
+        if (!resourceObj) {
+          resourceObj = Object.create(WasmFunc.prototype);
+          Object.defineProperty(resourceObj, symbolRscHandle, { writable: true, value: handle });
+          Object.defineProperty(resourceObj, symbolRscRep, { writable: true, value: rep });
+        } else {
+          captureTable10.delete(rep);
         }
-        let handle = obj[symbolRscHandle];
-        if (!handle) {
-          const rep = obj[symbolRscRep] || ++captureCnt7;
-          captureTable7.set(rep, obj);
-          handle = rscTableCreateOwn(handleTable7, rep);
-        }
-        return handle;
+        rscTableRemove(handleTable10, handle);
+        return resourceObj;
       }
       ,
-    }),
-    elemSize32: 4,
-    elemAlign32: 4,
+    })
+    , 4, 4],['arguments', _liftFlatList({
+      elemLiftFn: _liftFlatOwn({
+        componentIdx: 0,
+        className: WasmValue,
+        createResourceFn: 
+        (handle) => {
+          const rep = handleTable6[(handle << 1) + 1] & ~T_FLAG;
+          let resourceObj = captureTable6.get(rep);
+          if (!resourceObj) {
+            resourceObj = Object.create(WasmValue.prototype);
+            Object.defineProperty(resourceObj, symbolRscHandle, { writable: true, value: handle });
+            Object.defineProperty(resourceObj, symbolRscRep, { writable: true, value: rep });
+          } else {
+            captureTable6.delete(rep);
+          }
+          rscTableRemove(handleTable6, handle);
+          return resourceObj;
+        }
+        ,
+      })
+      ,
+      elemAlign32: 4,
+      elemSize32: 4,
+      typedArray: undefined,
+    }), 8, 4],], size32: 12, align32: 4 }), 12, 4, 3],['throw-exception', _liftFlatOwn({
+      componentIdx: 0,
+      className: WasmException,
+      createResourceFn: 
+      (handle) => {
+        const rep = handleTable1[(handle << 1) + 1] & ~T_FLAG;
+        let resourceObj = captureTable1.get(rep);
+        if (!resourceObj) {
+          resourceObj = Object.create(WasmException.prototype);
+          Object.defineProperty(resourceObj, symbolRscHandle, { writable: true, value: handle });
+          Object.defineProperty(resourceObj, symbolRscRep, { writable: true, value: rep });
+        } else {
+          captureTable1.delete(rep);
+        }
+        rscTableRemove(handleTable1, handle);
+        return resourceObj;
+      }
+      ,
+    })
+    , 4, 4, 1],['early-return', _liftFlatList({
+      elemLiftFn: _liftFlatOwn({
+        componentIdx: 0,
+        className: WasmValue,
+        createResourceFn: 
+        (handle) => {
+          const rep = handleTable6[(handle << 1) + 1] & ~T_FLAG;
+          let resourceObj = captureTable6.get(rep);
+          if (!resourceObj) {
+            resourceObj = Object.create(WasmValue.prototype);
+            Object.defineProperty(resourceObj, symbolRscHandle, { writable: true, value: handle });
+            Object.defineProperty(resourceObj, symbolRscRep, { writable: true, value: rep });
+          } else {
+            captureTable6.delete(rep);
+          }
+          rscTableRemove(handleTable6, handle);
+          return resourceObj;
+        }
+        ,
+      })
+      ,
+      elemAlign32: 4,
+      elemSize32: 4,
+      typedArray: undefined,
+    }), 8, 4, 2],],
+    variantSize32: 16,
+    variantAlign32: 4,
+    variantPayloadOffset32: 4,
+    variantFlatCount: 4,
+  } )],
+  resultLowerFns: [_lowerFlatOwn({
+    componentIdx: 0,
+    lowerFn: 
+    function lowerImportedOwnedHost_EventFuture(obj) {
+      if (!(obj instanceof EventFuture)) {
+        throw new TypeError('Resource error: Not a valid \"EventFuture\" resource.');
+      }
+      let handle = obj[symbolRscHandle];
+      if (!handle) {
+        const rep = obj[symbolRscRep] || ++captureCnt9;
+        captureTable9.set(rep, obj);
+        handle = rscTableCreateOwn(handleTable9, rep);
+      }
+      return handle;
+    }
+    ,
   })],
-  hasResultPointer: true,
+  hasResultPointer: false,
   funcTypeIsAsync: false,
   getCallbackFn: () => null,
   getPostReturnFn: () => null,
@@ -18455,7 +18647,7 @@ null,
   memoryIdx: 0,
   stringEncoding: 'utf8',
   getMemoryFn: () => memory0,
-  getReallocFn: () => realloc0,
+  getReallocFn: undefined,
   importFn: _trampoline58,
 },
 );
@@ -18466,7 +18658,7 @@ null,
   componentIdx: 0,
   isAsync: false,
   isManualAsync: _trampoline59.manuallyAsync,
-  paramLiftFns: [_liftFlatBorrow.bind(null, 3),_liftFlatU32,_liftFlatVariant({
+  paramLiftFns: [_liftFlatBorrow.bind(null, 3),_liftFlatVariant({
     caseMetas: [['normal', null, 0, 0, 0],['inject-call', _liftFlatRecord({ fieldMetas: [['callee', _liftFlatOwn({
       componentIdx: 0,
       className: WasmFunc,
@@ -18594,7 +18786,7 @@ null,
   componentIdx: 0,
   isAsync: false,
   isManualAsync: _trampoline59.manuallyAsync,
-  paramLiftFns: [_liftFlatBorrow.bind(null, 3),_liftFlatU32,_liftFlatVariant({
+  paramLiftFns: [_liftFlatBorrow.bind(null, 3),_liftFlatVariant({
     caseMetas: [['normal', null, 0, 0, 0],['inject-call', _liftFlatRecord({ fieldMetas: [['callee', _liftFlatOwn({
       componentIdx: 0,
       className: WasmFunc,
@@ -18723,263 +18915,6 @@ null,
   componentIdx: 0,
   isAsync: false,
   isManualAsync: _trampoline60.manuallyAsync,
-  paramLiftFns: [_liftFlatBorrow.bind(null, 3),_liftFlatVariant({
-    caseMetas: [['normal', null, 0, 0, 0],['inject-call', _liftFlatRecord({ fieldMetas: [['callee', _liftFlatOwn({
-      componentIdx: 0,
-      className: WasmFunc,
-      createResourceFn: 
-      (handle) => {
-        const rep = handleTable10[(handle << 1) + 1] & ~T_FLAG;
-        let resourceObj = captureTable10.get(rep);
-        if (!resourceObj) {
-          resourceObj = Object.create(WasmFunc.prototype);
-          Object.defineProperty(resourceObj, symbolRscHandle, { writable: true, value: handle });
-          Object.defineProperty(resourceObj, symbolRscRep, { writable: true, value: rep });
-        } else {
-          captureTable10.delete(rep);
-        }
-        rscTableRemove(handleTable10, handle);
-        return resourceObj;
-      }
-      ,
-    })
-    , 4, 4],['arguments', _liftFlatList({
-      elemLiftFn: _liftFlatOwn({
-        componentIdx: 0,
-        className: WasmValue,
-        createResourceFn: 
-        (handle) => {
-          const rep = handleTable6[(handle << 1) + 1] & ~T_FLAG;
-          let resourceObj = captureTable6.get(rep);
-          if (!resourceObj) {
-            resourceObj = Object.create(WasmValue.prototype);
-            Object.defineProperty(resourceObj, symbolRscHandle, { writable: true, value: handle });
-            Object.defineProperty(resourceObj, symbolRscRep, { writable: true, value: rep });
-          } else {
-            captureTable6.delete(rep);
-          }
-          rscTableRemove(handleTable6, handle);
-          return resourceObj;
-        }
-        ,
-      })
-      ,
-      elemAlign32: 4,
-      elemSize32: 4,
-      typedArray: undefined,
-    }), 8, 4],], size32: 12, align32: 4 }), 12, 4, 3],['throw-exception', _liftFlatOwn({
-      componentIdx: 0,
-      className: WasmException,
-      createResourceFn: 
-      (handle) => {
-        const rep = handleTable1[(handle << 1) + 1] & ~T_FLAG;
-        let resourceObj = captureTable1.get(rep);
-        if (!resourceObj) {
-          resourceObj = Object.create(WasmException.prototype);
-          Object.defineProperty(resourceObj, symbolRscHandle, { writable: true, value: handle });
-          Object.defineProperty(resourceObj, symbolRscRep, { writable: true, value: rep });
-        } else {
-          captureTable1.delete(rep);
-        }
-        rscTableRemove(handleTable1, handle);
-        return resourceObj;
-      }
-      ,
-    })
-    , 4, 4, 1],['early-return', _liftFlatList({
-      elemLiftFn: _liftFlatOwn({
-        componentIdx: 0,
-        className: WasmValue,
-        createResourceFn: 
-        (handle) => {
-          const rep = handleTable6[(handle << 1) + 1] & ~T_FLAG;
-          let resourceObj = captureTable6.get(rep);
-          if (!resourceObj) {
-            resourceObj = Object.create(WasmValue.prototype);
-            Object.defineProperty(resourceObj, symbolRscHandle, { writable: true, value: handle });
-            Object.defineProperty(resourceObj, symbolRscRep, { writable: true, value: rep });
-          } else {
-            captureTable6.delete(rep);
-          }
-          rscTableRemove(handleTable6, handle);
-          return resourceObj;
-        }
-        ,
-      })
-      ,
-      elemAlign32: 4,
-      elemSize32: 4,
-      typedArray: undefined,
-    }), 8, 4, 2],],
-    variantSize32: 16,
-    variantAlign32: 4,
-    variantPayloadOffset32: 4,
-    variantFlatCount: 4,
-  } )],
-  resultLowerFns: [_lowerFlatOwn({
-    componentIdx: 0,
-    lowerFn: 
-    function lowerImportedOwnedHost_EventFuture(obj) {
-      if (!(obj instanceof EventFuture)) {
-        throw new TypeError('Resource error: Not a valid \"EventFuture\" resource.');
-      }
-      let handle = obj[symbolRscHandle];
-      if (!handle) {
-        const rep = obj[symbolRscRep] || ++captureCnt9;
-        captureTable9.set(rep, obj);
-        handle = rscTableCreateOwn(handleTable9, rep);
-      }
-      return handle;
-    }
-    ,
-  })],
-  hasResultPointer: false,
-  funcTypeIsAsync: false,
-  getCallbackFn: () => null,
-  getPostReturnFn: () => null,
-  isCancellable: false,
-  memoryIdx: 0,
-  stringEncoding: 'utf8',
-  getMemoryFn: () => memory0,
-  getReallocFn: undefined,
-  importFn: _trampoline60,
-},
-)) : _lowerImportBackwardsCompat.bind(
-null,
-{
-  trampolineIdx: 60,
-  componentIdx: 0,
-  isAsync: false,
-  isManualAsync: _trampoline60.manuallyAsync,
-  paramLiftFns: [_liftFlatBorrow.bind(null, 3),_liftFlatVariant({
-    caseMetas: [['normal', null, 0, 0, 0],['inject-call', _liftFlatRecord({ fieldMetas: [['callee', _liftFlatOwn({
-      componentIdx: 0,
-      className: WasmFunc,
-      createResourceFn: 
-      (handle) => {
-        const rep = handleTable10[(handle << 1) + 1] & ~T_FLAG;
-        let resourceObj = captureTable10.get(rep);
-        if (!resourceObj) {
-          resourceObj = Object.create(WasmFunc.prototype);
-          Object.defineProperty(resourceObj, symbolRscHandle, { writable: true, value: handle });
-          Object.defineProperty(resourceObj, symbolRscRep, { writable: true, value: rep });
-        } else {
-          captureTable10.delete(rep);
-        }
-        rscTableRemove(handleTable10, handle);
-        return resourceObj;
-      }
-      ,
-    })
-    , 4, 4],['arguments', _liftFlatList({
-      elemLiftFn: _liftFlatOwn({
-        componentIdx: 0,
-        className: WasmValue,
-        createResourceFn: 
-        (handle) => {
-          const rep = handleTable6[(handle << 1) + 1] & ~T_FLAG;
-          let resourceObj = captureTable6.get(rep);
-          if (!resourceObj) {
-            resourceObj = Object.create(WasmValue.prototype);
-            Object.defineProperty(resourceObj, symbolRscHandle, { writable: true, value: handle });
-            Object.defineProperty(resourceObj, symbolRscRep, { writable: true, value: rep });
-          } else {
-            captureTable6.delete(rep);
-          }
-          rscTableRemove(handleTable6, handle);
-          return resourceObj;
-        }
-        ,
-      })
-      ,
-      elemAlign32: 4,
-      elemSize32: 4,
-      typedArray: undefined,
-    }), 8, 4],], size32: 12, align32: 4 }), 12, 4, 3],['throw-exception', _liftFlatOwn({
-      componentIdx: 0,
-      className: WasmException,
-      createResourceFn: 
-      (handle) => {
-        const rep = handleTable1[(handle << 1) + 1] & ~T_FLAG;
-        let resourceObj = captureTable1.get(rep);
-        if (!resourceObj) {
-          resourceObj = Object.create(WasmException.prototype);
-          Object.defineProperty(resourceObj, symbolRscHandle, { writable: true, value: handle });
-          Object.defineProperty(resourceObj, symbolRscRep, { writable: true, value: rep });
-        } else {
-          captureTable1.delete(rep);
-        }
-        rscTableRemove(handleTable1, handle);
-        return resourceObj;
-      }
-      ,
-    })
-    , 4, 4, 1],['early-return', _liftFlatList({
-      elemLiftFn: _liftFlatOwn({
-        componentIdx: 0,
-        className: WasmValue,
-        createResourceFn: 
-        (handle) => {
-          const rep = handleTable6[(handle << 1) + 1] & ~T_FLAG;
-          let resourceObj = captureTable6.get(rep);
-          if (!resourceObj) {
-            resourceObj = Object.create(WasmValue.prototype);
-            Object.defineProperty(resourceObj, symbolRscHandle, { writable: true, value: handle });
-            Object.defineProperty(resourceObj, symbolRscRep, { writable: true, value: rep });
-          } else {
-            captureTable6.delete(rep);
-          }
-          rscTableRemove(handleTable6, handle);
-          return resourceObj;
-        }
-        ,
-      })
-      ,
-      elemAlign32: 4,
-      elemSize32: 4,
-      typedArray: undefined,
-    }), 8, 4, 2],],
-    variantSize32: 16,
-    variantAlign32: 4,
-    variantPayloadOffset32: 4,
-    variantFlatCount: 4,
-  } )],
-  resultLowerFns: [_lowerFlatOwn({
-    componentIdx: 0,
-    lowerFn: 
-    function lowerImportedOwnedHost_EventFuture(obj) {
-      if (!(obj instanceof EventFuture)) {
-        throw new TypeError('Resource error: Not a valid \"EventFuture\" resource.');
-      }
-      let handle = obj[symbolRscHandle];
-      if (!handle) {
-        const rep = obj[symbolRscRep] || ++captureCnt9;
-        captureTable9.set(rep, obj);
-        handle = rscTableCreateOwn(handleTable9, rep);
-      }
-      return handle;
-    }
-    ,
-  })],
-  hasResultPointer: false,
-  funcTypeIsAsync: false,
-  getCallbackFn: () => null,
-  getPostReturnFn: () => null,
-  isCancellable: false,
-  memoryIdx: 0,
-  stringEncoding: 'utf8',
-  getMemoryFn: () => memory0,
-  getReallocFn: undefined,
-  importFn: _trampoline60,
-},
-);
-let trampoline61 = _trampoline61.manuallyAsync ? new WebAssembly.Suspending(_lowerImportBackwardsCompat.bind(
-null,
-{
-  trampolineIdx: 61,
-  componentIdx: 0,
-  isAsync: false,
-  isManualAsync: _trampoline61.manuallyAsync,
   paramLiftFns: [_liftFlatBorrow.bind(null, 3),_liftFlatU32],
   resultLowerFns: [_lowerFlatList({
     elemLowerFn: _lowerFlatOwn({
@@ -19011,15 +18946,15 @@ null,
   stringEncoding: 'utf8',
   getMemoryFn: () => memory0,
   getReallocFn: () => realloc0,
-  importFn: _trampoline61,
+  importFn: _trampoline60,
 },
 )) : _lowerImportBackwardsCompat.bind(
 null,
 {
-  trampolineIdx: 61,
+  trampolineIdx: 60,
   componentIdx: 0,
   isAsync: false,
-  isManualAsync: _trampoline61.manuallyAsync,
+  isManualAsync: _trampoline60.manuallyAsync,
   paramLiftFns: [_liftFlatBorrow.bind(null, 3),_liftFlatU32],
   resultLowerFns: [_lowerFlatList({
     elemLowerFn: _lowerFlatOwn({
@@ -19042,6 +18977,207 @@ null,
     elemSize32: 4,
     elemAlign32: 4,
   })],
+  hasResultPointer: true,
+  funcTypeIsAsync: false,
+  getCallbackFn: () => null,
+  getPostReturnFn: () => null,
+  isCancellable: false,
+  memoryIdx: 0,
+  stringEncoding: 'utf8',
+  getMemoryFn: () => memory0,
+  getReallocFn: () => realloc0,
+  importFn: _trampoline60,
+},
+);
+let trampoline61 = _trampoline61.manuallyAsync ? new WebAssembly.Suspending(_lowerImportBackwardsCompat.bind(
+null,
+{
+  trampolineIdx: 61,
+  componentIdx: 0,
+  isAsync: false,
+  isManualAsync: _trampoline61.manuallyAsync,
+  paramLiftFns: [_liftFlatOwn({
+    componentIdx: 0,
+    className: EventFuture,
+    createResourceFn: 
+    (handle) => {
+      const rep = handleTable9[(handle << 1) + 1] & ~T_FLAG;
+      let resourceObj = captureTable9.get(rep);
+      if (!resourceObj) {
+        resourceObj = Object.create(EventFuture.prototype);
+        Object.defineProperty(resourceObj, symbolRscHandle, { writable: true, value: handle });
+        Object.defineProperty(resourceObj, symbolRscRep, { writable: true, value: rep });
+      } else {
+        captureTable9.delete(rep);
+      }
+      rscTableRemove(handleTable9, handle);
+      return resourceObj;
+    }
+    ,
+  })
+  ,_liftFlatBorrow.bind(null, 3)],
+  resultLowerFns: [
+  _lowerFlatResult({
+    caseMetas: [
+    [ 'ok', _lowerFlatVariant({
+      caseMetas: [[ 'complete', null, 0, 0, 0 ],[ 'trap', null, 0, 0, 0 ],[ 'breakpoint', null, 0, 0, 0 ],[ 'interrupted', null, 0, 0, 0 ],[ 'synchronized', _lowerFlatU32, 4, 4, 1 ],[ 'exception', _lowerFlatOwn({
+        componentIdx: 0,
+        lowerFn: 
+        function lowerImportedOwnedHost_WasmException(obj) {
+          if (!(obj instanceof WasmException)) {
+            throw new TypeError('Resource error: Not a valid \"WasmException\" resource.');
+          }
+          let handle = obj[symbolRscHandle];
+          if (!handle) {
+            const rep = obj[symbolRscRep] || ++captureCnt1;
+            captureTable1.set(rep, obj);
+            handle = rscTableCreateOwn(handleTable1, rep);
+          }
+          return handle;
+        }
+        ,
+      }), 4, 4, 1 ],[ 'injected-call-return', _lowerFlatList({
+        elemLowerFn: _lowerFlatOwn({
+          componentIdx: 0,
+          lowerFn: 
+          function lowerImportedOwnedHost_WasmValue(obj) {
+            if (!(obj instanceof WasmValue)) {
+              throw new TypeError('Resource error: Not a valid \"WasmValue\" resource.');
+            }
+            let handle = obj[symbolRscHandle];
+            if (!handle) {
+              const rep = obj[symbolRscRep] || ++captureCnt6;
+              captureTable6.set(rep, obj);
+              handle = rscTableCreateOwn(handleTable6, rep);
+            }
+            return handle;
+          }
+          ,
+        }),
+        elemSize32: 4,
+        elemAlign32: 4,
+      }), 8, 4, 2 ],],
+      variantSize32: 12,
+      variantAlign32: 4,
+      variantPayloadOffset32: 4,
+      variantFlatCount: 3,
+    } ), 16, 4, 4 ],
+    [ 'err', 
+    _lowerFlatEnum({
+      caseMetas: [['invalid-entity', null, 1, 1, 1],['invalid-pc', null, 1, 1, 1],['invalid-frame', null, 1, 1, 1],['unsupported-type', null, 1, 1, 1],['mismatched-type', null, 1, 1, 1],['non-wasm-frame', null, 1, 1, 1],['alloc-failure', null, 1, 1, 1],['breakpoint-update', null, 1, 1, 1],['read-only', null, 1, 1, 1],['out-of-bounds', null, 1, 1, 1],['memory-grow-failure', null, 1, 1, 1],['execution-trap', null, 1, 1, 1],],
+      variantSize32: 1,
+      variantAlign32: 1,
+      variantPayloadOffset32: 1,
+      variantFlatCount: 1,
+    })
+    , 16, 4, 4 ],
+    ],
+    variantSize32: 16,
+    variantAlign32: 4,
+    variantPayloadOffset32: 4,
+    variantFlatCount: 4,
+  })
+  ],
+  hasResultPointer: true,
+  funcTypeIsAsync: false,
+  getCallbackFn: () => null,
+  getPostReturnFn: () => null,
+  isCancellable: false,
+  memoryIdx: 0,
+  stringEncoding: 'utf8',
+  getMemoryFn: () => memory0,
+  getReallocFn: () => realloc0,
+  importFn: _trampoline61,
+},
+)) : _lowerImportBackwardsCompat.bind(
+null,
+{
+  trampolineIdx: 61,
+  componentIdx: 0,
+  isAsync: false,
+  isManualAsync: _trampoline61.manuallyAsync,
+  paramLiftFns: [_liftFlatOwn({
+    componentIdx: 0,
+    className: EventFuture,
+    createResourceFn: 
+    (handle) => {
+      const rep = handleTable9[(handle << 1) + 1] & ~T_FLAG;
+      let resourceObj = captureTable9.get(rep);
+      if (!resourceObj) {
+        resourceObj = Object.create(EventFuture.prototype);
+        Object.defineProperty(resourceObj, symbolRscHandle, { writable: true, value: handle });
+        Object.defineProperty(resourceObj, symbolRscRep, { writable: true, value: rep });
+      } else {
+        captureTable9.delete(rep);
+      }
+      rscTableRemove(handleTable9, handle);
+      return resourceObj;
+    }
+    ,
+  })
+  ,_liftFlatBorrow.bind(null, 3)],
+  resultLowerFns: [
+  _lowerFlatResult({
+    caseMetas: [
+    [ 'ok', _lowerFlatVariant({
+      caseMetas: [[ 'complete', null, 0, 0, 0 ],[ 'trap', null, 0, 0, 0 ],[ 'breakpoint', null, 0, 0, 0 ],[ 'interrupted', null, 0, 0, 0 ],[ 'synchronized', _lowerFlatU32, 4, 4, 1 ],[ 'exception', _lowerFlatOwn({
+        componentIdx: 0,
+        lowerFn: 
+        function lowerImportedOwnedHost_WasmException(obj) {
+          if (!(obj instanceof WasmException)) {
+            throw new TypeError('Resource error: Not a valid \"WasmException\" resource.');
+          }
+          let handle = obj[symbolRscHandle];
+          if (!handle) {
+            const rep = obj[symbolRscRep] || ++captureCnt1;
+            captureTable1.set(rep, obj);
+            handle = rscTableCreateOwn(handleTable1, rep);
+          }
+          return handle;
+        }
+        ,
+      }), 4, 4, 1 ],[ 'injected-call-return', _lowerFlatList({
+        elemLowerFn: _lowerFlatOwn({
+          componentIdx: 0,
+          lowerFn: 
+          function lowerImportedOwnedHost_WasmValue(obj) {
+            if (!(obj instanceof WasmValue)) {
+              throw new TypeError('Resource error: Not a valid \"WasmValue\" resource.');
+            }
+            let handle = obj[symbolRscHandle];
+            if (!handle) {
+              const rep = obj[symbolRscRep] || ++captureCnt6;
+              captureTable6.set(rep, obj);
+              handle = rscTableCreateOwn(handleTable6, rep);
+            }
+            return handle;
+          }
+          ,
+        }),
+        elemSize32: 4,
+        elemAlign32: 4,
+      }), 8, 4, 2 ],],
+      variantSize32: 12,
+      variantAlign32: 4,
+      variantPayloadOffset32: 4,
+      variantFlatCount: 3,
+    } ), 16, 4, 4 ],
+    [ 'err', 
+    _lowerFlatEnum({
+      caseMetas: [['invalid-entity', null, 1, 1, 1],['invalid-pc', null, 1, 1, 1],['invalid-frame', null, 1, 1, 1],['unsupported-type', null, 1, 1, 1],['mismatched-type', null, 1, 1, 1],['non-wasm-frame', null, 1, 1, 1],['alloc-failure', null, 1, 1, 1],['breakpoint-update', null, 1, 1, 1],['read-only', null, 1, 1, 1],['out-of-bounds', null, 1, 1, 1],['memory-grow-failure', null, 1, 1, 1],['execution-trap', null, 1, 1, 1],],
+      variantSize32: 1,
+      variantAlign32: 1,
+      variantPayloadOffset32: 1,
+      variantFlatCount: 1,
+    })
+    , 16, 4, 4 ],
+    ],
+    variantSize32: 16,
+    variantAlign32: 4,
+    variantPayloadOffset32: 4,
+    variantFlatCount: 4,
+  })
+  ],
   hasResultPointer: true,
   funcTypeIsAsync: false,
   getCallbackFn: () => null,
@@ -19061,207 +19197,6 @@ null,
   componentIdx: 0,
   isAsync: false,
   isManualAsync: _trampoline62.manuallyAsync,
-  paramLiftFns: [_liftFlatOwn({
-    componentIdx: 0,
-    className: EventFuture,
-    createResourceFn: 
-    (handle) => {
-      const rep = handleTable9[(handle << 1) + 1] & ~T_FLAG;
-      let resourceObj = captureTable9.get(rep);
-      if (!resourceObj) {
-        resourceObj = Object.create(EventFuture.prototype);
-        Object.defineProperty(resourceObj, symbolRscHandle, { writable: true, value: handle });
-        Object.defineProperty(resourceObj, symbolRscRep, { writable: true, value: rep });
-      } else {
-        captureTable9.delete(rep);
-      }
-      rscTableRemove(handleTable9, handle);
-      return resourceObj;
-    }
-    ,
-  })
-  ,_liftFlatBorrow.bind(null, 3)],
-  resultLowerFns: [
-  _lowerFlatResult({
-    caseMetas: [
-    [ 'ok', _lowerFlatVariant({
-      caseMetas: [[ 'complete', null, 0, 0, 0 ],[ 'trap', null, 0, 0, 0 ],[ 'breakpoint', null, 0, 0, 0 ],[ 'interrupted', null, 0, 0, 0 ],[ 'exception', _lowerFlatOwn({
-        componentIdx: 0,
-        lowerFn: 
-        function lowerImportedOwnedHost_WasmException(obj) {
-          if (!(obj instanceof WasmException)) {
-            throw new TypeError('Resource error: Not a valid \"WasmException\" resource.');
-          }
-          let handle = obj[symbolRscHandle];
-          if (!handle) {
-            const rep = obj[symbolRscRep] || ++captureCnt1;
-            captureTable1.set(rep, obj);
-            handle = rscTableCreateOwn(handleTable1, rep);
-          }
-          return handle;
-        }
-        ,
-      }), 4, 4, 1 ],[ 'injected-call-return', _lowerFlatList({
-        elemLowerFn: _lowerFlatOwn({
-          componentIdx: 0,
-          lowerFn: 
-          function lowerImportedOwnedHost_WasmValue(obj) {
-            if (!(obj instanceof WasmValue)) {
-              throw new TypeError('Resource error: Not a valid \"WasmValue\" resource.');
-            }
-            let handle = obj[symbolRscHandle];
-            if (!handle) {
-              const rep = obj[symbolRscRep] || ++captureCnt6;
-              captureTable6.set(rep, obj);
-              handle = rscTableCreateOwn(handleTable6, rep);
-            }
-            return handle;
-          }
-          ,
-        }),
-        elemSize32: 4,
-        elemAlign32: 4,
-      }), 8, 4, 2 ],],
-      variantSize32: 12,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
-      variantFlatCount: 3,
-    } ), 16, 4, 4 ],
-    [ 'err', 
-    _lowerFlatEnum({
-      caseMetas: [['invalid-entity', null, 1, 1, 1],['invalid-pc', null, 1, 1, 1],['invalid-frame', null, 1, 1, 1],['unsupported-type', null, 1, 1, 1],['mismatched-type', null, 1, 1, 1],['non-wasm-frame', null, 1, 1, 1],['alloc-failure', null, 1, 1, 1],['breakpoint-update', null, 1, 1, 1],['read-only', null, 1, 1, 1],['out-of-bounds', null, 1, 1, 1],['memory-grow-failure', null, 1, 1, 1],['execution-trap', null, 1, 1, 1],],
-      variantSize32: 1,
-      variantAlign32: 1,
-      variantPayloadOffset32: 1,
-      variantFlatCount: 1,
-    })
-    , 16, 4, 4 ],
-    ],
-    variantSize32: 16,
-    variantAlign32: 4,
-    variantPayloadOffset32: 4,
-    variantFlatCount: 4,
-  })
-  ],
-  hasResultPointer: true,
-  funcTypeIsAsync: false,
-  getCallbackFn: () => null,
-  getPostReturnFn: () => null,
-  isCancellable: false,
-  memoryIdx: 0,
-  stringEncoding: 'utf8',
-  getMemoryFn: () => memory0,
-  getReallocFn: () => realloc0,
-  importFn: _trampoline62,
-},
-)) : _lowerImportBackwardsCompat.bind(
-null,
-{
-  trampolineIdx: 62,
-  componentIdx: 0,
-  isAsync: false,
-  isManualAsync: _trampoline62.manuallyAsync,
-  paramLiftFns: [_liftFlatOwn({
-    componentIdx: 0,
-    className: EventFuture,
-    createResourceFn: 
-    (handle) => {
-      const rep = handleTable9[(handle << 1) + 1] & ~T_FLAG;
-      let resourceObj = captureTable9.get(rep);
-      if (!resourceObj) {
-        resourceObj = Object.create(EventFuture.prototype);
-        Object.defineProperty(resourceObj, symbolRscHandle, { writable: true, value: handle });
-        Object.defineProperty(resourceObj, symbolRscRep, { writable: true, value: rep });
-      } else {
-        captureTable9.delete(rep);
-      }
-      rscTableRemove(handleTable9, handle);
-      return resourceObj;
-    }
-    ,
-  })
-  ,_liftFlatBorrow.bind(null, 3)],
-  resultLowerFns: [
-  _lowerFlatResult({
-    caseMetas: [
-    [ 'ok', _lowerFlatVariant({
-      caseMetas: [[ 'complete', null, 0, 0, 0 ],[ 'trap', null, 0, 0, 0 ],[ 'breakpoint', null, 0, 0, 0 ],[ 'interrupted', null, 0, 0, 0 ],[ 'exception', _lowerFlatOwn({
-        componentIdx: 0,
-        lowerFn: 
-        function lowerImportedOwnedHost_WasmException(obj) {
-          if (!(obj instanceof WasmException)) {
-            throw new TypeError('Resource error: Not a valid \"WasmException\" resource.');
-          }
-          let handle = obj[symbolRscHandle];
-          if (!handle) {
-            const rep = obj[symbolRscRep] || ++captureCnt1;
-            captureTable1.set(rep, obj);
-            handle = rscTableCreateOwn(handleTable1, rep);
-          }
-          return handle;
-        }
-        ,
-      }), 4, 4, 1 ],[ 'injected-call-return', _lowerFlatList({
-        elemLowerFn: _lowerFlatOwn({
-          componentIdx: 0,
-          lowerFn: 
-          function lowerImportedOwnedHost_WasmValue(obj) {
-            if (!(obj instanceof WasmValue)) {
-              throw new TypeError('Resource error: Not a valid \"WasmValue\" resource.');
-            }
-            let handle = obj[symbolRscHandle];
-            if (!handle) {
-              const rep = obj[symbolRscRep] || ++captureCnt6;
-              captureTable6.set(rep, obj);
-              handle = rscTableCreateOwn(handleTable6, rep);
-            }
-            return handle;
-          }
-          ,
-        }),
-        elemSize32: 4,
-        elemAlign32: 4,
-      }), 8, 4, 2 ],],
-      variantSize32: 12,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
-      variantFlatCount: 3,
-    } ), 16, 4, 4 ],
-    [ 'err', 
-    _lowerFlatEnum({
-      caseMetas: [['invalid-entity', null, 1, 1, 1],['invalid-pc', null, 1, 1, 1],['invalid-frame', null, 1, 1, 1],['unsupported-type', null, 1, 1, 1],['mismatched-type', null, 1, 1, 1],['non-wasm-frame', null, 1, 1, 1],['alloc-failure', null, 1, 1, 1],['breakpoint-update', null, 1, 1, 1],['read-only', null, 1, 1, 1],['out-of-bounds', null, 1, 1, 1],['memory-grow-failure', null, 1, 1, 1],['execution-trap', null, 1, 1, 1],],
-      variantSize32: 1,
-      variantAlign32: 1,
-      variantPayloadOffset32: 1,
-      variantFlatCount: 1,
-    })
-    , 16, 4, 4 ],
-    ],
-    variantSize32: 16,
-    variantAlign32: 4,
-    variantPayloadOffset32: 4,
-    variantFlatCount: 4,
-  })
-  ],
-  hasResultPointer: true,
-  funcTypeIsAsync: false,
-  getCallbackFn: () => null,
-  getPostReturnFn: () => null,
-  isCancellable: false,
-  memoryIdx: 0,
-  stringEncoding: 'utf8',
-  getMemoryFn: () => memory0,
-  getReallocFn: () => realloc0,
-  importFn: _trampoline62,
-},
-);
-let trampoline63 = _trampoline63.manuallyAsync ? new WebAssembly.Suspending(_lowerImportBackwardsCompat.bind(
-null,
-{
-  trampolineIdx: 63,
-  componentIdx: 0,
-  isAsync: false,
-  isManualAsync: _trampoline63.manuallyAsync,
   paramLiftFns: [_liftFlatBorrow.bind(null, 7),_liftFlatBorrow.bind(null, 3),_liftFlatU32],
   resultLowerFns: [
   _lowerFlatResult({
@@ -19308,15 +19243,15 @@ null,
   stringEncoding: 'utf8',
   getMemoryFn: () => memory0,
   getReallocFn: undefined,
-  importFn: _trampoline63,
+  importFn: _trampoline62,
 },
 )) : _lowerImportBackwardsCompat.bind(
 null,
 {
-  trampolineIdx: 63,
+  trampolineIdx: 62,
   componentIdx: 0,
   isAsync: false,
-  isManualAsync: _trampoline63.manuallyAsync,
+  isManualAsync: _trampoline62.manuallyAsync,
   paramLiftFns: [_liftFlatBorrow.bind(null, 7),_liftFlatBorrow.bind(null, 3),_liftFlatU32],
   resultLowerFns: [
   _lowerFlatResult({
@@ -19333,6 +19268,117 @@ null,
           const rep = obj[symbolRscRep] || ++captureCnt2;
           captureTable2.set(rep, obj);
           handle = rscTableCreateOwn(handleTable2, rep);
+        }
+        return handle;
+      }
+      ,
+    }), 8, 4, 4 ],
+    [ 'err', 
+    _lowerFlatEnum({
+      caseMetas: [['invalid-entity', null, 1, 1, 1],['invalid-pc', null, 1, 1, 1],['invalid-frame', null, 1, 1, 1],['unsupported-type', null, 1, 1, 1],['mismatched-type', null, 1, 1, 1],['non-wasm-frame', null, 1, 1, 1],['alloc-failure', null, 1, 1, 1],['breakpoint-update', null, 1, 1, 1],['read-only', null, 1, 1, 1],['out-of-bounds', null, 1, 1, 1],['memory-grow-failure', null, 1, 1, 1],['execution-trap', null, 1, 1, 1],],
+      variantSize32: 1,
+      variantAlign32: 1,
+      variantPayloadOffset32: 1,
+      variantFlatCount: 1,
+    })
+    , 8, 4, 4 ],
+    ],
+    variantSize32: 8,
+    variantAlign32: 4,
+    variantPayloadOffset32: 4,
+    variantFlatCount: 2,
+  })
+  ],
+  hasResultPointer: true,
+  funcTypeIsAsync: false,
+  getCallbackFn: () => null,
+  getPostReturnFn: () => null,
+  isCancellable: false,
+  memoryIdx: 0,
+  stringEncoding: 'utf8',
+  getMemoryFn: () => memory0,
+  getReallocFn: undefined,
+  importFn: _trampoline62,
+},
+);
+let trampoline63 = _trampoline63.manuallyAsync ? new WebAssembly.Suspending(_lowerImportBackwardsCompat.bind(
+null,
+{
+  trampolineIdx: 63,
+  componentIdx: 0,
+  isAsync: false,
+  isManualAsync: _trampoline63.manuallyAsync,
+  paramLiftFns: [_liftFlatBorrow.bind(null, 7),_liftFlatBorrow.bind(null, 3),_liftFlatU32],
+  resultLowerFns: [
+  _lowerFlatResult({
+    caseMetas: [
+    [ 'ok', _lowerFlatOwn({
+      componentIdx: 0,
+      lowerFn: 
+      function lowerImportedOwnedHost_Global(obj) {
+        if (!(obj instanceof Global)) {
+          throw new TypeError('Resource error: Not a valid \"Global\" resource.');
+        }
+        let handle = obj[symbolRscHandle];
+        if (!handle) {
+          const rep = obj[symbolRscRep] || ++captureCnt8;
+          captureTable8.set(rep, obj);
+          handle = rscTableCreateOwn(handleTable8, rep);
+        }
+        return handle;
+      }
+      ,
+    }), 8, 4, 4 ],
+    [ 'err', 
+    _lowerFlatEnum({
+      caseMetas: [['invalid-entity', null, 1, 1, 1],['invalid-pc', null, 1, 1, 1],['invalid-frame', null, 1, 1, 1],['unsupported-type', null, 1, 1, 1],['mismatched-type', null, 1, 1, 1],['non-wasm-frame', null, 1, 1, 1],['alloc-failure', null, 1, 1, 1],['breakpoint-update', null, 1, 1, 1],['read-only', null, 1, 1, 1],['out-of-bounds', null, 1, 1, 1],['memory-grow-failure', null, 1, 1, 1],['execution-trap', null, 1, 1, 1],],
+      variantSize32: 1,
+      variantAlign32: 1,
+      variantPayloadOffset32: 1,
+      variantFlatCount: 1,
+    })
+    , 8, 4, 4 ],
+    ],
+    variantSize32: 8,
+    variantAlign32: 4,
+    variantPayloadOffset32: 4,
+    variantFlatCount: 2,
+  })
+  ],
+  hasResultPointer: true,
+  funcTypeIsAsync: false,
+  getCallbackFn: () => null,
+  getPostReturnFn: () => null,
+  isCancellable: false,
+  memoryIdx: 0,
+  stringEncoding: 'utf8',
+  getMemoryFn: () => memory0,
+  getReallocFn: undefined,
+  importFn: _trampoline63,
+},
+)) : _lowerImportBackwardsCompat.bind(
+null,
+{
+  trampolineIdx: 63,
+  componentIdx: 0,
+  isAsync: false,
+  isManualAsync: _trampoline63.manuallyAsync,
+  paramLiftFns: [_liftFlatBorrow.bind(null, 7),_liftFlatBorrow.bind(null, 3),_liftFlatU32],
+  resultLowerFns: [
+  _lowerFlatResult({
+    caseMetas: [
+    [ 'ok', _lowerFlatOwn({
+      componentIdx: 0,
+      lowerFn: 
+      function lowerImportedOwnedHost_Global(obj) {
+        if (!(obj instanceof Global)) {
+          throw new TypeError('Resource error: Not a valid \"Global\" resource.');
+        }
+        let handle = obj[symbolRscHandle];
+        if (!handle) {
+          const rep = obj[symbolRscRep] || ++captureCnt8;
+          captureTable8.set(rep, obj);
+          handle = rscTableCreateOwn(handleTable8, rep);
         }
         return handle;
       }
@@ -19373,41 +19419,21 @@ null,
   componentIdx: 0,
   isAsync: false,
   isManualAsync: _trampoline64.manuallyAsync,
-  paramLiftFns: [_liftFlatBorrow.bind(null, 7),_liftFlatBorrow.bind(null, 3),_liftFlatU32],
+  paramLiftFns: [_liftFlatBorrow.bind(null, 5)],
   resultLowerFns: [
-  _lowerFlatResult({
+  _lowerFlatOption({
     caseMetas: [
-    [ 'ok', _lowerFlatOwn({
-      componentIdx: 0,
-      lowerFn: 
-      function lowerImportedOwnedHost_Global(obj) {
-        if (!(obj instanceof Global)) {
-          throw new TypeError('Resource error: Not a valid \"Global\" resource.');
-        }
-        let handle = obj[symbolRscHandle];
-        if (!handle) {
-          const rep = obj[symbolRscRep] || ++captureCnt8;
-          captureTable8.set(rep, obj);
-          handle = rscTableCreateOwn(handleTable8, rep);
-        }
-        return handle;
-      }
-      ,
-    }), 8, 4, 4 ],
-    [ 'err', 
-    _lowerFlatEnum({
-      caseMetas: [['invalid-entity', null, 1, 1, 1],['invalid-pc', null, 1, 1, 1],['invalid-frame', null, 1, 1, 1],['unsupported-type', null, 1, 1, 1],['mismatched-type', null, 1, 1, 1],['non-wasm-frame', null, 1, 1, 1],['alloc-failure', null, 1, 1, 1],['breakpoint-update', null, 1, 1, 1],['read-only', null, 1, 1, 1],['out-of-bounds', null, 1, 1, 1],['memory-grow-failure', null, 1, 1, 1],['execution-trap', null, 1, 1, 1],],
-      variantSize32: 1,
-      variantAlign32: 1,
-      variantPayloadOffset32: 1,
-      variantFlatCount: 1,
-    })
-    , 8, 4, 4 ],
+    [ 'none', null, 0, 0, 0 ],
+    [ 'some', _lowerFlatList({
+      elemLowerFn: _lowerFlatU8,
+      elemSize32: 1,
+      elemAlign32: 1,
+    }), 8, 4, 2],
     ],
-    variantSize32: 8,
+    variantSize32: 12,
     variantAlign32: 4,
     variantPayloadOffset32: 4,
-    variantFlatCount: 2,
+    variantFlatCount: 3,
   })
   ],
   hasResultPointer: true,
@@ -19418,7 +19444,7 @@ null,
   memoryIdx: 0,
   stringEncoding: 'utf8',
   getMemoryFn: () => memory0,
-  getReallocFn: undefined,
+  getReallocFn: () => realloc0,
   importFn: _trampoline64,
 },
 )) : _lowerImportBackwardsCompat.bind(
@@ -19428,41 +19454,21 @@ null,
   componentIdx: 0,
   isAsync: false,
   isManualAsync: _trampoline64.manuallyAsync,
-  paramLiftFns: [_liftFlatBorrow.bind(null, 7),_liftFlatBorrow.bind(null, 3),_liftFlatU32],
+  paramLiftFns: [_liftFlatBorrow.bind(null, 5)],
   resultLowerFns: [
-  _lowerFlatResult({
+  _lowerFlatOption({
     caseMetas: [
-    [ 'ok', _lowerFlatOwn({
-      componentIdx: 0,
-      lowerFn: 
-      function lowerImportedOwnedHost_Global(obj) {
-        if (!(obj instanceof Global)) {
-          throw new TypeError('Resource error: Not a valid \"Global\" resource.');
-        }
-        let handle = obj[symbolRscHandle];
-        if (!handle) {
-          const rep = obj[symbolRscRep] || ++captureCnt8;
-          captureTable8.set(rep, obj);
-          handle = rscTableCreateOwn(handleTable8, rep);
-        }
-        return handle;
-      }
-      ,
-    }), 8, 4, 4 ],
-    [ 'err', 
-    _lowerFlatEnum({
-      caseMetas: [['invalid-entity', null, 1, 1, 1],['invalid-pc', null, 1, 1, 1],['invalid-frame', null, 1, 1, 1],['unsupported-type', null, 1, 1, 1],['mismatched-type', null, 1, 1, 1],['non-wasm-frame', null, 1, 1, 1],['alloc-failure', null, 1, 1, 1],['breakpoint-update', null, 1, 1, 1],['read-only', null, 1, 1, 1],['out-of-bounds', null, 1, 1, 1],['memory-grow-failure', null, 1, 1, 1],['execution-trap', null, 1, 1, 1],],
-      variantSize32: 1,
-      variantAlign32: 1,
-      variantPayloadOffset32: 1,
-      variantFlatCount: 1,
-    })
-    , 8, 4, 4 ],
+    [ 'none', null, 0, 0, 0 ],
+    [ 'some', _lowerFlatList({
+      elemLowerFn: _lowerFlatU8,
+      elemSize32: 1,
+      elemAlign32: 1,
+    }), 8, 4, 2],
     ],
-    variantSize32: 8,
+    variantSize32: 12,
     variantAlign32: 4,
     variantPayloadOffset32: 4,
-    variantFlatCount: 2,
+    variantFlatCount: 3,
   })
   ],
   hasResultPointer: true,
@@ -19473,7 +19479,7 @@ null,
   memoryIdx: 0,
   stringEncoding: 'utf8',
   getMemoryFn: () => memory0,
-  getReallocFn: undefined,
+  getReallocFn: () => realloc0,
   importFn: _trampoline64,
 },
 );
@@ -22126,12 +22132,12 @@ Promise.all([module0, module1, module2, module3]).catch(() => {});
     'print-debugger-info': exports0['0'],
   },
   'bytecodealliance:wasmtime/debuggee@44.0.0': {
-    '[method]debuggee.all-instances': exports0['16'],
-    '[method]debuggee.all-modules': exports0['15'],
-    '[method]debuggee.continue': exports0['18'],
-    '[method]debuggee.exit-frames': exports0['19'],
+    '[method]debuggee.all-instances': exports0['15'],
+    '[method]debuggee.all-modules': exports0['14'],
+    '[method]debuggee.continue': exports0['17'],
+    '[method]debuggee.exit-frames': exports0['18'],
     '[method]debuggee.list-threads': exports0['12'],
-    '[method]debuggee.single-step': exports0['17'],
+    '[method]debuggee.single-step': exports0['16'],
     '[method]debuggee.stopped-thread': trampoline11,
     '[method]frame.get-instance': exports0['25'],
     '[method]frame.get-locals': exports0['27'],
@@ -22139,19 +22145,19 @@ Promise.all([module0, module1, module2, module3]).catch(() => {});
     '[method]frame.get-stack': exports0['28'],
     '[method]frame.parent-frame': exports0['29'],
     '[method]global.get': exports0['24'],
-    '[method]instance.get-global': exports0['22'],
-    '[method]instance.get-memory': exports0['21'],
-    '[method]instance.get-module': trampoline23,
-    '[method]memory.clone': trampoline21,
+    '[method]instance.get-global': exports0['21'],
+    '[method]instance.get-memory': exports0['20'],
+    '[method]instance.get-module': trampoline19,
+    '[method]memory.clone': trampoline23,
     '[method]memory.get-bytes': exports0['9'],
     '[method]memory.size-bytes': trampoline22,
-    '[method]memory.unique-id': trampoline20,
+    '[method]memory.unique-id': trampoline24,
     '[method]module.add-breakpoint': exports0['23'],
-    '[method]module.bytecode': exports0['14'],
-    '[method]module.clone': trampoline19,
+    '[method]module.bytecode': exports0['22'],
+    '[method]module.clone': trampoline20,
     '[method]module.name': exports0['11'],
     '[method]module.remove-breakpoint': exports0['10'],
-    '[method]module.unique-id': trampoline18,
+    '[method]module.unique-id': trampoline21,
     '[method]wasm-value.clone': trampoline5,
     '[method]wasm-value.get-type': trampoline25,
     '[method]wasm-value.unwrap-f32': trampoline14,
@@ -22167,9 +22173,9 @@ Promise.all([module0, module1, module2, module3]).catch(() => {});
     '[resource-drop]memory': trampoline10,
     '[resource-drop]module': trampoline16,
     '[resource-drop]wasm-exception': trampoline2,
-    '[resource-drop]wasm-func': trampoline24,
+    '[resource-drop]wasm-func': trampoline18,
     '[resource-drop]wasm-value': trampoline6,
-    '[static]event-future.finish': exports0['20'],
+    '[static]event-future.finish': exports0['19'],
   },
   'wasi:clocks/monotonic-clock@0.2.12': {
     'subscribe-duration': trampoline27,

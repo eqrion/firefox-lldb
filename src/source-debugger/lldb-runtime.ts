@@ -24,6 +24,7 @@ interface PendingRun {
   resolveReady: () => void;
   synchronizeRequested: boolean;
   abortRequested: boolean;
+  activeTid: number | undefined;
   resumeSequence: number;
   resumeCallbacks: Map<number, () => void>;
   resumeWaiters: Array<{
@@ -35,8 +36,8 @@ interface PendingRun {
 class LldbRuntimeRunControl implements LldbComponentRunControl, RdpDebuggeeRunControl {
   readonly usesAbortSentinel: boolean;
   #pending: PendingRun | undefined;
-  #synchronizeStop: (() => void) | undefined;
-  #abortStop: (() => void) | undefined;
+  #synchronizeStop: ((tid?: number) => void) | undefined;
+  #abortStop: ((tid?: number) => void) | undefined;
 
   constructor(
     private readonly id: string,
@@ -56,6 +57,7 @@ class LldbRuntimeRunControl implements LldbComponentRunControl, RdpDebuggeeRunCo
         resolveReady,
         synchronizeRequested: false,
         abortRequested: false,
+        activeTid: undefined,
         resumeSequence: 0,
         resumeCallbacks: new Map(),
         resumeWaiters: [],
@@ -82,6 +84,7 @@ class LldbRuntimeRunControl implements LldbComponentRunControl, RdpDebuggeeRunCo
       else pending.resumeWaiters.push(waiter);
     }
     const releasedAction = this.#adjustResumeAction(action);
+    if (releasedAction.kind === "step") pending.activeTid = releasedAction.tid;
     if (pending.request.role === "driver") {
       pending.resumeCallbacks.set(sequence, () => resumePhysicalTarget(releasedAction));
       if (this.observerResumesTarget) this.releasePhysicalResume(pending.request.runId, sequence);
@@ -95,8 +98,11 @@ class LldbRuntimeRunControl implements LldbComponentRunControl, RdpDebuggeeRunCo
     // step-off and its following semantic continue. Keep synchronization
     // latched so every later local wait in this run observes the already-
     // paused shared target instead of sleeping forever.
-    if (pending.abortRequested) this.#abortStop?.();
-    else if (pending.synchronizeRequested) this.#synchronizeStop?.();
+    if (pending.abortRequested) {
+      this.#abortStop?.(pending.activeTid);
+    } else if (pending.synchronizeRequested) {
+      this.#synchronizeStop?.(pending.activeTid);
+    }
   }
 
   #adjustResumeAction(action: RdpDebuggeeResumeAction): RdpDebuggeeResumeAction {
@@ -135,11 +141,11 @@ class LldbRuntimeRunControl implements LldbComponentRunControl, RdpDebuggeeRunCo
     resume();
   }
 
-  installSynchronizeStop(synchronize: () => void): void {
+  installSynchronizeStop(synchronize: (tid?: number) => void): void {
     this.#synchronizeStop = synchronize;
   }
 
-  installAbortStop(abort: () => void): void {
+  installAbortStop(abort: (tid?: number) => void): void {
     this.#abortStop = abort;
   }
 
@@ -147,14 +153,18 @@ class LldbRuntimeRunControl implements LldbComponentRunControl, RdpDebuggeeRunCo
     if (this.#pending?.request.runId !== runId) return;
     this.logger.debug(`[${this.id}] synchronizing ${runId}`);
     this.#pending.synchronizeRequested = true;
-    this.#synchronizeStop?.();
+    this.#synchronizeStop?.(this.#pending.activeTid);
+  }
+
+  isSynchronizing(runId: RunId): boolean {
+    return this.#pending?.request.runId === runId && this.#pending.synchronizeRequested;
   }
 
   abortRun(runId: RunId): void {
     if (this.#pending?.request.runId !== runId) return;
     this.logger.debug(`[${this.id}] aborting ${runId} at shared stop`);
     this.#pending.abortRequested = true;
-    this.#abortStop?.();
+    this.#abortStop?.(this.#pending.activeTid);
   }
 }
 

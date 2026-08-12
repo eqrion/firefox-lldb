@@ -10,6 +10,12 @@ export function debugEnvEnabled(): boolean {
   return process.env.DEBUG === "1";
 }
 
+/** SOURCE_DEBUGGER_TRACE=1: coordinator/runtime logs without full RDP/RSP wire noise.
+ * Intended for diagnosing component handoff/barrier failures. */
+export function sourceDebuggerTraceEnabled(): boolean {
+  return process.env.SOURCE_DEBUGGER_TRACE === "1";
+}
+
 /**
  * Exit cleanly once reparented to init/launchd (ppid 1). Set by the e2e
  * harness, which launches the server session-detached (setsid), so a killed

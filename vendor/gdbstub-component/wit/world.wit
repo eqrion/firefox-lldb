@@ -179,6 +179,10 @@ interface debuggee {
     breakpoint,
     /// An interruption due to `debuggee.interrupt` occurred.
     interrupted,
+    /// Another debugger endpoint stopped the shared physical debuggee. The
+    /// given thread's local run/step operation must finish without resuming
+    /// execution or presenting this as a user breakpoint.
+    synchronized(u32),
     /// An exception was thrown by Wasm.
     exception(wasm-exception),
     /// An injected call completed with return value(s).

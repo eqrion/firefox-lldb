@@ -68,10 +68,12 @@ export interface LldbIsolateRelease {
 
 export interface LldbIsolateSynchronizeStop {
   type: "lldb-isolate-synchronize-stop";
+  tid?: number;
 }
 
 export interface LldbIsolateAbortStop {
   type: "lldb-isolate-abort-stop";
+  tid?: number;
 }
 
 export type LldbIsolateHostMessage =

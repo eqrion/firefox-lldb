@@ -266,6 +266,27 @@ test("multiple components compose owned frames and arm observers before the step
   ]);
 });
 
+test("state and threads route through the component whose stop was accepted", async () => {
+  const first = fakeComponent("first");
+  const second = fakeComponent("second");
+  first.state = async (stopId) => ({
+    stopId,
+    reason: { kind: "breakpoint", threadId: "11" },
+  });
+  first.threads = async () => [{ id: "11", stopped: true }];
+  second.state = async (stopId) => ({
+    stopId,
+    reason: { kind: "breakpoint", threadId: "22" },
+  });
+  second.threads = async () => [{ id: "22", stopped: true }];
+  const session = new SourceDebuggerSession({ components: [first, second] });
+
+  assert.deepEqual((await session.state()).reason, { kind: "breakpoint", threadId: "11" });
+  await session.continue("second");
+  assert.deepEqual((await session.state()).reason, { kind: "breakpoint", threadId: "22" });
+  assert.deepEqual(await session.threads(), [{ id: "22", stopped: true }]);
+});
+
 test("step-in consumes a source-transparent foreign stop before handing off", async () => {
   const events: string[] = [];
   const outer = fakeComponent("outer", { events });

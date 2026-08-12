@@ -50,6 +50,10 @@ export interface LldbComponentRunControl {
   releasePhysicalResume(runId: RunId, sequence: number): void;
   synchronizeRun(runId: RunId): void;
   abortRun(runId: RunId): void;
+  /** True while a sibling-owned stop is deliberately terminating this
+   * observer's continue command. Its private sentinel breakpoint must be
+   * reported as synchronized rather than as a user preemption. */
+  isSynchronizing(runId: RunId): boolean;
 }
 
 function reasonFromLldb(reason: StopReason): SessionStopReason {
@@ -309,9 +313,11 @@ export class LldbSourceDebuggerComponentInstance implements SourceDebuggerCompon
         const disposition =
           request.role === "driver"
             ? ("accepted" as const)
-            : isPreemptingObserverReason(reason)
-              ? ("preempted" as const)
-              : ("synchronized" as const);
+            : this.#runControl?.isSynchronizing(request.runId)
+              ? ("synchronized" as const)
+              : isPreemptingObserverReason(reason)
+                ? ("preempted" as const)
+                : ("synchronized" as const);
         this.#logger.debug(
           `[${this.id}] ${request.runId} ${request.role} stopped as ${reason.kind} (${disposition})`
         );

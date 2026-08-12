@@ -17,6 +17,7 @@ import { freePort } from "../../src/platform/gdb-server-spawner.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..", "..");
+const FIXTURE_ROOT = path.join(REPO, "test", "fixtures");
 
 export const FIXTURES = {
   factorial: {
@@ -149,6 +150,13 @@ export function startStaticServer(
   const server = http.createServer((req, res) => {
     const rel =
       decodeURIComponent((req.url ?? "/").split("?")[0]).replace(/^\/+/, "") || "index.html";
+    // Composite fixtures can reuse already-built wasm artifacts without
+    // copying multi-megabyte generated files. Keep this explicit mount rooted
+    // under test/fixtures; ordinary requests remain relative to pageDir.
+    const requestedPath = rel.startsWith("__fixtures__/")
+      ? path.resolve(FIXTURE_ROOT, rel.slice("__fixtures__/".length))
+      : path.resolve(dir, rel);
+    const allowedRoot = rel.startsWith("__fixtures__/") ? FIXTURE_ROOT : dir;
     // Tagged by session.ts's fetchModuleBytes — the debugger's own
     // out-of-band fetch of a module's bytes, distinct from the browser's own
     // page-load request for the same URL. Lets a reload test assert the
@@ -165,7 +173,10 @@ export function startStaticServer(
       return;
     }
     try {
-      const body = readFileSync(path.join(dir, rel));
+      if (requestedPath !== allowedRoot && !requestedPath.startsWith(`${allowedRoot}${path.sep}`)) {
+        throw new Error("fixture path escapes its root");
+      }
+      const body = readFileSync(requestedPath);
       res.writeHead(200, {
         "Content-Type": MIME[path.extname(rel)] ?? "application/octet-stream",
         ...(requireAuth && path.extname(rel) === ".html"

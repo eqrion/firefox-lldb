@@ -49,6 +49,15 @@ may release that shared Firefox run lease. Observer LLDBs still execute their
 own state-machine transitions and consume the same stop notification, so an
 LLDB-internal step-off cannot race a second RDP controller.
 
+With multiple Firefox threads, an observer may be locally stepping a stale
+breakpoint on a worker when a sibling stops the main thread. The debuggee WIT
+interface carries an internal `synchronized(tid)` event for this case. The
+gdbstub reports a connection-local `SIGSTOP` on the observer plan's thread,
+ending that LLDB operation without resuming Firefox or exposing a false user
+breakpoint. This is distinct from the abort sentinel: synchronization completes
+an observer continue, while the sentinel cancels a real source thread plan
+after a sibling preempts it.
+
 For cross-component step-in, the session treats a stop with an unchanged
 composed source stack as an opaque-language transition and continues the source
 plan. At a JavaScript boundary the active component's run-control policy keeps
@@ -68,6 +77,12 @@ step-over plan suppresses the foreign activation and returns to its next owned
 source line. The production e2e keeps a third, module-less LLDB armed throughout
 the same sequence to verify that preemption converges every non-owning observer,
 not just one driver/observer pair.
+Another production e2e combines the pthread fixture with an independent Wasm
+module and hands the accepted stop worker → main → worker across two outer LLDB
+isolates. The session remembers which component supplied the committed stop so
+generic state and thread selection come from the correct projection.
+Set `SOURCE_DEBUGGER_TRACE=1` to log only session/runtime barrier transitions
+when diagnosing these handoffs, without enabling the full RDP/RSP wire trace.
 
 The CLI presents those adapters to `SourceDebuggerSession` through
 `src/source-debugger/rpc.ts`, a concurrent request/response transport over

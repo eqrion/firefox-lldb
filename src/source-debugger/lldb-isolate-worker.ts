@@ -40,10 +40,12 @@ void (async () => {
     exclusiveModules: options.exclusiveModules,
   });
   const componentEndpoint = serveSourceDebuggerComponent(componentPort, runtime.component);
-  runtime.runControl.installSynchronizeStop?.(() =>
-    post({ type: "lldb-isolate-synchronize-stop" })
+  runtime.runControl.installSynchronizeStop?.((tid) =>
+    post({ type: "lldb-isolate-synchronize-stop", ...(tid === undefined ? {} : { tid }) })
   );
-  runtime.runControl.installAbortStop?.(() => post({ type: "lldb-isolate-abort-stop" }));
+  runtime.runControl.installAbortStop?.((tid) =>
+    post({ type: "lldb-isolate-abort-stop", ...(tid === undefined ? {} : { tid }) })
+  );
 
   const onMessage = (message: LldbIsolateWorkerMessage): void => {
     if (message.type === "lldb-isolate-resume") {

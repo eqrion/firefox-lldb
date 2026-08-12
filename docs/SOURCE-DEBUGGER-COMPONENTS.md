@@ -99,6 +99,15 @@ line, and discovers LLDB-B's new top frame. LLDB-B then adopts the raw
 materialized before the frontend sees the stop. A real destination breakpoint
 is never adopted and therefore preempts this thread plan.
 
+The multithreaded proof combines an emscripten pthread module with a separate
+main-thread Wasm module. Two outer-worker LLDB components hand accepted stops
+worker → main → worker without deadlock. When a sibling stop catches an
+observer locally stepping a stale worker breakpoint, the debuggee interface's
+internal `synchronized(tid)` event ends that connection's LLDB operation with a
+local `SIGSTOP`; it does not resume Firefox and is classified as synchronization
+rather than a user stop. Session state/thread queries follow the component whose
+stop was accepted.
+
 Cross-component step-over is now covered in both directions. With no
 destination breakpoint, LLDB-A's real `thread step-over` suppresses the opaque
 LLDB-B activation and returns at A's next source line with the call result
@@ -167,8 +176,9 @@ adapter.
    can step into B through opaque JavaScript without a destination breakpoint,
    step over B while suppressing its foreign activation, stop at a real B
    breakpoint encountered during A's active plan, and step out while preserving
-   A's foreign caller. A passive third LLDB proves N-component preemption;
-   repeat the sequence with multiple Firefox threads.
+   A's foreign caller. A passive third LLDB proves N-component preemption, and
+   a pthread-enabled two-component fixture proves driver handoff across
+   multiple Firefox threads.
 8. **Worker RPC and failure containment (quarantine prototype complete).** The
    production CLI now puts each component adapter and runtime in an outer
    worker, behind a `MessagePort` with structured-cloned records, concurrent

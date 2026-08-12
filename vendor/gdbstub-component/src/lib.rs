@@ -377,6 +377,32 @@ impl<'a> Debugger<'a> {
                     &mut regs,
                 )?)
             }
+            api::Event::Synchronized(tid) => {
+                trace!("Event::Synchronized({tid})");
+                let _ = self.update_on_stop();
+                let synchronized_tid = Tid::new(tid as usize)
+                    .filter(|tid| self.threads.contains_key(tid))
+                    .unwrap_or(self.stopped_tid);
+                self.stopped_tid = synchronized_tid;
+                let stopped_pc = self
+                    .threads
+                    .get(&synchronized_tid)
+                    .map(|ts| ts.current_pc)
+                    .unwrap_or_else(|| WasmAddr::from_raw(0).unwrap());
+                let pc_bytes = stopped_pc.as_raw().to_le_bytes();
+                let mut regs = core::iter::once((
+                    gdbstub_arch::wasm::reg::id::WasmRegId::Pc,
+                    pc_bytes.as_slice(),
+                ));
+                Ok(inner.report_stop_with_regs(
+                    self,
+                    MultiThreadStopReason::SignalWithThread {
+                        tid: synchronized_tid,
+                        signal: Signal::SIGSTOP,
+                    },
+                    &mut regs,
+                )?)
+            }
             _ => {
                 trace!("other event: {event:?}");
                 if self.interrupt {
