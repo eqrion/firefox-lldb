@@ -229,6 +229,9 @@ export interface StartOptions {
   /** Reuse one already-paused physical debuggee connection for another
    * debugger component. The platform server borrows rather than closes it. */
   sharedRdpSession?: RdpWasmSession;
+  /** The first projection over a browser-owned shared session may establish a
+   * fresh all-stop if navigation raced discovery and left the target running. */
+  primeSharedSession?: boolean;
 }
 
 export interface PlatformServerHandle {
@@ -346,6 +349,7 @@ function createTabLauncher(
       // synthetic "stopped" with no pause behind it (issue #21).
       if (session.hasThreads()) {
         if (ownsSession) await liveDebuggee.primeStop();
+        else if (opts.primeSharedSession && !session.paused()) await liveDebuggee.primeStop();
         else await liveDebuggee.snapshotCurrentStop();
       }
 

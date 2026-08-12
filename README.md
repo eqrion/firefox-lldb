@@ -81,8 +81,9 @@ firefox-lldb --url http://localhost:8080/index.html \
 
 `ID=TEXT` means that component owns module URLs containing `TEXT`; use one
 `ID=*` route as an optional fallback. Every Wasm module must match exactly one
-route. This prototype currently instantiates LLDB for every route and requires
-`--url` for automatic multi-component attach. The URL match only constrains
+route. Explicit routes currently instantiate LLDB eagerly so every configured
+observer participates in the multi-component barrier, and require `--url` for
+automatic multi-component attach. The URL match only constrains
 which of these otherwise identical LLDB definitions may claim the module; its
 real asynchronous `probeModule()` still has to accept it. Future Dart/.NET/etc.
 components can instead be selected directly by unique artifact-driven probe
@@ -95,7 +96,10 @@ connections for the session lifetime; LLDB is now one implementation of that
 loader rather than part of the generic worker protocol. The CLI activates and
 closes those loaders through `SourceDebuggerSessionRuntime`; LLDB-specific
 platform servers, attach commands, shared-RDP wiring, and run control no longer
-appear in the CLI lifecycle.
+appear in the CLI lifecycle. Firefox now starts and exposes normalized Wasm
+metadata before any debugger engine is created. The catalog probes lightweight
+installed definitions and instantiates only initial module owners; an e2e proof
+verifies that an unsupported installed ecosystem is never instantiated.
 
 At the `(sdb)` prompt, qualify ambiguous commands with the component ID:
 

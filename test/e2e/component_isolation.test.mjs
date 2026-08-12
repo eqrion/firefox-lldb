@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { parseCliArgs } from "../../src/core/platform-session.ts";
 import { freePort } from "../../src/platform/gdb-server-spawner.ts";
+import { FirefoxSourceDebuggerTarget } from "../../src/source-debugger/firefox-target.ts";
 import { SourceDebuggerSessionHost } from "../../src/source-debugger/host.ts";
 import { IsolatedLldbComponentRuntime } from "../../src/source-debugger/lldb-isolate.ts";
 import {
@@ -15,19 +16,77 @@ import {
 import { createProbeModuleOwnerResolver } from "../../src/source-debugger/ownership.ts";
 import { SourceDebuggerSessionRuntime } from "../../src/source-debugger/runtime.ts";
 import { SourceDebuggerSession } from "../../src/source-debugger/session.ts";
+import { startStaticServer } from "./harness.mjs";
 
-test("the generic session runtime activates LLDB without exposing its bootstrap", async () => {
-  const route = { id: "rsp-import", urlSubstring: "*" };
-  const target = new LldbSourceDebuggerTarget({
-    args: parseCliArgs(["--connect", "--port", "0", "--rdp-port", String(await freePort())]),
+test("catalog discovery instantiates LLDB but not an unsupported installed ecosystem", async () => {
+  const staticServer = await startStaticServer("test/fixtures/simple");
+  const route = { id: "lldb", urlSubstring: "*" };
+  let unsupportedProbes = 0;
+  let unsupportedInstantiations = 0;
+  const unsupportedLoader = {
+    id: "unsupported",
+    async loadDefinition() {
+      const definition = {
+        describe: async () => ({
+          protocolVersion: "0.1",
+          id: "unsupported",
+          name: "Unsupported test ecosystem",
+          capabilities: {
+            breakpoints: false,
+            conditionalBreakpoints: false,
+            evaluate: false,
+            stepInto: false,
+            stepOver: false,
+            stepOut: false,
+          },
+        }),
+        probeModule: async () => {
+          unsupportedProbes++;
+          return { supported: false, confidence: 0, reason: "different artifact format" };
+        },
+      };
+      return {
+        id: "unsupported",
+        definition,
+        probeModule: definition.probeModule,
+        close: () => {},
+      };
+    },
+    async instantiate() {
+      unsupportedInstantiations++;
+      throw new Error("unsupported ecosystem must not instantiate");
+    },
+  };
+  const args = parseCliArgs([
+    "--launch",
+    "--headless",
+    "--port",
+    "0",
+    "--rdp-port",
+    String(await freePort()),
+    "--url",
+    `http://127.0.0.1:${staticServer.port}/index.html`,
+  ]);
+  const target = await FirefoxSourceDebuggerTarget.start({ args });
+  const lldbTarget = new LldbSourceDebuggerTarget({
+    target,
     routes: [route],
   });
   const runtime = await SourceDebuggerSessionRuntime.load({
-    loaders: [new LldbSourceDebuggerComponentLoader(target, route)],
+    target,
+    getRdpSession: () => target.session,
+    loaders: [unsupportedLoader, new LldbSourceDebuggerComponentLoader(lldbTarget, route)],
   });
   try {
+    assert.equal(runtime.catalog.entries.length, 2);
+    assert.equal(unsupportedProbes, 1);
+    assert.equal(unsupportedInstantiations, 0);
+    assert.deepEqual(
+      runtime.components.map(({ id }) => id),
+      ["lldb"]
+    );
     const activation = await runtime.activate();
-    assert.match(activation.readyMessage, /firefox-lldb source debugger/);
+    assert.match(activation.readyMessage, /Process 1 stopped/);
     assert.deepEqual(
       await runtime.components[0].probeModule({
         id: "fixture",
@@ -38,10 +97,13 @@ test("the generic session runtime activates LLDB without exposing its bootstrap"
     );
     assert.deepEqual(
       (await runtime.session.components()).map(({ id }) => id),
-      ["rsp-import"]
+      ["lldb"]
     );
+    assert.match((await runtime.session.modules())[0].url, /math\.wasm/);
   } finally {
     await runtime.close();
+    staticServer.server.closeAllConnections();
+    await new Promise((resolve) => staticServer.server.close(resolve));
   }
 });
 

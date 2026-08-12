@@ -40,9 +40,16 @@ The first implementation lives under `src/source-debugger/`:
 - `rsp-byte-channel.ts` adapts host-owned TCP endpoints to transferable RSP
   streams without exposing sockets to debugger isolates.
 - `loader.ts` defines the browser-facing installation seam for debugger
-  ecosystems, including their target activation lifecycle.
-- `runtime.ts` loads installed ecosystems, constructs the generic session,
-  activates their target connections, and tears them down in reverse order.
+  ecosystems, split into lightweight definition loading and selected-instance
+  creation/activation.
+- `catalog.ts` retains installed definitions and probes them without creating
+  debugger engines.
+- `runtime.ts` selects module owners from the catalog, instantiates only those
+  owners (plus explicit compatibility observers), constructs the generic
+  session, and tears everything down in reverse order.
+- `firefox-target.ts` starts and observes the browser before any language
+  debugger exists, provides normalized module metadata, owns the physical RDP
+  stop, and lends selected components filtered GDB RSP projections.
 - `isolate.ts` implements the generic three-port definition, instance, and
   imported-host transport used by TypeScript workers.
 - `lldb-loader.ts` contains LLDB's Firefox target adapter: platform-server
@@ -77,37 +84,43 @@ interpret foreign debug information.
 
 The current CLI's `ID=URL_SUBSTRING` syntax is a compatibility constraint for
 running several otherwise identical LLDB components. It first selects the one
-eligible route, then still calls that isolated component definition's real
-`probeModule()` before committing ownership. Artifact-driven discovery can use
-the same resolver without routes once installed ecosystems return distinct
-claims. The prototype eagerly instantiates every observer so it can participate
-in physical stop barriers, but discovery remains a definition-side operation.
+eligible route, then still calls that component definition's real
+`probeModule()` before committing ownership. Explicit routes are eagerly
+instantiated so the existing passive-observer/N-component barrier proof stays
+intact. Ordinary installed ecosystems are not: Firefox starts, navigates,
+reports its module metadata, and reaches a physical stop before the catalog is
+probed. Only definitions which own an initial module are then instantiated and
+attached. A real-Firefox e2e installs an unsupported fake ecosystem alongside
+LLDB and proves that both definitions are probed while only LLDB's worker is
+created. Route-free discovery between distinct production ecosystems remains.
 The metadata available to probes is currently the module ID, URL, and
 host-inspected `dwarf`/`source-map` hints. Raw browser-owned module bytes do not
 fan out to candidates. Ecosystems that need to validate custom-section payloads
 will eventually need a bounded module-inspection resource or richer normalized
 host metadata.
 
-The generic isolate loader now creates separate definition, instance, and
-imported-host ports. The host calls `describe()` and `probeModule()` through the
-definition port; the session calls target-specific operations through the
-instance port; and the worker receives only its component-scoped debuggee host
-proxy. An ecosystem implements `SourceDebuggerComponentLoader` to create its
-isolate, instantiate the definition with that imported host, and return a
-generic `activate()`/`close()` lifecycle. `SourceDebuggerSessionRuntime` loads
-the catalog entries, constructs the broker, activates each component in order,
-and performs session, target, and isolate teardown in dependency order. LLDB's
-loader privately handles platform connection, attach, shared RDP projections,
-native setup commands, and physical run-control wiring. A Dart, .NET, or other
-debugger therefore does not need to implement an LLDB-shaped bootstrap,
-discovery, or host protocol.
+The loader contract now has two phases. `loadDefinition()` returns the small
+`describe()`/`probeModule()` discovery surface and must not start the language
+debugger. `instantiate(host)` is called only for a selected owner and returns
+its definition and instance RPCs plus generic `activate()`/`close()` lifecycle.
+The generic isolate transport still creates separate definition, instance, and
+imported-host ports for that live engine. The worker receives only its
+component-scoped debuggee host proxy. `SourceDebuggerSessionRuntime` owns the
+catalog, selected instances, broker, browser target, and dependency-ordered
+teardown. LLDB's catalog definition is pure TypeScript; its wasm worker is not
+created until instantiation. Its loader privately handles platform connection,
+attach, shared RDP projections, native setup commands, and physical run-control
+wiring. A Dart, .NET, or other debugger therefore does not need to implement an
+LLDB-shaped bootstrap, discovery, or host protocol.
 
-The production CLI now depends only on the generic session runtime and the
-selected installed loaders. It no longer creates platform servers, registers
+The production CLI now creates one browser-owned
+`FirefoxSourceDebuggerTarget`, then passes its catalog and selected loaders to
+the generic session runtime. It no longer creates platform servers, registers
 RSP bridges, calls LLDB attach commands, handles LLDB run-control objects, or
-tracks per-component teardown. Those details are part of the LLDB loader's
-target adapter and are exercised through the same generic activation path as a
-future ecosystem integration.
+tracks per-component teardown. The Firefox target can re-prime the first shared
+projection if navigation races discovery; later projections snapshot that same
+stop. LLDB-specific details remain in its loader and are exercised through the
+same generic activation path as a future ecosystem integration.
 
 The `firefox-lldb` CLI now presents a language-generic `(sdb)` prompt. Its core
 commands call only `SourceDebuggerSession`:
@@ -242,13 +255,15 @@ adapter.
    owns their live byte channels, rejects sibling use, and revokes everything
    with the logical session. Translating that resource boundary to the
    Component Model remains.
-3. **Make module assignment explicit (probe arbitration complete).** Components are probed
-   asynchronously when modules arrive; a unique best claim gets sticky
-   ownership, while ties and unsupported modules fail closed. The production
-   CLI invokes the real LLDB definition's probe across its outer worker, with
-   URL routes temporarily constraining identical LLDB instances. The host now
-   derives payload-free `dwarf` and `source-map` hints from Wasm custom-section
-   names; richer ecosystem metadata and route-free discovery remain.
+3. **Make module assignment explicit (definition-first startup complete).**
+   Components are probed asynchronously; a unique best claim gets sticky
+   ownership, while ties and unsupported modules fail closed. Firefox and its
+   initial physical stop now exist before any debugger instance. The catalog
+   loads lightweight definitions, probes host-derived `dwarf`/`source-map`
+   hints, and instantiates only initial module owners. Explicit URL routes keep
+   otherwise-identical LLDBs eager for compatibility. Route-free discovery
+   between distinct production ecosystems, richer metadata, and activating an
+   owner for a module loaded later remain.
 4. **Instantiate two LLDB components (prototype complete).** Each gets a separate LLDB worker,
    gdbstub, RSP endpoint, pthread pool, and disjoint module set. Both observe
    the same physical Firefox process.

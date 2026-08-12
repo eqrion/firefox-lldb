@@ -110,23 +110,11 @@ export class LldbSourceDebuggerComponent implements SourceDebuggerComponent {
   }
 
   async describe(): Promise<SourceDebuggerComponentDescriptor> {
-    return descriptor(this.#options);
+    return lldbSourceDebuggerDescriptor(this.#options);
   }
 
   async probeModule(module: Omit<ModuleDescriptor, "owner">): Promise<ModuleClaim> {
-    if (module.debugInfo?.includes("dwarf")) {
-      return { supported: true, confidence: 90, reason: "embedded DWARF" };
-    }
-    if (module.debugInfo?.includes("source-map")) {
-      return { supported: true, confidence: 80, reason: "source-map to DWARF bridge" };
-    }
-    return {
-      supported: true,
-      confidence: module.debugInfo ? 10 : 50,
-      reason: module.debugInfo
-        ? "LLDB fallback; no recognized source metadata"
-        : "LLDB fallback for an uninspected Wasm module",
-    };
+    return probeLldbSourceDebuggerModule(module);
   }
 
   async instantiate(
@@ -162,7 +150,7 @@ export class LldbSourceDebuggerComponentInstance implements SourceDebuggerCompon
   }
 
   async describe(): Promise<SourceDebuggerComponentDescriptor> {
-    return descriptor({ id: this.id, name: this.#name });
+    return lldbSourceDebuggerDescriptor({ id: this.id, name: this.#name });
   }
 
   async addModules(modules: ModuleDescriptor[], _initialStop: StopId): Promise<void> {
@@ -427,7 +415,7 @@ export class LldbSourceDebuggerComponentInstance implements SourceDebuggerCompon
   }
 }
 
-function descriptor(
+export function lldbSourceDebuggerDescriptor(
   options: LldbSourceDebuggerComponentOptions = {}
 ): SourceDebuggerComponentDescriptor {
   return {
@@ -442,6 +430,26 @@ function descriptor(
       stepOver: true,
       stepOut: true,
     },
+  };
+}
+
+/** Target-independent LLDB artifact claim used by catalog discovery before a
+ * wasm LLDB worker or target connection exists. */
+export async function probeLldbSourceDebuggerModule(
+  module: Omit<ModuleDescriptor, "owner">
+): Promise<ModuleClaim> {
+  if (module.debugInfo?.includes("dwarf")) {
+    return { supported: true, confidence: 90, reason: "embedded DWARF" };
+  }
+  if (module.debugInfo?.includes("source-map")) {
+    return { supported: true, confidence: 80, reason: "source-map to DWARF bridge" };
+  }
+  return {
+    supported: true,
+    confidence: module.debugInfo ? 10 : 50,
+    reason: module.debugInfo
+      ? "LLDB fallback; no recognized source metadata"
+      : "LLDB fallback for an uninspected Wasm module",
   };
 }
 

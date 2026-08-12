@@ -2,18 +2,16 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-import type { Args, PlatformServerHandle } from "../core/platform-session.js";
-import { startPlatformServer } from "../core/platform-session.js";
 import { noopLogger, type Logger } from "../logging.js";
-import { focusFirefoxWindow } from "../rdp/firefox.js";
-import type { RdpWasmSession } from "../rdp/session.js";
 import type {
   ModuleClaim,
   SourceDebuggerComponentDefinition,
   SourceDebuggerComponentInstance,
 } from "./component.js";
 import { componentForModuleUrl, type SourceDebuggerComponentRoute } from "./config.js";
+import type { FirefoxGdbRspProjection, FirefoxSourceDebuggerTarget } from "./firefox-target.js";
 import type { SourceDebuggerComponentHostBinding } from "./host.js";
+import { lldbSourceDebuggerDescriptor, probeLldbSourceDebuggerModule } from "./lldb-component.js";
 import {
   IsolatedLldbComponentRuntime,
   type IsolatedLldbComponentRuntimeOptions,
@@ -22,17 +20,17 @@ import type {
   LoadedSourceDebuggerComponent,
   SourceDebuggerComponentActivation,
   SourceDebuggerComponentLoader,
+  LoadedSourceDebuggerComponentDefinition,
 } from "./loader.js";
 import type { ModuleDescriptor } from "./types.js";
 
 export interface LldbSourceDebuggerTargetOptions {
-  args: Args;
+  target: FirefoxSourceDebuggerTarget;
   routes: readonly SourceDebuggerComponentRoute[];
+  routedComponents?: boolean;
   logger?: Logger;
   /** Status and lifecycle text for the frontend. */
   onOutput?: (message: string) => void;
-  onConsole?: (message: string) => void;
-  onFirefoxExit?: () => void;
 }
 
 interface LldbTargetActivation extends SourceDebuggerComponentActivation {
@@ -43,37 +41,29 @@ interface LldbTargetActivation extends SourceDebuggerComponentActivation {
  * every LLDB-specific platform/RSP/attach detail; neither the generic session
  * runtime nor its frontend needs to know how LLDB reaches the debuggee. */
 export class LldbSourceDebuggerTarget {
-  readonly #args: Args;
+  readonly #target: FirefoxSourceDebuggerTarget;
   readonly #routes: readonly SourceDebuggerComponentRoute[];
+  readonly #routedComponents: boolean;
   readonly #logger: Logger;
   readonly #onOutput: (message: string) => void;
-  readonly #onConsole: (message: string) => void;
-  readonly #onFirefoxExit: () => void;
   readonly #activeRuntimes = new Map<string, IsolatedLldbComponentRuntime>();
   #primaryId: string | undefined;
-  #primarySession: RdpWasmSession | undefined;
-  #interrupt: (() => void) | undefined;
-  #firefoxPid: number | undefined;
 
   constructor(options: LldbSourceDebuggerTargetOptions) {
-    this.#args = options.args;
+    this.#target = options.target;
     this.#routes = options.routes;
+    this.#routedComponents = options.routedComponents ?? false;
     this.#logger = options.logger ?? noopLogger;
     this.#onOutput = options.onOutput ?? (() => {});
-    this.#onConsole = options.onConsole ?? (() => {});
-    this.#onFirefoxExit = options.onFirefoxExit ?? (() => {});
-  }
-
-  get rdpSession(): RdpWasmSession | undefined {
-    return this.#primarySession;
-  }
-
-  focus(): void {
-    if (this.#firefoxPid !== undefined) focusFirefoxWindow(this.#firefoxPid);
-  }
-
-  interrupt(): void {
-    this.#interrupt?.();
+    this.#target.onDetached(() => {
+      for (const runtime of this.#activeRuntimes.values()) {
+        void runtime
+          .command("process detach")
+          .catch((error) =>
+            this.#logger.debug(`[cleanup] LLDB detach failed: ${errorMessage(error)}`)
+          );
+      }
+    });
   }
 
   async activate(
@@ -83,120 +73,62 @@ export class LldbSourceDebuggerTarget {
     if (this.#activeRuntimes.has(runtime.id)) {
       throw new Error(`SourceDebuggerComponent ${runtime.id} is already active`);
     }
-    return this.#primaryId === undefined
-      ? this.#activatePrimary(runtime, route)
-      : this.#activateSecondary(runtime, route);
-  }
-
-  async #activatePrimary(
-    runtime: IsolatedLldbComponentRuntime,
-    route: SourceDebuggerComponentRoute
-  ): Promise<LldbTargetActivation> {
-    const routedComponents = this.#args.components.length > 0;
-    let handle: PlatformServerHandle | undefined;
+    const primary = this.#primaryId === undefined;
+    let projection: FirefoxGdbRspProjection | undefined;
     // Navigation can detach the RDP target while LLDB's initial attach is
     // still pending. Treat the runtime as participating before attach so the
     // detach handler resets it and the next attach attempt starts cleanly.
     this.#activeRuntimes.set(runtime.id, runtime);
     try {
-      handle = await startPlatformServer(this.#args, {
+      if (!primary) this.#onOutput(`attaching ${route.id}...`);
+      projection = await this.#target.createGdbRspProjection({
+        componentId: runtime.id,
+        primary,
         wrapConnectPort: runtime.bridgeTcp,
         runControl: runtime.runControl,
-        ...(routedComponents
+        ...(this.#routedComponents
           ? {
               moduleFilter: (url: string, kind: "wasm" | "javascript") =>
                 kind === "wasm" && componentForModuleUrl(this.#routes, url).id === route.id,
             }
           : {}),
-        logger: this.#logger,
-        onTab: (tab, pid) => this.#onOutput(`tab available: ${tab.url}\n  attach --pid ${pid}`),
-        onSession: (session, interrupt) => this.#installPrimarySession(session, interrupt),
       });
-      this.#primaryId = runtime.id;
-      this.#firefoxPid = handle.firefoxPid;
+      if (primary) this.#primaryId = runtime.id;
 
-      await runtime.connectPlatform(handle.port);
+      await runtime.connectPlatform(projection.port);
       await runtime.command("command alias attach process attach --plugin wasm");
+      if (!primary) {
+        // Let the connect-mode tab watcher populate its stable PID map before
+        // the attach handshake asks it to launch the per-tab RSP server.
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        await runtime.command("platform process list");
+      }
 
       const greeting =
         "firefox-lldb source debugger — `attach --pid N` to attach, `help` for generic commands.";
-      let readyMessage: string;
-      if (this.#args.url) {
-        this.#onOutput(`${greeting}\nattaching...`);
-        readyMessage = await runtime.attach(1, {
+      let readyMessage: string | undefined;
+      if (this.#target.automaticAttach) {
+        if (primary) this.#onOutput(`${greeting}\nattaching...`);
+        const attached = await runtime.attach(1, {
           onRetry: (attempt) =>
-            this.#onOutput(`automatic attach attempt ${attempt} was interrupted; retrying...`),
+            this.#onOutput(
+              primary
+                ? `automatic attach attempt ${attempt} was interrupted; retrying...`
+                : `${route.id} attach attempt ${attempt} was interrupted; retrying...`
+            ),
         });
-        if (this.#routes.length > 1 && !this.#primarySession) {
-          throw new Error("primary component attached without publishing its RDP session");
-        }
+        if (primary) readyMessage = attached;
       } else {
         const result = await runtime.command("platform process list");
-        readyMessage = `${greeting}\n${result.output.trimEnd()}`;
+        if (primary) readyMessage = `${greeting}\n${result.output.trimEnd()}`;
       }
 
-      const activeHandle = handle;
-      void activeHandle.firefoxExited?.then(() => {
-        if (this.#activeRuntimes.has(runtime.id)) this.#onFirefoxExit();
-      });
-      return this.#activationHandle(runtime.id, activeHandle, readyMessage, true);
+      return this.#activationHandle(runtime.id, projection, readyMessage, primary);
     } catch (error) {
       this.#activeRuntimes.delete(runtime.id);
       if (this.#primaryId === runtime.id) this.#clearPrimary(runtime.id);
-      await handle
-        ?.shutdown()
-        .catch((cleanupError) =>
-          this.#logger.error(
-            `failed to roll back primary debugger target: ${errorMessage(cleanupError)}`
-          )
-        );
-      throw error;
-    }
-  }
-
-  async #activateSecondary(
-    runtime: IsolatedLldbComponentRuntime,
-    route: SourceDebuggerComponentRoute
-  ): Promise<LldbTargetActivation> {
-    if (!this.#primarySession) {
-      throw new Error(`cannot activate ${runtime.id} before the primary debuggee session exists`);
-    }
-    let handle: PlatformServerHandle | undefined;
-    this.#activeRuntimes.set(runtime.id, runtime);
-    try {
-      this.#onOutput(`attaching ${route.id}...`);
-      handle = await startPlatformServer(
-        {
-          ...this.#args,
-          connect: true,
-          port: 0,
-          url: undefined,
-          fire: undefined,
-        },
-        {
-          wrapConnectPort: runtime.bridgeTcp,
-          sharedRdpSession: this.#primarySession,
-          runControl: runtime.runControl,
-          moduleFilter: (url, kind) =>
-            kind === "wasm" && componentForModuleUrl(this.#routes, url).id === route.id,
-          logger: this.#logger,
-        }
-      );
-      await runtime.connectPlatform(handle.port);
-      await runtime.command("command alias attach process attach --plugin wasm");
-      // Let the connect-mode tab watcher populate its stable PID map before
-      // the attach handshake asks it to launch the per-tab RSP server.
-      await new Promise((resolve) => setTimeout(resolve, 250));
-      await runtime.command("platform process list");
-      await runtime.attach(1, {
-        onRetry: (attempt) =>
-          this.#onOutput(`${route.id} attach attempt ${attempt} was interrupted; retrying...`),
-      });
-      return this.#activationHandle(runtime.id, handle, undefined, false);
-    } catch (error) {
-      this.#activeRuntimes.delete(runtime.id);
-      await handle
-        ?.shutdown()
+      await projection
+        ?.close()
         .catch((cleanupError) =>
           this.#logger.error(
             `failed to roll back debugger target ${runtime.id}: ${errorMessage(cleanupError)}`
@@ -208,7 +140,7 @@ export class LldbSourceDebuggerTarget {
 
   #activationHandle(
     componentId: string,
-    handle: PlatformServerHandle,
+    projection: FirefoxGdbRspProjection,
     readyMessage: string | undefined,
     primary: boolean
   ): LldbTargetActivation {
@@ -219,7 +151,7 @@ export class LldbSourceDebuggerTarget {
         (closePromise ??= (async () => {
           this.#activeRuntimes.delete(componentId);
           try {
-            await handle.shutdown();
+            await projection.close();
           } finally {
             if (primary) this.#clearPrimary(componentId);
           }
@@ -227,43 +159,9 @@ export class LldbSourceDebuggerTarget {
     };
   }
 
-  #installPrimarySession(session: RdpWasmSession, interrupt: () => void): void {
-    this.#primarySession = session;
-    this.#interrupt = interrupt;
-    void session.streamConsole((message) => this.#onConsole(message));
-
-    let awaitingNavigationTarget = false;
-    session.on("navigated", () => {
-      this.#onOutput("page navigating; re-syncing debug session...");
-      awaitingNavigationTarget = true;
-    });
-    session.on("target", (info) => {
-      if (!info.isTopLevel || !awaitingNavigationTarget) return;
-      awaitingNavigationTarget = false;
-      this.#onOutput(`page navigated to ${info.url}`);
-    });
-    session.on("detached", () => {
-      this.#onOutput("the attached tab was closed; detaching.");
-      if (this.#primarySession === session) {
-        this.#primarySession = undefined;
-        this.#interrupt = undefined;
-      }
-      for (const runtime of this.#activeRuntimes.values()) {
-        void runtime
-          .command("process detach")
-          .catch((error) =>
-            this.#logger.debug(`[cleanup] LLDB detach failed: ${errorMessage(error)}`)
-          );
-      }
-    });
-  }
-
   #clearPrimary(componentId: string): void {
     if (this.#primaryId !== componentId) return;
     this.#primaryId = undefined;
-    this.#primarySession = undefined;
-    this.#interrupt = undefined;
-    this.#firefoxPid = undefined;
   }
 }
 
@@ -284,7 +182,22 @@ export class LldbSourceDebuggerComponentLoader implements SourceDebuggerComponen
     this.id = route.id;
   }
 
-  async load(host: SourceDebuggerComponentHostBinding): Promise<LoadedSourceDebuggerComponent> {
+  async loadDefinition(): Promise<LoadedSourceDebuggerComponentDefinition> {
+    const definition: SourceDebuggerComponentDefinition = {
+      describe: async () => lldbSourceDebuggerDescriptor({ id: this.id, name: this.options.name }),
+      probeModule: probeLldbSourceDebuggerModule,
+    };
+    return {
+      id: this.id,
+      definition,
+      probeModule: definition.probeModule,
+      close: () => {},
+    };
+  }
+
+  async instantiate(
+    host: SourceDebuggerComponentHostBinding
+  ): Promise<LoadedSourceDebuggerComponent> {
     const runtime = await IsolatedLldbComponentRuntime.create({
       ...this.options,
       id: this.id,

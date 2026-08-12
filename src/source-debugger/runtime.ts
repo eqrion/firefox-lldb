@@ -4,22 +4,40 @@
 
 import type { RdpWasmSession } from "../rdp/session.js";
 import type { Logger } from "../logging.js";
+import { SourceDebuggerComponentCatalog } from "./catalog.js";
 import { SourceDebuggerSessionHost } from "./host.js";
 import type {
   LoadedSourceDebuggerComponent,
   SourceDebuggerComponentActivation,
   SourceDebuggerComponentLoader,
 } from "./loader.js";
-import type { ModuleOwnerResolver } from "./ownership.js";
+import {
+  createProbeModuleOwnerResolver,
+  type ModuleOwnerResolver,
+  type SourceDebuggerComponentProbe,
+  type UnownedModuleDescriptor,
+} from "./ownership.js";
 import { SourceDebuggerSession } from "./session.js";
+
+export interface SourceDebuggerDiscoveryTarget {
+  modules(): Promise<UnownedModuleDescriptor[]>;
+  close(): void | Promise<void>;
+}
 
 export interface SourceDebuggerSessionRuntimeOptions {
   loaders: readonly SourceDebuggerComponentLoader[];
+  target?: SourceDebuggerDiscoveryTarget;
   host?: SourceDebuggerSessionHost;
   getRdpSession?: () => RdpWasmSession | undefined;
   createModuleOwnerResolver?: (
-    components: readonly LoadedSourceDebuggerComponent[]
+    definitions: readonly SourceDebuggerComponentProbe[]
   ) => ModuleOwnerResolver;
+  /** Compatibility components which must observe every stop even if no
+   * currently-loaded module selected them. */
+  eagerComponentIds?: readonly string[];
+  /** Components to instantiate only when discovery sees no initial modules
+   * (for example the interactive attach-without-URL path). */
+  fallbackComponentIds?: readonly string[];
   logger?: Logger;
 }
 
@@ -29,22 +47,28 @@ export interface SourceDebuggerSessionRuntimeOptions {
 export class SourceDebuggerSessionRuntime {
   readonly session: SourceDebuggerSession;
   readonly components: readonly LoadedSourceDebuggerComponent[];
+  readonly catalog: SourceDebuggerComponentCatalog;
   readonly #host: SourceDebuggerSessionHost;
+  readonly #target: SourceDebuggerDiscoveryTarget | undefined;
   #activationPromise: Promise<SourceDebuggerComponentActivation> | undefined;
   #closePromise: Promise<void> | undefined;
 
   private constructor(
     host: SourceDebuggerSessionHost,
+    catalog: SourceDebuggerComponentCatalog,
     components: LoadedSourceDebuggerComponent[],
+    resolveModuleOwner: ModuleOwnerResolver,
     options: SourceDebuggerSessionRuntimeOptions
   ) {
     this.#host = host;
+    this.#target = options.target;
+    this.catalog = catalog;
     this.components = components;
     this.session = new SourceDebuggerSession({
       components: components.map(({ component }) => component),
       debuggeeHost: host,
       getRdpSession: options.getRdpSession,
-      resolveModuleOwner: options.createModuleOwnerResolver?.(components),
+      resolveModuleOwner,
       logger: options.logger,
     });
   }
@@ -52,31 +76,51 @@ export class SourceDebuggerSessionRuntime {
   static async load(
     options: SourceDebuggerSessionRuntimeOptions
   ): Promise<SourceDebuggerSessionRuntime> {
-    if (options.loaders.length === 0) {
-      throw new Error("SourceDebuggerSessionRuntime requires at least one component loader");
-    }
-    const ids = options.loaders.map(({ id }) => id);
-    if (new Set(ids).size !== ids.length) {
-      throw new Error("SourceDebuggerComponent loader ids must be unique");
-    }
-
     const host = options.host ?? new SourceDebuggerSessionHost({ logger: options.logger });
+    let catalog: SourceDebuggerComponentCatalog | undefined;
     const components: LoadedSourceDebuggerComponent[] = [];
     try {
-      for (const loader of options.loaders) {
-        const loaded = await loader.load(host.forComponent(loader.id));
-        if (loaded.id !== loader.id) {
+      catalog = await SourceDebuggerComponentCatalog.load(options.loaders);
+      const resolveModuleOwner =
+        options.createModuleOwnerResolver?.(catalog.probes()) ??
+        createProbeModuleOwnerResolver(catalog.probes());
+      const modules = (await options.target?.modules()) ?? [];
+      const selectedIds = new Set(options.eagerComponentIds ?? []);
+      if (modules.length === 0) {
+        for (const id of options.fallbackComponentIds ?? []) selectedIds.add(id);
+      } else {
+        for (const module of modules) selectedIds.add(await resolveModuleOwner(module));
+      }
+      if (selectedIds.size === 0) {
+        throw new Error(
+          "SourceDebuggerComponent discovery selected no components; configure a fallback for targets without loaded modules"
+        );
+      }
+      for (const id of selectedIds) catalog.entry(id);
+
+      for (const entry of catalog.entries) {
+        if (!selectedIds.has(entry.id)) continue;
+        const loaded = await entry.loader.instantiate(host.forComponent(entry.id));
+        if (loaded.id !== entry.id) {
           await loaded.close();
           throw new Error(
-            `SourceDebuggerComponent loader id ${loader.id} does not match loaded component id ${loaded.id}`
+            `SourceDebuggerComponent loader id ${entry.id} does not match loaded component id ${loaded.id}`
           );
         }
         components.push(loaded);
       }
-      return new SourceDebuggerSessionRuntime(host, components, options);
+      return new SourceDebuggerSessionRuntime(
+        host,
+        catalog,
+        components,
+        resolveModuleOwner,
+        options
+      );
     } catch (error) {
       await closeComponents(components);
       host.close();
+      await catalog?.close();
+      await Promise.resolve(options.target?.close()).catch(() => {});
       throw error;
     }
   }
@@ -120,6 +164,16 @@ export class SourceDebuggerSessionRuntime {
       } catch (error) {
         errors.push(error);
       }
+    }
+    try {
+      await this.catalog.close();
+    } catch (error) {
+      errors.push(error);
+    }
+    try {
+      await this.#target?.close();
+    } catch (error) {
+      errors.push(error);
     }
     if (errors.length) throw new AggregateError(errors, "source debugger runtime cleanup failed");
   }

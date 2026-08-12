@@ -11,6 +11,7 @@ import { parseCliArgs } from "../core/platform-session.js";
 import { quietLogger } from "./logger.js";
 import { runRepl } from "./repl.js";
 import { debugEnvEnabled, sourceDebuggerTraceEnabled } from "../config.js";
+import { FirefoxSourceDebuggerTarget } from "../source-debugger/firefox-target.js";
 import {
   LldbSourceDebuggerComponentLoader,
   LldbSourceDebuggerTarget,
@@ -35,20 +36,31 @@ async function main(): Promise<void> {
 
   let repl: ReturnType<typeof runRepl> | undefined;
   let cleanup: (code?: number) => Promise<void> = async () => {};
-  const target = new LldbSourceDebuggerTarget({
+  const pendingOutput: string[] = [];
+  const print = (message: string) => {
+    if (repl) repl.print(message);
+    else pendingOutput.push(message);
+  };
+  const target = await FirefoxSourceDebuggerTarget.start({
     args,
-    routes,
     logger,
-    onOutput: (message) => repl?.print(message),
+    onOutput: print,
     onConsole: (message) => repl?.printConsole(message),
     onFirefoxExit: () => {
-      repl?.print("Firefox exited.");
+      print("Firefox exited.");
       void cleanup(0);
     },
   });
+  const lldbTarget = new LldbSourceDebuggerTarget({
+    target,
+    routes,
+    routedComponents,
+    logger,
+    onOutput: print,
+  });
   const loaders = routes.map(
     (route) =>
-      new LldbSourceDebuggerComponentLoader(target, route, {
+      new LldbSourceDebuggerComponentLoader(lldbTarget, route, {
         name: routes.length === 1 && route.id === "lldb" ? "LLDB" : `LLDB (${route.id})`,
         logger: sourceLogger,
         observerResumesTarget: routes.length === 1,
@@ -58,8 +70,12 @@ async function main(): Promise<void> {
   );
   const runtime = await SourceDebuggerSessionRuntime.load({
     loaders,
-    getRdpSession: () => target.rdpSession,
-    createModuleOwnerResolver: (components) => createRoutedModuleOwnerResolver(routes, components),
+    target,
+    getRdpSession: () => target.session,
+    createModuleOwnerResolver: (definitions) =>
+      createRoutedModuleOwnerResolver(routes, definitions),
+    eagerComponentIds: routedComponents ? routes.map(({ id }) => id) : [],
+    fallbackComponentIds: routes.map(({ id }) => id),
     logger: sourceLogger,
   });
 
@@ -92,6 +108,7 @@ async function main(): Promise<void> {
     onTargetResume: () => target.focus(),
     onTargetInterrupt: () => target.interrupt(),
   });
+  for (const message of pendingOutput.splice(0)) repl.print(message);
 
   try {
     const activation = await runtime.activate();

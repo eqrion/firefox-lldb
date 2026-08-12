@@ -15,6 +15,13 @@ export interface SourceDebuggerComponentActivation {
   readyMessage?: string;
 }
 
+/** Lightweight installed definition retained by the catalog before a target
+ * or debugger engine instance exists. */
+export interface LoadedSourceDebuggerComponentDefinition extends SourceDebuggerComponentProbe {
+  readonly definition: SourceDebuggerComponentDefinition;
+  close(): void | Promise<void>;
+}
+
 /** One loaded, isolated debugger ecosystem. Runtime-specific extensions (for
  * example LLDB platform bootstrap) can add methods without changing what the
  * session or component catalog consumes. */
@@ -33,5 +40,6 @@ export interface SourceDebuggerComponentLoader<
   Runtime extends LoadedSourceDebuggerComponent = LoadedSourceDebuggerComponent,
 > {
   readonly id: ComponentId;
-  load(host: SourceDebuggerComponentHostBinding): Promise<Runtime>;
+  loadDefinition(): Promise<LoadedSourceDebuggerComponentDefinition>;
+  instantiate(host: SourceDebuggerComponentHostBinding): Promise<Runtime>;
 }

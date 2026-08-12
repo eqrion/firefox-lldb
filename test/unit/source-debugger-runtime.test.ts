@@ -21,9 +21,10 @@ test("session runtime loads, activates, and closes components in dependency orde
   const runtime = await SourceDebuggerSessionRuntime.load({
     host,
     loaders: [fakeLoader("a", events, "ready"), fakeLoader("b", events)],
+    eagerComponentIds: ["a", "b"],
   });
 
-  assert.deepEqual(events, ["load:a:a", "load:b:b"]);
+  assert.deepEqual(events, ["definition:a", "definition:b", "instantiate:a:a", "instantiate:b:b"]);
   assert.deepEqual(
     (await runtime.session.components()).map(({ id }) => id),
     ["a", "b"]
@@ -33,8 +34,10 @@ test("session runtime loads, activates, and closes components in dependency orde
 
   await runtime.close();
   assert.deepEqual(events, [
-    "load:a:a",
-    "load:b:b",
+    "definition:a",
+    "definition:b",
+    "instantiate:a:a",
+    "instantiate:b:b",
     "activate:a",
     "activate:b",
     "dispose:a",
@@ -51,12 +54,15 @@ test("activation failure closes the broker, target activations, and isolates", a
   const runtime = await SourceDebuggerSessionRuntime.load({
     host,
     loaders: [fakeLoader("healthy", events), fakeLoader("broken", events, undefined, true)],
+    eagerComponentIds: ["healthy", "broken"],
   });
 
   await assert.rejects(runtime.activate(), /activation failed: broken/);
   assert.deepEqual(events, [
-    "load:healthy:healthy",
-    "load:broken:broken",
+    "definition:healthy",
+    "definition:broken",
+    "instantiate:healthy:healthy",
+    "instantiate:broken:broken",
     "activate:healthy",
     "activate:broken",
     "dispose:healthy",
@@ -68,6 +74,37 @@ test("activation failure closes the broker, target activations, and isolates", a
   assert.throws(() => host.forComponent("late"), /SourceDebuggerSessionHost is closed/);
 });
 
+test("catalog discovery probes every definition and instantiates only module owners", async () => {
+  const events: string[] = [];
+  const target = {
+    modules: async () => [{ id: "module", url: "module.wasm", debugInfo: ["selected-format"] }],
+    close: () => {
+      events.push("target:close");
+    },
+  };
+  const runtime = await SourceDebuggerSessionRuntime.load({
+    target,
+    loaders: [
+      discoveryLoader("unsupported", false, events),
+      discoveryLoader("selected", true, events),
+    ],
+  });
+
+  assert.deepEqual(events, [
+    "definition:unsupported",
+    "definition:selected",
+    "probe:unsupported:module",
+    "probe:selected:module",
+    "instantiate:selected:selected",
+  ]);
+  assert.deepEqual(
+    runtime.components.map(({ id }) => id),
+    ["selected"]
+  );
+  await runtime.close();
+  assert.equal(events.at(-1), "target:close");
+});
+
 function fakeLoader(
   id: string,
   events: string[],
@@ -76,8 +113,21 @@ function fakeLoader(
 ): SourceDebuggerComponentLoader {
   return {
     id,
-    async load(host) {
-      events.push(`load:${id}:${host.componentId}`);
+    async loadDefinition() {
+      events.push(`definition:${id}`);
+      const definition: SourceDebuggerComponentDefinition = {
+        describe: async () => descriptor(id),
+        probeModule: async () => ({ supported: true, confidence: 1 }),
+      };
+      return {
+        id,
+        definition,
+        probeModule: definition.probeModule,
+        close: () => {},
+      };
+    },
+    async instantiate(host) {
+      events.push(`instantiate:${id}:${host.componentId}`);
       return fakeLoadedComponent(id, events, readyMessage, failActivation);
     },
   };
@@ -105,6 +155,40 @@ function fakeLoadedComponent(
     },
     close() {
       events.push(`close:${id}`);
+    },
+  };
+}
+
+function discoveryLoader(
+  id: string,
+  supported: boolean,
+  events: string[]
+): SourceDebuggerComponentLoader {
+  return {
+    id,
+    async loadDefinition() {
+      events.push(`definition:${id}`);
+      const definition: SourceDebuggerComponentDefinition = {
+        describe: async () => descriptor(id),
+        probeModule: async (module) => {
+          events.push(`probe:${id}:${module.id}`);
+          return {
+            supported,
+            confidence: supported ? 90 : 0,
+            reason: supported ? "selected format" : "different format",
+          };
+        },
+      };
+      return {
+        id,
+        definition,
+        probeModule: definition.probeModule,
+        close: () => {},
+      };
+    },
+    async instantiate(host) {
+      events.push(`instantiate:${id}:${host.componentId}`);
+      return fakeLoadedComponent(id, events);
     },
   };
 }
