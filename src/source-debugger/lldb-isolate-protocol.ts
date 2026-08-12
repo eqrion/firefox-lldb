@@ -19,7 +19,7 @@ export interface LldbIsolateWorkerData {
 }
 
 export type LldbIsolateControlMethod =
-  | "bridge-tcp"
+  | "bridge-rsp"
   | "connect-platform"
   | "attach"
   | "command"
@@ -88,7 +88,7 @@ export type LldbIsolateHostMessage =
 export type LldbIsolateWorkerMessage = LldbIsolateControlRequest | LldbIsolateResume;
 
 export interface LldbIsolateControlResults {
-  "bridge-tcp": number;
+  "bridge-rsp": number;
   "connect-platform": void;
   attach: string;
   command: CommandResult;

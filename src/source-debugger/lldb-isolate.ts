@@ -14,6 +14,7 @@ import type {
   LldbIsolateWorkerData,
 } from "./lldb-isolate-protocol.js";
 import { connectSourceDebuggerComponent } from "./rpc.js";
+import { openTcpRspByteChannel, type HostRspByteChannel } from "./rsp-byte-channel.js";
 import type { CommandResult } from "./types.js";
 
 interface PendingControl {
@@ -94,12 +95,19 @@ export class IsolatedLldbComponentRuntime {
   readonly component: SourceDebuggerComponentInstance;
   readonly runControl: RdpDebuggeeRunControl;
   readonly #channel: LldbIsolateChannel;
+  readonly #logger: Logger;
+  readonly #rspChannels = new Set<HostRspByteChannel>();
   #closePromise: Promise<void> | undefined;
 
-  private constructor(component: SourceDebuggerComponentInstance, channel: LldbIsolateChannel) {
+  private constructor(
+    component: SourceDebuggerComponentInstance,
+    channel: LldbIsolateChannel,
+    logger: Logger
+  ) {
     this.component = component;
     this.runControl = channel.runControl;
     this.#channel = channel;
+    this.#logger = logger;
   }
 
   static async create(
@@ -141,7 +149,7 @@ export class IsolatedLldbComponentRuntime {
           void channel.terminate();
         },
       });
-      return new IsolatedLldbComponentRuntime(component, channel);
+      return new IsolatedLldbComponentRuntime(component, channel, logger);
     } catch (error) {
       componentChannel.port1.close();
       await channel.close().catch(() => {});
@@ -149,10 +157,29 @@ export class IsolatedLldbComponentRuntime {
     }
   }
 
-  readonly bridgeTcp = (port: number): Promise<number> => this.#channel.call("bridge-tcp", port);
+  readonly bridgeTcp = async (port: number): Promise<number> => {
+    if (this.#closePromise) throw new Error(`LLDB component ${this.component.id} is closed`);
+    const bridge = await openTcpRspByteChannel(port, {
+      logger: this.#logger,
+      label: `${this.component.id} RSP host`,
+    });
+    this.#rspChannels.add(bridge);
+    void bridge.closed.then(() => this.#rspChannels.delete(bridge));
+    try {
+      return await this.#channel.callWithPorts(
+        "bridge-rsp",
+        [bridge.componentPort],
+        [bridge.componentPort]
+      );
+    } catch (error) {
+      bridge.close();
+      throw error;
+    }
+  };
 
-  connectPlatform(port: number): Promise<void> {
-    return this.#channel.call("connect-platform", port);
+  async connectPlatform(port: number): Promise<void> {
+    const channelId = await this.bridgeTcp(port);
+    await this.#channel.call("connect-platform", channelId);
   }
 
   async attach(
@@ -180,14 +207,25 @@ export class IsolatedLldbComponentRuntime {
   }
 
   close(): Promise<void> {
-    return (this.#closePromise ??= this.#channel.close());
+    return (this.#closePromise ??= (async () => {
+      this.#closeRspChannels();
+      await this.#channel.close();
+    })());
   }
 
   /** Force the isolation worker down. Normal cleanup uses close(); this is the
    * containment path for an unresponsive component. Its RPC peer immediately
    * rejects outstanding and subsequent calls when the port closes. */
   terminate(): Promise<void> {
-    return (this.#closePromise ??= this.#channel.terminate());
+    return (this.#closePromise ??= (async () => {
+      this.#closeRspChannels();
+      await this.#channel.terminate();
+    })());
+  }
+
+  #closeRspChannels(): void {
+    for (const bridge of this.#rspChannels) bridge.close();
+    this.#rspChannels.clear();
   }
 }
 
@@ -225,6 +263,22 @@ class LldbIsolateChannel {
     method: M,
     ...args: unknown[]
   ): Promise<LldbIsolateControlResults[M]> {
+    return this.#call(method, args, []);
+  }
+
+  callWithPorts<M extends LldbIsolateControlMethod>(
+    method: M,
+    args: unknown[],
+    ports: MessagePort[]
+  ): Promise<LldbIsolateControlResults[M]> {
+    return this.#call(method, args, ports);
+  }
+
+  #call<M extends LldbIsolateControlMethod>(
+    method: M,
+    args: unknown[],
+    ports: MessagePort[]
+  ): Promise<LldbIsolateControlResults[M]> {
     if (this.#closed) return Promise.reject(new Error("LLDB component isolate is closed"));
     const id = this.#nextId++;
     return new Promise((resolve, reject) => {
@@ -233,12 +287,15 @@ class LldbIsolateChannel {
         reject,
       });
       try {
-        this.port.postMessage({
-          type: "lldb-isolate-control-request",
-          id,
-          method,
-          args,
-        } satisfies LldbIsolateControlRequest);
+        this.port.postMessage(
+          {
+            type: "lldb-isolate-control-request",
+            id,
+            method,
+            args,
+          } satisfies LldbIsolateControlRequest,
+          ports
+        );
       } catch (error) {
         this.#pending.delete(id);
         reject(toError(error));

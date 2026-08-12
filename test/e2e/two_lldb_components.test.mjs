@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { PassThrough, Writable } from "node:stream";
 import { parseCliArgs, startPlatformServer } from "../../src/core/platform-session.ts";
 import { runRepl } from "../../src/cli/repl.ts";
-import { EmbeddedLldbComponentRuntime } from "../../src/source-debugger/lldb-runtime.ts";
+import { IsolatedLldbComponentRuntime } from "../../src/source-debugger/lldb-isolate.ts";
 import { SourceDebuggerSession } from "../../src/source-debugger/session.ts";
 import { freePort } from "../../src/platform/gdb-server-spawner.ts";
 import { consoleLogger } from "../../src/cli/logger.ts";
@@ -97,19 +97,21 @@ test("two isolated LLDB components compose an interleaved stack over one Firefox
   const staticServer = await startStaticServer("test/fixtures/two-components");
   const url = `http://127.0.0.1:${staticServer.port}/index.html`;
   const rdpPort = await freePort();
-  const primary = await EmbeddedLldbComponentRuntime.create({
+  const primary = await IsolatedLldbComponentRuntime.create({
     id: "lldb-a",
     name: "LLDB A",
     exclusiveModules: true,
     observerResumesTarget: false,
     logger: consoleLogger(Boolean(process.env.E2E_RUNTIME_VERBOSE)),
+    verbose: Boolean(process.env.E2E_RUNTIME_VERBOSE),
   });
-  const secondary = await EmbeddedLldbComponentRuntime.create({
+  const secondary = await IsolatedLldbComponentRuntime.create({
     id: "lldb-b",
     name: "LLDB B",
     exclusiveModules: true,
     observerResumesTarget: false,
     logger: consoleLogger(Boolean(process.env.E2E_RUNTIME_VERBOSE)),
+    verbose: Boolean(process.env.E2E_RUNTIME_VERBOSE),
   });
   let primaryHandle;
   let secondaryHandle;

@@ -85,6 +85,7 @@ Requires Firefox installed in a standard location (see `findFirefoxBinary` in
 - `wasm_trap.test.mjs` — wasm traps (divide-by-zero, unreachable, out-of-bounds, call_indirect mismatch) pause as a signal stop; trapping frame is inspectable.
 - `mcp.test.mjs` — real MCP launch/command flow, including automatic-attach recovery across an initial page reload and the bounded default wait for a command that does not return a prompt.
 - `source_debugger_session.test.mjs` — language-generic `(sdb)` commands routed through one real LLDB SourceDebuggerComponent.
+- `component_isolation.test.mjs` — host-supplied RSP transport into an isolated LLDB, plus worker failure and SourceDebuggerSession quarantine behavior.
 - `two_lldb_components.test.mjs` — the real generic `(sdb)` REPL drives two isolated LLDB workers over one shared physical RDP session: component-qualified breakpoints and driver handoff, a composed B/JavaScript/A stack, locals through both owners, and step-out from B while preserving A's suspended caller.
 - `multi_component_cli.test.mjs` — spawns the production `firefox-lldb` executable in a PTY with two `--component` routes, steps from A through opaque JavaScript into B without a destination breakpoint, inspects both owners, and finishes back to A through the user-facing CLI bootstrap.
 - `multi_component_threaded.test.mjs` — two outer-worker LLDB components coordinate worker → main → worker breakpoint handoffs over one pthread-enabled Firefox session.

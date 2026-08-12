@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 import { readFile } from "node:fs/promises";
-import { workerData } from "node:worker_threads";
+import { workerData, type MessagePort } from "node:worker_threads";
 import type { Logger } from "../logging.js";
 import { EmbeddedLldbComponentRuntime } from "./lldb-runtime.js";
 import type {
@@ -13,6 +13,7 @@ import type {
   LldbIsolateWorkerMessage,
 } from "./lldb-isolate-protocol.js";
 import { serveSourceDebuggerComponent } from "./rpc.js";
+import { connectRspByteChannel } from "./rsp-byte-channel.js";
 
 const data = workerData as LldbIsolateWorkerData;
 const { componentPort, controlPort, options } = data;
@@ -87,10 +88,10 @@ async function handleControlRequest(
   request: LldbIsolateControlRequest
 ): Promise<unknown> {
   switch (request.method) {
-    case "bridge-tcp":
-      return runtime.bridgeTcp(request.args[0] as number);
+    case "bridge-rsp":
+      return runtime.bridgeRsp(connectRspByteChannel(request.args[0] as MessagePort));
     case "connect-platform":
-      return runtime.connectPlatform(request.args[0] as number);
+      return runtime.connectPlatformChannel(request.args[0] as number);
     case "attach":
       return runtime.attach(request.args[0] as number, { attempts: request.args[1] as number });
     case "command":

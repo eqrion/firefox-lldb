@@ -29,12 +29,14 @@ The first implementation lives under `src/source-debugger/`:
 
 - `types.ts` defines structured-cloneable protocol records and opaque IDs.
 - `component.ts` defines the imported/exported component contracts.
+- `rsp-byte-channel.ts` adapts host-owned TCP endpoints to transferable RSP
+  streams without exposing sockets to debugger isolates.
 - `lldb-component.ts` adapts the real wasm-compiled LLDB and its public API.
-- `lldb-runtime.ts` owns one isolated LLDB worker, pthread pool, in-process
-  channels, and the sockets bridging them to its RSP endpoints.
+- `lldb-runtime.ts` owns one isolated LLDB worker, pthread pool, and in-process
+  channels, and imports host-supplied RSP byte streams.
 - `lldb-isolate.ts` is the host proxy for an outer component worker. The worker
-  owns the LLDB adapter, its runtime, TCP bridges, and the nested `lldb-wasm`
-  worker; the host retains only component and physical run-lease proxies.
+  owns the LLDB adapter, its runtime, and the nested `lldb-wasm` worker; the
+  host owns TCP bridges, component proxies, and physical run-lease proxies.
 - `rpc.ts` exposes an instance over concurrent request/response calls on a
   `MessagePort`, preserving optional operations, errors, and configurable call
   deadlines.
@@ -140,6 +142,17 @@ failure; a later command can inspect or continue with the remaining components.
 Modules keep their original owner rather than being silently reassigned to a
 debugger that may interpret their debug information incorrectly.
 
+The imported debuggee side now has a concrete TypeScript seam as well.
+`SourceDebuggerComponentHost.connectGdbRsp()` returns an ordered, pull-based
+`GdbRspConnection` resource. In the production prototype the outer host opens
+localhost platform/per-process sockets, transfers a `MessagePort`, and the
+worker adapts it to that resource before handing it to LLDB. Thus LLDB still
+gets its required GDB RSP protocol while the isolated component never imports
+TCP, Firefox RDP, or Node socket APIs. Endpoint lookup is still wired during
+LLDB runtime bootstrap; routing it through the component factory's
+`instantiate(host)` call is the remaining API cleanup before a Component Model
+translation.
+
 LLDB scopes currently select and materialize frames through the public command
 interpreter. The bulk SB wrapper runs on a different wasm pthread, cannot
 materialize non-top `DW_OP_WASM_location`, and can leave the next run-control
@@ -153,10 +166,12 @@ adapter.
 1. **Complete the LLDB source adapter (in progress).** Extend the wasm LLDB SB wrapper with
    structured thread, source, breakpoint-location, scope, and lazy `SBValue`
    operations. Remove presentation parsing from `lldb-component.ts`.
-2. **Move raw debuggee ownership into the session (shared-host proof complete).** The
+2. **Move raw debuggee ownership into the session (shared-host and RSP-import proofs complete).** The
    platform can now lend one physical `RdpWasmSession` to multiple filtered
-   gdbstub projections without transferring its lifetime. Extract that into a
-   first-class session-owned debuggee host rather than a platform option.
+   gdbstub projections without transferring its lifetime. TCP stays in the
+   outer host and each LLDB isolate imports only a `GdbRspConnection`. Extract
+   endpoint creation into the component factory's first-class session-owned
+   host rather than the current platform/bootstrap options.
 3. **Make module assignment explicit (prototype complete).** Probe components when modules arrive,
    assign one owner, expose foreign frames opaquely, and reject breakpoint
    mutations outside the owner's module set.

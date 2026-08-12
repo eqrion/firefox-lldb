@@ -87,10 +87,10 @@ when diagnosing these handoffs, without enabling the full RDP/RSP wire trace.
 The CLI presents those adapters to `SourceDebuggerSession` through
 `src/source-debugger/rpc.ts`, a concurrent request/response transport over
 `MessagePort`. This exercises structured cloning and keeps a pending
-`waitForStop` from blocking a sibling `abortRun` or `cancelRun` call. The server
-endpoint, LLDB adapter, runtime, TCP bridges, and nested `lldb-wasm` worker live
-inside a per-component outer worker (`lldb-isolate-worker.ts`). The host-side
-proxy retains Firefox's physical resume closures; the worker returns only a
+`waitForStop` from blocking a sibling `abortRun` or `cancelRun` call. The LLDB
+adapter, runtime, and nested `lldb-wasm` worker live inside a per-component
+outer worker (`lldb-isolate-worker.ts`). The host-side proxy retains TCP
+bridges and Firefox's physical resume closures; the worker returns only a
 refined resume action and permission to release one. Worker exit closes the
 component port, rejects pending calls, and drops unreleased closures so failure
 is biased toward leaving Firefox paused. Bounded component calls have a
@@ -109,14 +109,15 @@ server in-process and drives LLDB compiled to WebAssembly (the `lldb-wasm`
 package, built from `../llvm-project/lldb/tools/lldb-wasm`) through an
 `IsolatedLldbComponentRuntime` and `SourceDebuggerSession`. The outer isolate
 owns an `EmbeddedLldbComponentRuntime`. Because the wasm LLDB cannot open TCP
-sockets, each
-RSP connection it would normally make (the platform connection and every per-tab
-GDB server) is bridged through an in-memory channel: LLDB connects to
-`inprocess://<channelId>` and `firefox-lldb` pumps bytes between that channel and
-a localhost socket to the in-process server.
+sockets, the host opens each RSP connection it needs (the platform connection
+and every per-tab GDB server) and transfers a `MessagePort` byte channel to the
+outer worker. The worker adapts it to the pull-based `GdbRspConnection` import;
+LLDB connects to `inprocess://<channelId>` and the runtime pumps only ordered
+bytes between that resource and its internal channel. TCP, gdbstub, RDP, and
+physical Firefox ownership stay outside the debugger isolate.
 
 ```
-wasm LLDB (Worker)  ──inprocess://N──►  channel N  ◄──pump──►  net.Socket  ──►  platform / per-tab server (same process)
+wasm LLDB ─► channel N ◄─ GdbRspConnection ─ MessagePort ─► host net.Socket ─► platform / per-tab server
 ```
 
 This requires the wasm LLDB to select the `wasm` platform (`platform select

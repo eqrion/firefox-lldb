@@ -28,10 +28,26 @@ export interface ModuleClaim {
   reason?: string;
 }
 
-// Placeholder for the typed debuggee capability that the next stage will hand
-// to each isolated component. The current LLDB component already reaches that
-// capability through its internal RSP/gdbstub connection.
-export interface SourceDebuggerComponentHost {}
+/** One connection to a host-owned GDB Remote Serial Protocol endpoint. This
+ * intentionally exposes only an ordered byte stream: TCP, Firefox RDP, and the
+ * gdbstub implementation remain outside the source debugger component. */
+export interface GdbRspConnection {
+  read(): Promise<Uint8Array | null>;
+  write(data: Uint8Array): Promise<void>;
+  close(): Promise<void>;
+}
+
+export interface GdbRspEndpoint {
+  id: string;
+  kind: "platform" | "process";
+}
+
+/** Capabilities imported by a SourceDebuggerComponent. The TypeScript
+ * prototype uses opaque endpoint ids and byte-stream resources so this shape
+ * can become WIT resources without standardizing TCP or Node APIs. */
+export interface SourceDebuggerComponentHost {
+  connectGdbRsp(endpoint: GdbRspEndpoint): Promise<GdbRspConnection>;
+}
 
 export interface SourceDebuggerComponent {
   describe(): Promise<SourceDebuggerComponentDescriptor>;

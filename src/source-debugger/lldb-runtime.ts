@@ -2,7 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-import net from "node:net";
 import { LLDBClient, type FileProvider } from "lldb-wasm";
 import { noopLogger, type Logger } from "../logging.js";
 import {
@@ -10,6 +9,7 @@ import {
   type RdpDebuggeeResumeAction,
   type RdpDebuggeeRunControl,
 } from "../gdb/rdp-debuggee.js";
+import type { GdbRspConnection } from "./component.js";
 import type { ComponentRunRequest, RunId } from "./types.js";
 import {
   LldbSourceDebuggerComponentInstance,
@@ -177,15 +177,17 @@ export interface EmbeddedLldbComponentRuntimeOptions extends LldbSourceDebuggerC
 }
 
 // Owns one complete embedded LLDB isolation domain: its wasm worker, pthreads,
-// in-process channels, and the TCP sockets which bridge those channels to RSP
-// servers. Keeping this state out of the CLI is what makes constructing two
-// LLDB SourceDebuggerComponents in one SourceDebuggerSession practical.
+// and in-process channels. TCP/RDP resources stay in the component host; this
+// runtime imports only transferred GDB RSP byte streams.
 export class EmbeddedLldbComponentRuntime {
   readonly component: LldbSourceDebuggerComponentInstance;
   readonly runControl: RdpDebuggeeRunControl;
   readonly #client: LLDBClient;
   readonly #logger: Logger;
-  readonly #sockets = new Set<net.Socket>();
+  readonly #rspChannels = new Map<
+    number,
+    { connection: GdbRspConnection; close: (notifyHost: boolean) => Promise<void> }
+  >();
   readonly #runtimeRunControl: LldbRuntimeRunControl;
   #closePromise: Promise<void> | undefined;
 
@@ -221,48 +223,59 @@ export class EmbeddedLldbComponentRuntime {
     return new EmbeddedLldbComponentRuntime(client, options);
   }
 
-  // Bridge a localhost TCP RSP server to a channel owned by this LLDB worker.
-  // The method is deliberately an arrow so it can be passed directly as
-  // startPlatformServer's wrapConnectPort callback.
-  readonly bridgeTcp = async (port: number): Promise<number> => {
+  /** Import an already-connected GDB RSP byte stream from the component host.
+   * The isolated LLDB never sees the host's TCP socket or the browser-specific
+   * server which produced it. */
+  async bridgeRsp(connection: GdbRspConnection): Promise<number> {
     if (this.#closePromise) throw new Error(`LLDB component ${this.component.id} is closed`);
     const channelId = await this.#client.createChannel();
-    const socket = net.connect(port, "127.0.0.1");
-    this.#sockets.add(socket);
-    socket.on("close", () => this.#sockets.delete(socket));
-    socket.setNoDelay(true);
+    let closed = false;
+    const close = async (notifyHost: boolean): Promise<void> => {
+      if (closed) return;
+      closed = true;
+      this.#rspChannels.delete(channelId);
+      if (notifyHost) {
+        await connection.close().catch(() => {});
+      }
+      await this.#client.unbridgeChannel(channelId).catch(() => {});
+      await this.#client.destroyChannel(channelId).catch(() => {});
+    };
 
-    // Register before bridgeChannel: loopback may connect while that await is
-    // pending, and attaching the listener afterward would miss the event.
-    const connected = new Promise<void>((resolve, reject) => {
-      socket.once("connect", resolve);
-      socket.once("error", reject);
-    });
-    socket.on("data", (data) => {
-      void this.#client.channelServerWrite(channelId, new Uint8Array(data)).catch((error) => {
-        this.#logger.error(
-          `[${this.component.id}] server-to-LLDB bridge failed: ${errorMessage(error)}`
-        );
-        socket.destroy();
-      });
-    });
-    socket.on("error", (error) =>
-      this.#logger.warn(`[${this.component.id}] bridge socket error: ${error.message}`)
-    );
-    await this.#client.bridgeChannel(channelId, (data) => {
-      if (!socket.destroyed) socket.write(Buffer.from(data));
-    });
     try {
-      await connected;
+      this.#rspChannels.set(channelId, { connection, close });
+      await this.#client.bridgeChannel(channelId, (data) => {
+        if (!closed) {
+          void connection.write(data).catch((error) => {
+            this.#logger.error(
+              `[${this.component.id}] LLDB-to-host RSP bridge failed: ${errorMessage(error)}`
+            );
+            void close(true);
+          });
+        }
+      });
+      void (async () => {
+        for (;;) {
+          const data = await connection.read();
+          if (data === null) {
+            await close(false);
+            return;
+          }
+          await this.#client.channelServerWrite(channelId, data);
+        }
+      })().catch((error) => {
+        this.#logger.error(
+          `[${this.component.id}] host-to-LLDB RSP bridge failed: ${errorMessage(error)}`
+        );
+        void close(true);
+      });
+      return channelId;
     } catch (error) {
-      socket.destroy();
+      await close(true);
       throw error;
     }
-    return channelId;
-  };
+  }
 
-  async connectPlatform(port: number): Promise<void> {
-    const channelId = await this.bridgeTcp(port);
+  async connectPlatformChannel(channelId: number): Promise<void> {
     await this.#checkedCommand("platform select remote-gdb-server");
     await this.#checkedCommand(`platform connect inprocess://${channelId}`);
   }
@@ -298,8 +311,8 @@ export class EmbeddedLldbComponentRuntime {
 
   close(): Promise<void> {
     return (this.#closePromise ??= (async () => {
-      for (const socket of this.#sockets) socket.destroy();
-      this.#sockets.clear();
+      await Promise.allSettled([...this.#rspChannels.values()].map(({ close }) => close(true)));
+      this.#rspChannels.clear();
       await this.#client.destroy();
     })());
   }
