@@ -24,7 +24,7 @@ test("Ctrl-C while running returns the process to the prompt", async () => {
   // Wait for the REPL's "Process running." feedback before sending the interrupt.
   await s.waitFor("Process running.");
   s.interrupt();
-  // type() settles when the (lldb) prompt returns. If interrupt fails this hangs.
+  // type() settles when the (sdb) prompt returns. If interrupt fails this hangs.
   const out = await typing;
   assert.match(out, /Process running\./);
 });

@@ -4,7 +4,7 @@
 
 // Drives the *real* firefox-lldb CLI in a pseudo-terminal. Spawning the actual
 // binary (rather than re-wiring runRepl in-process) means the harness exercises
-// exactly what a human user runs: same readline, same `(lldb)` prompt, same
+// exactly what a human user runs: same readline, same `(sdb)` prompt, same
 // Ctrl-C handling. node-pty gives a genuine TTY so `\x03` becomes a real SIGINT
 // the REPL's `rl.on("SIGINT")` path handles.
 
@@ -13,7 +13,7 @@ import { dirname, join } from "node:path";
 import { spawn as ptySpawn, type IPty } from "node-pty";
 
 const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
-const promptCount = (s: string): number => (stripAnsi(s).match(/\(lldb\)/g) ?? []).length;
+const promptCount = (s: string): number => (stripAnsi(s).match(/\(sdb\)/g) ?? []).length;
 const MAX_BUFFER_CHARS = 4 * 1024 * 1024;
 export const DEFAULT_SEND_TIMEOUT_MS = 5_000;
 
@@ -43,7 +43,7 @@ export interface LaunchOptions {
 
 export interface SendResult {
   output: string;
-  /** True if a fresh `(lldb)` prompt returned; false if it timed out (the
+  /** True if a fresh `(sdb)` prompt returned; false if it timed out (the
    * target is likely still running — use interrupt() or read()). */
   prompt: boolean;
 }
@@ -78,7 +78,7 @@ export class PtyRepl {
     );
   }
 
-  // Launch Firefox + the CLI and resolve once the first `(lldb)` prompt is live.
+  // Launch Firefox + the CLI and resolve once the first `(sdb)` prompt is live.
   static async launch(opts: LaunchOptions): Promise<PtyRepl> {
     const args = [
       ...(IS_TS ? ["--import", "tsx"] : []),
@@ -206,7 +206,7 @@ export class PtyRepl {
     }
   }
 
-  // Resolve once the buffer holds at least `target` `(lldb)` prompts. Counting
+  // Resolve once the buffer holds at least `target` `(sdb)` prompts. Counting
   // (rather than "ends with prompt") avoids resolving on the stale prompt that
   // is already present from the previous command before this one has echoed.
   #waitForPrompt(target: number, timeoutMs: number): Promise<void> {
@@ -264,6 +264,6 @@ export class PtyRepl {
       if (lines[0]?.trim() === command.trim()) lines.shift();
       s = lines.join("\n");
     }
-    return s.replace(/\n*\(lldb\)\s*$/, "").trim();
+    return s.replace(/\n*\(sdb\)\s*$/, "").trim();
   }
 }

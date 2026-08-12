@@ -60,7 +60,7 @@ test("PTY: Ctrl-C interrupts a running target via onTargetInterrupt", async (t: 
   try {
     await waitFor(
       () => out,
-      (s) => s.includes("(lldb)")
+      (s) => s.includes("(sdb)")
     );
 
     child.write("c\r");
@@ -80,7 +80,7 @@ test("PTY: Ctrl-C interrupts a running target via onTargetInterrupt", async (t: 
       () => out,
       (s) => {
         const idx = s.indexOf("Process 1 stopped.");
-        return idx !== -1 && s.slice(idx).includes("(lldb)");
+        return idx !== -1 && s.slice(idx).includes("(sdb)");
       }
     );
 

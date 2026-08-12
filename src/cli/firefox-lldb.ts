@@ -4,7 +4,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // Convenience wrapper: run the platform server in-process and drive an embedded
-// LLDB (compiled to WebAssembly) as a real interactive (lldb) prompt on this
+// LLDB (compiled to WebAssembly) behind a language-generic (sdb) prompt on this
 // terminal. No native lldb binary is required.
 //
 // The wasm LLDB cannot open TCP sockets, so its RSP connections (the platform
@@ -22,6 +22,8 @@ import { runRepl } from "./repl.js";
 import type { RdpWasmSession } from "../rdp/session.js";
 import { debugEnvEnabled } from "../config.js";
 import type { Logger } from "../logging.js";
+import { LldbSourceDebuggerComponentInstance } from "../source-debugger/lldb-component.js";
+import { SourceDebuggerSession } from "../source-debugger/session.js";
 
 // lldb::ReturnStatus values at or above this are failures. Keep the automatic
 // attach retry local to the CLI: an uncontrolled page reload can invalidate the
@@ -97,6 +99,11 @@ async function main(): Promise<void> {
 
   const client = await LLDBClient.create();
   client.setFileProvider((path) => readFile(path).catch(() => null));
+  let session: RdpWasmSession | undefined;
+  const sourceDebuggerSession = new SourceDebuggerSession({
+    components: [new LldbSourceDebuggerComponentInstance(client)],
+    getRdpSession: () => session,
+  });
 
   let handle: Awaited<ReturnType<typeof startPlatformServer>> | undefined;
   let exiting = false;
@@ -104,7 +111,7 @@ async function main(): Promise<void> {
     if (exiting) return;
     exiting = true;
     for (const s of bridgeSockets) s.destroy();
-    for (const work of [handle?.shutdown(), client.destroy()]) {
+    for (const work of [sourceDebuggerSession.close(), handle?.shutdown(), client.destroy()]) {
       try {
         await work;
       } catch (err) {
@@ -127,11 +134,9 @@ async function main(): Promise<void> {
 
   // The REPL owns the terminal; `js` commands and console streaming need the
   // live RDP session, which the platform server hands us via onSession.
-  let session: RdpWasmSession | undefined;
   let triggerInterrupt: (() => void) | undefined;
   const repl = runRepl({
-    client,
-    getSession: () => session,
+    session: sourceDebuggerSession,
     onExit: () => void cleanup(0),
     onTargetResume: () => {
       if (handle?.firefoxPid !== undefined) focusFirefoxWindow(handle.firefoxPid);
@@ -190,7 +195,8 @@ async function main(): Promise<void> {
     await client.sessionCommand(`platform connect inprocess://${platformChannel}`);
     await client.sessionCommand("command alias attach process attach --plugin wasm");
 
-    let intro = "firefox-lldb — `attach --pid N` to attach, `js p <expr>` to evaluate JS.";
+    let intro =
+      "firefox-lldb source debugger — `attach --pid N` to attach, `help` for generic commands.";
     if (args.url) {
       repl.print(intro + "\nattaching...");
       intro = await attachWithRetry(client, 1, (attempt) =>

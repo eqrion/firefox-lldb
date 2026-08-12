@@ -29,7 +29,7 @@ const TOOLS: Tool[] = [
     name: "lldb_launch",
     description:
       "Launch Firefox and the firefox-lldb REPL against a page, attach to the " +
-      "wasm process, and wait for the (lldb) prompt. Returns the attach/banner " +
+      "wasm process, and wait for the (sdb) prompt. Returns the attach/banner " +
       "output and the marionettePort that firefox-devtools-mcp should " +
       "--connect-existing to. Call this before any firefox-devtools tool.",
     inputSchema: {
@@ -53,9 +53,10 @@ const TOOLS: Tool[] = [
   {
     name: "lldb_send",
     description:
-      "Send one command to the (lldb) prompt and return its output. Use real " +
-      "LLDB commands (breakpoint set, continue, thread list, frame variable, " +
-      "disassemble, memory read, ...) plus firefox-lldb's `js p/bt/frame`. " +
+      "Send one command to the language-generic (sdb) prompt and return its output. " +
+      "Use SourceDebuggerSession commands (`break`, `continue`, `bt`, `locals`, " +
+      "`p`) or prefix a native LLDB command with `lldb`. `js p/bt/frame` remains " +
+      "available for JavaScript inspection. " +
       "`continue` returns when the target next stops; if it keeps running the " +
       "call times out (prompt=false) — use lldb_interrupt.",
     inputSchema: {

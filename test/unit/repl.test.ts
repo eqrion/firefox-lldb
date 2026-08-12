@@ -10,8 +10,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { PassThrough, Writable } from "node:stream";
 import { runRepl } from "../../src/cli/repl.js";
-import type { LLDBClient } from "lldb-wasm";
 import type { RdpWasmSession } from "../../src/rdp/session.js";
+import type { SourceDebuggerSession } from "../../src/source-debugger/session.js";
 
 const stripAnsi = (s: string) => s.replace(/\[[0-9;?]*[A-Za-z]/g, "");
 const tick = () => new Promise<void>((r) => setImmediate(r));
@@ -35,9 +35,31 @@ function harness(client: FakeClient, session?: Partial<RdpWasmSession>, extra?: 
       cb();
     },
   });
+  const debuggerSession = {
+    rdpSession: () => session,
+    command: (command: string) => client.sessionCommand(command),
+    cancelActiveRun: () => client.pause(),
+    components: async () => [{ id: "lldb", name: "LLDB", protocolVersion: "0.1" }],
+    modules: async () => [],
+    threads: async () => [{ id: "1", stopped: true }],
+    frames: async () => [],
+    scopes: async () => [],
+    evaluate: async () => null,
+    setBreakpoint: async () => {
+      throw new Error("not implemented by fake");
+    },
+    breakpoints: async () => [],
+    removeBreakpoint: async () => {},
+    continue: async () => {
+      const result = await client.sessionCommand("process continue");
+      return { stopId: "stop-1", reason: { kind: "stopped" }, output: result.output };
+    },
+    stepInto: async () => ({ stopId: "stop-1", reason: { kind: "step" } }),
+    stepOver: async () => ({ stopId: "stop-1", reason: { kind: "step" } }),
+    stepOut: async () => ({ stopId: "stop-1", reason: { kind: "step" } }),
+  } as unknown as SourceDebuggerSession;
   const repl = runRepl({
-    client: client as unknown as LLDBClient,
-    getSession: () => session as RdpWasmSession | undefined,
+    session: debuggerSession,
     input,
     output,
     onExit: () => {
@@ -48,7 +70,7 @@ function harness(client: FakeClient, session?: Partial<RdpWasmSession>, extra?: 
   const settle = () =>
     new Promise<void>((resolve) => {
       const check = () => {
-        if (stripAnsi(out).trimEnd().endsWith("(lldb)")) resolve();
+        if (stripAnsi(out).trimEnd().endsWith("(sdb)")) resolve();
         else waiters.push(check);
       };
       check();
@@ -275,7 +297,7 @@ test("Ctrl-C calls onTargetInterrupt not pause() when callback is provided", asy
   let release!: (v: { output: string; error: string; status: number }) => void;
   const client: FakeClient = {
     sessionCommand: (cmd) =>
-      cmd === "c"
+      cmd === "process continue"
         ? new Promise((r) => (release = r))
         : Promise.resolve({ output: "", error: "", status: 0 }),
     pause: async () => {

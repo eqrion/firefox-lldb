@@ -32,6 +32,9 @@ Requires Firefox installed in a standard location (see `findFirefoxBinary` in
 ### Infrastructure (no Firefox required)
 
 - `session_smoke.test.mjs` — platform connect, `version`, process state before attach.
+- `source_debugger_session.test.mjs` — language-generic `(sdb)` commands drive
+  the real embedded LLDB through `SourceDebuggerSession` for component/module
+  discovery, breakpoints, control, backtrace, locals, and evaluation.
 
 ### Launch safety (Firefox binary must be present, but none is spawned)
 

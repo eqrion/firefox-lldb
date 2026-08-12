@@ -13,6 +13,8 @@ import { LLDBClient } from "lldb-wasm";
 import { parseCliArgs, startPlatformServer } from "../../src/core/platform-session.ts";
 import { freePort } from "../../src/platform/gdb-server-spawner.ts";
 import { runRepl } from "../../src/cli/repl.ts";
+import { LldbSourceDebuggerComponentInstance } from "../../src/source-debugger/lldb-component.ts";
+import { SourceDebuggerSession } from "../../src/source-debugger/session.ts";
 import {
   FIXTURES,
   startStaticServer,
@@ -37,6 +39,7 @@ export class ReplSession {
   #out = "";
   #waiters = [];
   #triggerInterrupt;
+  #sourceDebuggerSession;
   session;
 
   #bridgeTcp(port) {
@@ -46,14 +49,14 @@ export class ReplSession {
   #settle() {
     return new Promise((resolve) => {
       const check = () => {
-        if (stripAnsi(this.#out).trimEnd().endsWith("(lldb)")) resolve();
+        if (stripAnsi(this.#out).trimEnd().endsWith("(sdb)")) resolve();
         else this.#waiters.push(check);
       };
       check();
     });
   }
 
-  // Launch the fixture, attach, then start the REPL. Returns once the (lldb)
+  // Launch the fixture, attach, then start the REPL. Returns once the (sdb)
   // prompt is live and ready for type().
   static async attach(fxName, { headless = true, fire } = {}) {
     const fx = FIXTURES[fxName];
@@ -79,9 +82,12 @@ export class ReplSession {
       },
     });
     rs.#input = new PassThrough();
+    rs.#sourceDebuggerSession = new SourceDebuggerSession({
+      components: [new LldbSourceDebuggerComponentInstance(client)],
+      getRdpSession: () => rs.session,
+    });
     rs.#repl = runRepl({
-      client,
-      getSession: () => rs.session,
+      session: rs.#sourceDebuggerSession,
       input: rs.#input,
       output,
       onTargetInterrupt: () => rs.#triggerInterrupt?.(),
@@ -166,7 +172,8 @@ export class ReplSession {
     return stripAnsi(this.#out);
   }
 
-  shutdown() {
+  async shutdown() {
+    await this.#sourceDebuggerSession?.close();
     return shutdownSession({
       sockets: this.#sockets,
       handle: this.#handle,

@@ -4,6 +4,13 @@ Architecture, protocol details, and implementation notes.
 
 ## Architecture
 
+The emerging language-generic architecture is documented in
+[`docs/SOURCE-DEBUGGER-COMPONENTS.md`](docs/SOURCE-DEBUGGER-COMPONENTS.md).
+The current CLI already places the embedded LLDB behind a
+`SourceDebuggerComponent` and exposes core debugging operations through a
+`SourceDebuggerSession`; the platform/RSP path described below remains the raw
+debuggee transport for the first vertical slice.
+
 The bridge sits between two protocols:
 
 - **LLDB's GDB remote serial protocol** (RSP, including the wasm extensions) —

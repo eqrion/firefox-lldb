@@ -2,21 +2,18 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-// Node-side interactive REPL for the embedded wasm LLDB. Owns the terminal so
-// we can offer line history (arrow keys), Ctrl-C interrupt of a running target,
-// async notices printed above the prompt, and `js` subcommands that query the
-// page over RDP. Lines are driven command-by-command through the off-worker
-// session API (LLDBClient.sessionCommand), not the wasm interpreter's own REPL.
+// Language-generic SourceDebuggerSession REPL. Owns the terminal so we can
+// offer line history, Ctrl-C interrupt, async console notices, and a temporary
+// debugger-native command escape hatch while the generic API grows.
 
 import readline from "node:readline";
 import type { Readable, Writable } from "node:stream";
-import type { LLDBClient } from "lldb-wasm";
 import { grip, type FrameForm, type RdpWasmSession } from "../rdp/session.js";
+import { SourceDebuggerSession } from "../source-debugger/session.js";
+import type { LogicalFrame, LogicalFrameId } from "../source-debugger/types.js";
 
 export interface ReplDeps {
-  client: LLDBClient;
-  /** The live RDP session for the attached tab, or undefined if not attached. */
-  getSession: () => RdpWasmSession | undefined;
+  session: SourceDebuggerSession;
   input?: Readable;
   output?: Writable;
   /** Called when the REPL exits (Ctrl-D, `quit`, or double Ctrl-C). */
@@ -39,7 +36,25 @@ export interface Repl {
   done: Promise<void>;
 }
 
-const PROMPT = "(lldb) ";
+const PROMPT = "(sdb) ";
+const GENERIC_HELP = `\
+Source debugger commands:
+  components                 list loaded SourceDebuggerComponents
+  modules                    list Wasm modules and their owners
+  threads                    list threads
+  bt                         show the composed source backtrace
+  frame <N>                  select and display a source frame
+  locals                     show variables in the selected frame
+  p <EXPR>                   evaluate in the selected frame
+  break <FILE>:<LINE>        set a source breakpoint
+  break <FUNCTION>           set a function breakpoint
+  breakpoints                list breakpoints
+  delete <ID>                remove a breakpoint
+  continue | c               continue execution
+  step | s                   step into
+  next | n                   step over
+  finish                     step out
+  lldb <COMMAND>             run a debugger-native LLDB command`;
 const JS_HELP =
   "js p <expr>    evaluate JS (expression is literal to end of line; e.g. js p document.title)\n" +
   "js bt          print the JS call stack\n" +
@@ -62,6 +77,7 @@ export function runRepl(deps: ReplDeps): Repl {
   let lastCommand = "";
   let jsFrameIndex = 0;
   let jsFrameTid: number | undefined;
+  let selectedFrameId: LogicalFrameId | undefined;
   let resolveDone!: () => void;
   const done = new Promise<void>((r) => (resolveDone = r));
 
@@ -133,7 +149,7 @@ export function runRepl(deps: ReplDeps): Repl {
       if (deps.onTargetInterrupt) {
         deps.onTargetInterrupt();
       } else {
-        void deps.client.pause().catch(() => {});
+        void deps.session.cancelActiveRun().catch(() => {});
       }
       return;
     }
@@ -168,7 +184,17 @@ export function runRepl(deps: ReplDeps): Repl {
       write(JS_HELP);
       return;
     }
+    if (cmd === "help" || cmd === "help source") {
+      write(GENERIC_HELP);
+      return;
+    }
     if (cmd === "js" || cmd.startsWith("js ")) return dispatchJs(cmd.slice(2).trim());
+    try {
+      if (await dispatchSourceCommand(cmd)) return;
+    } catch (e) {
+      write(`error: ${(e as Error).message}`);
+      return;
+    }
     if ((cmd.match(/`/g) ?? []).length % 2 !== 0) {
       write("error: unbalanced backtick in command");
       return;
@@ -199,7 +225,7 @@ export function runRepl(deps: ReplDeps): Repl {
         write("Process running.");
         deps.onTargetResume?.();
       }
-      const res = await deps.client.sessionCommand(cmd);
+      const res = await deps.session.command(cmd);
       if (res.output) write(res.output);
       if (res.error) write(res.error);
     } catch (e) {
@@ -209,8 +235,160 @@ export function runRepl(deps: ReplDeps): Repl {
     }
   }
 
+  async function dispatchSourceCommand(cmd: string): Promise<boolean> {
+    const [verb = "", ...words] = cmd.split(/\s+/);
+    const arg = cmd.slice(verb.length).trim();
+    switch (verb) {
+      case "components": {
+        const components = await deps.session.components();
+        for (const component of components) {
+          write(`${component.id}\t${component.name}\tprotocol ${component.protocolVersion}`);
+        }
+        return true;
+      }
+      case "modules": {
+        const modules = await deps.session.modules();
+        if (!modules.length) write("no Wasm modules");
+        for (const module of modules) write(`${module.id}\t[${module.owner}]\t${module.url}`);
+        return true;
+      }
+      case "threads": {
+        const threads = await deps.session.threads();
+        if (!threads.length) write("no threads");
+        for (const thread of threads) {
+          write(
+            `${thread.stopped ? "*" : " "} ${thread.id}${thread.name ? ` ${thread.name}` : ""}`
+          );
+        }
+        return true;
+      }
+      case "bt":
+      case "backtrace": {
+        const frames = await deps.session.frames();
+        selectedFrameId = frames[0]?.id;
+        if (!frames.length) write("no frames");
+        frames.forEach((frame, index) => write(formatSourceFrame(index, frame)));
+        return true;
+      }
+      case "frame":
+      case "f": {
+        const index = Number(words[0] ?? "0");
+        const frames = await deps.session.frames();
+        const frame = frames[index];
+        if (!frame) throw new Error(`no frame ${words[0] ?? "0"}`);
+        selectedFrameId = frame.id;
+        write(formatSourceFrame(index, frame));
+        return true;
+      }
+      case "locals": {
+        const frameId = await selectedFrame();
+        const scopes = await deps.session.scopes(frameId);
+        for (const scope of scopes) {
+          write(`${scope.name}:`);
+          if (scope.values.length) {
+            for (const property of scope.values) {
+              const type = property.value.type ? `(${property.value.type}) ` : "";
+              write(`  ${type}${property.name} = ${property.value.display}`);
+            }
+          } else if (scope.presentation) {
+            for (const line of scope.presentation.split("\n")) write(`  ${line}`);
+          } else {
+            write("  <empty>");
+          }
+        }
+        return true;
+      }
+      case "p": {
+        if (!arg) throw new Error("p requires an expression");
+        const value = await deps.session.evaluate(await selectedFrame(), arg);
+        write(value ? `${value.type ? `(${value.type}) ` : ""}${value.display}` : "<unavailable>");
+        return true;
+      }
+      case "break":
+      case "b": {
+        if (!arg) throw new Error("break requires FILE:LINE or FUNCTION");
+        const source = arg.match(/^(.*):(\d+)$/);
+        const breakpoint = await deps.session.setBreakpoint({
+          target: source
+            ? {
+                kind: "source",
+                location: { sourceId: source[1], line: Number(source[2]) },
+              }
+            : { kind: "function", name: arg },
+        });
+        write(
+          `Breakpoint ${breakpoint.id}: ${breakpoint.verified ? "verified" : "pending"}${breakpoint.message ? ` (${breakpoint.message})` : ""}`
+        );
+        return true;
+      }
+      case "breakpoints": {
+        const breakpoints = await deps.session.breakpoints();
+        if (!breakpoints.length) write("no breakpoints");
+        for (const breakpoint of breakpoints) {
+          const target =
+            breakpoint.target.kind === "function"
+              ? breakpoint.target.name
+              : `${breakpoint.target.location.sourceId}:${breakpoint.target.location.line}`;
+          write(`${breakpoint.id}\t${breakpoint.verified ? "verified" : "pending"}\t${target}`);
+        }
+        return true;
+      }
+      case "delete": {
+        if (!arg) throw new Error("delete requires a breakpoint id");
+        await deps.session.removeBreakpoint(arg);
+        write(`Deleted breakpoint ${arg}`);
+        return true;
+      }
+      case "continue":
+      case "c":
+        await runSourceCommand(() => deps.session.continue());
+        return true;
+      case "step":
+      case "s":
+        await runSourceCommand(() => deps.session.stepInto(selectedFrameId));
+        return true;
+      case "next":
+      case "n":
+        await runSourceCommand(() => deps.session.stepOver(selectedFrameId));
+        return true;
+      case "finish":
+        await runSourceCommand(() => deps.session.stepOut(selectedFrameId));
+        return true;
+      case "lldb": {
+        if (!arg) throw new Error("lldb requires a command");
+        const result = await deps.session.command(arg);
+        if (result.output) write(result.output);
+        if (result.error) write(result.error);
+        return true;
+      }
+      default:
+        return false;
+    }
+  }
+
+  async function runSourceCommand(operation: () => Promise<{ output?: string }>): Promise<void> {
+    inflight = true;
+    selectedFrameId = undefined;
+    write("Process running.");
+    deps.onTargetResume?.();
+    try {
+      const stop = await operation();
+      if (stop.output) write(stop.output);
+    } finally {
+      inflight = false;
+    }
+  }
+
+  async function selectedFrame(): Promise<LogicalFrameId> {
+    if (selectedFrameId) return selectedFrameId;
+    const frame = (await deps.session.frames())[0];
+    if (!frame) throw new Error("no selected frame");
+    selectedFrameId = frame.id;
+    return frame.id;
+  }
+
   async function dispatchJs(rest: string): Promise<void> {
-    const session = deps.getSession();
+    const session = deps.session.rdpSession();
     if (!session) {
       write("js: no attached tab");
       return;
@@ -322,6 +500,17 @@ function formatFrame(index: number, frame: FrameForm): string {
   const name = (frame as { displayName?: string }).displayName || frame.type;
   const where = frame.where ? ` at ${frame.where.line}:${frame.where.column}` : "";
   return `  #${index}: ${name}${where}`;
+}
+
+function formatSourceFrame(index: number, frame: LogicalFrame): string {
+  const where = frame.location
+    ? ` at ${frame.location.sourceId}:${frame.location.line}${
+        frame.location.column === undefined ? "" : `:${frame.location.column}`
+      }`
+    : frame.pc
+      ? ` at ${frame.pc}`
+      : "";
+  return `#${index} ${frame.functionName}${where} [${frame.componentId}]`;
 }
 
 function formatBindings(bindings?: {

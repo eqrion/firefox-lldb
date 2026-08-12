@@ -7,12 +7,22 @@
 // command blocks until onTargetInterrupt releases it.
 
 import { runRepl } from "../../src/cli/repl.js";
-import type { LLDBClient } from "lldb-wasm";
+import type { SourceDebuggerSession } from "../../src/source-debugger/session.js";
 
 let releaseCmd: ((v: { output: string; error: string; status: number }) => void) | null = null;
 
-const client = {
-  sessionCommand: (cmd: string) => {
+const debuggerSession = {
+  continue: () => {
+    const command = new Promise<{ output: string; error: string; status: number }>((resolve) => {
+      releaseCmd = resolve;
+    });
+    return command.then((result) => ({
+      stopId: "stop-1",
+      reason: { kind: "stopped" as const },
+      output: result.output,
+    }));
+  },
+  command: (cmd: string) => {
     if (cmd === "c" || cmd === "continue" || cmd === "process continue") {
       return new Promise<{ output: string; error: string; status: number }>((r) => {
         releaseCmd = r;
@@ -20,12 +30,12 @@ const client = {
     }
     return Promise.resolve({ output: "", error: "", status: 0 });
   },
-  pause: async () => {},
-} as unknown as LLDBClient;
+  cancelActiveRun: async () => {},
+  rdpSession: () => undefined,
+} as unknown as SourceDebuggerSession;
 
 const repl = runRepl({
-  client,
-  getSession: () => undefined,
+  session: debuggerSession,
   onExit: () => process.exit(0),
   onTargetInterrupt: () => {
     releaseCmd?.({ output: "Process 1 stopped.\n", error: "", status: 0 });
