@@ -46,6 +46,7 @@
     "format:check": "prettier --check .",
     "check": "npm run typecheck && npm run format:check",
     "test": "node --import tsx --test test/unit/*.test.ts",
+    "test:conformance": "node --import tsx --test --test-concurrency=1 --test-timeout=180000 test/e2e/source_debugger_component_conformance.test.mjs",
     "test:e2e": "node --import tsx --test --test-concurrency=${E2E_CONCURRENCY:-4} --test-timeout=180000 --test-reporter=./test/e2e/reporter.mjs test/e2e/*.test.mjs",
     "launch": "node --import tsx src/cli/firefox-wasm-debugger.ts --launch --rdp-port ${RDP_PORT:-6080} ${URL:+--url $URL}",
     "mcp": "node --import tsx src/mcp/server.ts",

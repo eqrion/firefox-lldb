@@ -32,10 +32,18 @@ vendor/            vendored gdbstub-component + source-map-dwarf crate/component
 npm install                    # install deps
 npm test                       # unit tests (no external deps)
 npm run check                  # typecheck + prettier
+npm run test:conformance       # real LLDB + Wasm-text public-interface contract
 npm run test:e2e               # Node e2e suite (primary correctness signal)
 ```
 
 The Node e2e suite drives the full bridge against headless Firefox using the embedded wasm LLDB — no native lldb required. It runs at concurrency 4 by default; override with `E2E_CONCURRENCY=N`. Unit tests are rarely useful here.
+
+Language-generic behavior should use the production harness in
+`test/e2e/support/source-debugger-session.ts`. The reusable conformance helper
+in the same directory must remain independent of LLDB, Firefox, and RSP
+internals. The legacy `harness.mjs` path is reserved for LLDB-specific
+compatibility checks whose raw structured APIs are intentionally absent from
+the portable protocol.
 
 Run `npm run check` before committing.
 

@@ -344,15 +344,22 @@ part of that surface serving it.
 - **Unit tests** (`npm test`) — protocol layer, platform server, attach-shim,
   SAB-RPC wire codec, synthetic modules, REPL. Run without Firefox or any lldb.
 - **e2e suite** (`npm run test:e2e`) — the primary correctness signal. Drives the
-  **embedded wasm LLDB** (the same path `firefox-wasm-debugger` uses, no native lldb) against
-  headless Firefox, through the off-worker session API. Needs only Firefox plus
-  emsdk-built fixtures (`npm run build:fixtures`). Files run concurrently
+  **embedded wasm LLDB** (the same engine `firefox-wasm-debugger` uses, no native lldb) against
+  headless Firefox. The production-path harness constructs the real Firefox
+  target, component loaders, ownership catalog, and `SourceDebuggerSessionRuntime`;
+  the reusable conformance suite runs through it against both LLDB and the
+  Wasm-text implementation. Older engine-compatibility cases retain a test-only
+  platform/RSP harness for LLDB-specific APIs outside the portable protocol.
+  Needs only Firefox plus emsdk-built fixtures (`npm run build:fixtures`). Files run concurrently
   (`--test-concurrency=4`, override `E2E_CONCURRENCY=N`); each does one attach in
   `before()` (see `test/e2e/README.md` for the per-file convention). Coverage:
   call-stack symbolication across all fixtures, breakpoints by name and file:line,
   multiple breakpoints + continue, struct/pointer/heap inspection, dynamic
   dispatch, every step mode, locals/args/globals, JS-frame debugging, source maps,
   wasm traps, and multithreading.
+- **component conformance** (`npm run test:conformance`) — focused serial run of
+  the reusable `SourceDebuggerComponent` behavioral contract against every real
+  implementation installed by its test fixture.
 
 **Every significant change must land with an e2e test that exercises it.** A
 feature or fix the suite doesn't cover is treated as unverified.

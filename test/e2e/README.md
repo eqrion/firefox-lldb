@@ -16,18 +16,29 @@ Requires Firefox installed in a standard location (see `findFirefoxBinary` in
 
 ## How it works
 
-Most focused component tests use the production `SourceDebuggerSessionRuntime`.
-The older broad LLDB compatibility tests use `harness.mjs`, whose test-only
-bootstrap:
+There are two deliberately separate harness families:
 
-1. starts the LLDB component's platform/RSP stack in-process,
-2. creates an `LLDBClient` (wasm LLDB) and bridges its RSP connections to the
-   platform / per-tab servers through in-memory channels (the wasm module can't
-   open sockets — see `INTERNALS.md`),
-3. drives LLDB through the **off-worker session API** (`sessionCommand`,
-   `sessionState`, `sessionFrames`, `sessionVariable`), which runs on a dedicated
-   session pthread so blocking GDB-remote round-trips don't stall the worker that
-   pumps the bridge.
+- `support/source-debugger-session.ts` constructs the production Firefox
+  target, installed component loaders, ownership catalog, and
+  `SourceDebuggerSessionRuntime`. The generic REPL tests and the reusable
+  component conformance suite use this path and cannot import `lldb-wasm`, RSP,
+  or the legacy platform bootstrap.
+- The older broad LLDB compatibility tests use `harness.mjs`, whose test-only
+  bootstrap:
+
+  1. starts the LLDB component's platform/RSP stack in-process,
+  2. creates an `LLDBClient` (wasm LLDB) and bridges its RSP connections to the
+     platform / per-tab servers through in-memory channels (the wasm module can't
+     open sockets — see `INTERNALS.md`),
+  3. drives LLDB through the **off-worker session API** (`sessionCommand`,
+     `sessionState`, `sessionFrames`, `sessionVariable`), which runs on a dedicated
+     session pthread so blocking GDB-remote round-trips don't stall the worker that
+     pumps the bridge.
+
+The legacy family remains valuable for engine-specific compatibility details
+which the portable protocol intentionally does not expose, such as LLDB's raw
+numeric `SBValue` projection and platform lifecycle commands. New
+language-generic behavior belongs in the production family.
 
 ## Tests
 
@@ -37,6 +48,11 @@ bootstrap:
 - `source_debugger_session.test.mjs` — language-generic `(sdb)` commands drive
   the real embedded LLDB through `SourceDebuggerSession` for component/module
   discovery, breakpoints, control, backtrace, locals, and evaluation.
+- `source_debugger_component_conformance.test.mjs` — runs the reusable public
+  interface contract against both the real isolated LLDB implementation and
+  the real Wasm-text implementation. It covers definition/instance identity,
+  ownership, sources, breakpoints, run resources, stops, frames, scopes,
+  evaluation, capability enforcement, stepping, stop scoping, and cleanup.
 
 ### Launch safety (Firefox binary must be present, but none is spawned)
 

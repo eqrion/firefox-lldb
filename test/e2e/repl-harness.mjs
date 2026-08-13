@@ -2,49 +2,38 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-// REPL-level e2e harness: boots the same Firefox + platform-server + bridge
-// stack as harness.mjs, then drives the *real* runRepl (src/cli/repl.ts) with
-// injected streams. This exercises the dominant `firefox-wasm-debugger` code path —
-// readline routing, js subcommands, console streaming — rather than the
-// lower-level session API the Session harness drives directly.
+// REPL-level e2e harness: boots the production Firefox target, component
+// catalog/loaders, and SourceDebuggerSessionRuntime, then drives the real
+// runRepl with injected streams. It intentionally has no direct LLDB client,
+// platform server, RSP socket, or gdbstub access.
 
 import { PassThrough, Writable } from "node:stream";
-import { LLDBClient } from "lldb-wasm";
-import { parseLldbHarnessArgs, startLldbTestPlatform } from "./support/lldb-platform-session.ts";
-import { freePort } from "../../src/net/free-port.ts";
 import { runRepl } from "../../src/cli/repl.ts";
-import { LldbSourceDebuggerComponent } from "../../src/source-debugger/components/lldb/component.ts";
-import { SourceDebuggerSession } from "../../src/source-debugger/session/session.ts";
-import {
-  FIXTURES,
-  startStaticServer,
-  withDeadline,
-  bridgeTcp,
-  platformConnect,
-  attachWithRetry,
-  shutdownSession,
-  forceKillFirefoxPid,
-  retrySessionSetup,
-} from "./harness.mjs";
+import { SourceDebuggerTestSession } from "./support/source-debugger-session.ts";
 
 const stripAnsi = (s) => s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
 
+async function deadline(promise, ms, message) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export class ReplSession {
-  #client;
-  #handle;
-  #staticServer;
-  #sockets = new Set();
+  #testSession;
   #input;
   #repl;
   #out = "";
   #waiters = [];
-  #triggerInterrupt;
-  #sourceDebuggerSession;
   session;
-
-  #bridgeTcp(port) {
-    return bridgeTcp(this.#client, this.#sockets, port);
-  }
 
   #settle(mark = 0) {
     return new Promise((resolve) => {
@@ -59,21 +48,7 @@ export class ReplSession {
   // Launch the fixture, attach, then start the REPL. Returns once the (sdb)
   // prompt is live and ready for type().
   static async attach(fxName, { headless = true, fire } = {}) {
-    const fx = FIXTURES[fxName];
-    if (!fx) throw new Error(`unknown fixture: ${fxName}`);
-    return retrySessionSetup(() => ReplSession.#attachOnce(fx, { headless, fire }));
-  }
-
-  static async #attachOnce(fx, { headless, fire }) {
-    const staticServer = await startStaticServer(fx.pageDir);
-    const url = `http://127.0.0.1:${staticServer.port}/index.html`;
-
-    const client = await LLDBClient.create();
     const rs = new ReplSession();
-    rs.#client = client;
-    rs.#staticServer = staticServer;
-    client.setFileProvider(() => Promise.resolve(null));
-
     const output = new Writable({
       write: (chunk, _enc, cb) => {
         rs.#out += chunk.toString();
@@ -82,67 +57,23 @@ export class ReplSession {
       },
     });
     rs.#input = new PassThrough();
-    rs.#sourceDebuggerSession = new SourceDebuggerSession({
-      components: [new LldbSourceDebuggerComponent(client)],
-      target: {
-        modules: async () =>
-          Promise.all(
-            (await rs.session.wasmSources()).map(async ({ url }) => {
-              const debugInfo = await rs.session.wasmModuleDebugInfo(url);
-              return { id: url, url, ...(debugInfo ? { debugInfo } : {}) };
-            })
-          ),
-        close: () => {},
-      },
+    const testSession = await SourceDebuggerTestSession.attach(fxName, {
+      headless,
+      fire,
+      onConsole: (message) => rs.#repl?.printConsole(message),
     });
+    rs.#testSession = testSession;
+    rs.session = testSession.rdpSession;
     rs.#repl = runRepl({
-      session: rs.#sourceDebuggerSession,
-      getRdpSession: () => rs.session,
+      session: testSession.session,
+      getRdpSession: () => testSession.rdpSession,
       input: rs.#input,
       output,
-      onTargetInterrupt: () => rs.#triggerInterrupt?.(),
+      onTargetInterrupt: () => testSession.target.interrupt(),
     });
-
-    return withDeadline(
-      rs,
-      (async () => {
-        const rdpPort = await freePort();
-        const args = parseLldbHarnessArgs([
-          "--launch",
-          ...(headless ? ["--headless"] : []),
-          "--port",
-          "0",
-          "--rdp-port",
-          String(rdpPort),
-          "--url",
-          url,
-          "--fire",
-          fire ?? fx.fire,
-        ]);
-        const handle = await startLldbTestPlatform(args, {
-          wrapConnectPort: (port) => rs.#bridgeTcp(port),
-          onSession: (s, interrupt) => {
-            rs.session = s;
-            rs.#triggerInterrupt = interrupt;
-            void s.streamConsole((m) => rs.#repl.printConsole(m));
-          },
-        });
-        rs.#handle = handle;
-
-        const c0 = await rs.#bridgeTcp(handle.port);
-        await platformConnect(client, c0);
-        await client.sessionCommand("command alias attach process attach --plugin wasm");
-
-        // Attach is driven directly (not through the REPL) so the retry
-        // policy is in one place; REPL command routing is what the tests
-        // exercise afterwards.
-        await attachWithRetry(client);
-        rs.#repl.start();
-        await rs.#settle();
-        return rs;
-      })(),
-      30_000
-    );
+    rs.#repl.start(testSession.readyMessage);
+    await rs.#settle();
+    return rs;
   }
 
   // Type a command line into the REPL and resolve with the output it produced
@@ -153,7 +84,11 @@ export class ReplSession {
   async type(line) {
     const mark = this.#out.length;
     this.#input.write(line + "\n");
-    await withDeadline(this, this.#settle(mark), 30_000);
+    await deadline(
+      this.#settle(mark),
+      30_000,
+      `REPL command timed out: ${line}; output: ${stripAnsi(this.#out.slice(mark).slice(-500))}`
+    );
     return stripAnsi(this.#out.slice(mark));
   }
 
@@ -183,16 +118,7 @@ export class ReplSession {
   }
 
   async shutdown() {
-    await this.#sourceDebuggerSession?.close();
-    return shutdownSession({
-      sockets: this.#sockets,
-      handle: this.#handle,
-      client: this.#client,
-      staticServer: this.#staticServer,
-    });
-  }
-
-  forceKillFirefox() {
-    forceKillFirefoxPid(this.#handle?.firefoxPid);
+    this.#repl?.close();
+    await this.#testSession?.shutdown();
   }
 }

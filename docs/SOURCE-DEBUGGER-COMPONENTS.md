@@ -192,6 +192,16 @@ route: `break lldb-b::compute_factorial`, `continue lldb-b`, and
 Existing LLDB commands continue to work during the migration. `lldb <command>`
 makes the debugger-specific escape hatch explicit.
 
+The reusable component conformance suite treats this TypeScript interface as
+the test boundary. Given any fixture which provides a session, an installed
+component, and a target-specific way to trigger execution, it verifies the
+definition/instance descriptors, module claims and ownership enforcement,
+source retrieval, breakpoint lifecycle, run and stop resources, threads,
+frames, scopes, evaluation, capability enforcement, stepping, and stop-scoped
+resource invalidation. The real LLDB and Wasm-text implementations both run
+this same suite through the production `SourceDebuggerSessionRuntime`; the
+suite never imports either engine's private transport.
+
 The first e2e proves the generic API against a real Firefox and embedded LLDB,
 including the LLDB component's private gdbstub/RSP stack. A second proof creates
 two independent LLDB wasm workers which import filtered `WasmDebuggee`

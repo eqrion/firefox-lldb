@@ -162,6 +162,11 @@ The root export adds the session, runtime, ownership, and loader APIs for Node
 hosts. Internal Firefox, RDP, LLDB, gdbstub, and worker modules are deliberately
 not package exports.
 
+The repository includes a reusable behavioral conformance suite for this
+contract. `npm run test:conformance` runs it against both installed real
+implementations—isolated LLDB and Wasm-text—through the same target, loaders,
+catalog, and `SourceDebuggerSessionRuntime` lifecycle as the CLI.
+
 ## Working at the prompt
 
 Generic commands include `components`, `modules`, `sources`, `list`, `threads`,

@@ -44,6 +44,21 @@ test("portable protocol and session layers do not import engine or Firefox inter
   assert.doesNotMatch(lldbLoader, /target\/firefox|RdpWasmSession/, "LLDB loader target coupling");
 });
 
+test("production-path e2e harnesses cannot fall back to the legacy LLDB bootstrap", () => {
+  for (const relativePath of [
+    "test/e2e/repl-harness.mjs",
+    "test/e2e/support/source-debugger-session.ts",
+    "test/e2e/support/source-debugger-component-conformance.ts",
+  ]) {
+    const source = readFileSync(resolve(ROOT, relativePath), "utf8");
+    assert.doesNotMatch(
+      source,
+      /lldb-wasm|lldb-platform-session|startLldbTestPlatform|LldbSourceDebuggerComponent\b/,
+      relativePath
+    );
+  }
+});
+
 function sourceFiles(relativeDirectory: string): string[] {
   const directory = resolve(ROOT, relativeDirectory);
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
