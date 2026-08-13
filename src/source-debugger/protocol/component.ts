@@ -7,8 +7,10 @@ import type {
   ComponentFrame,
   ComponentId,
   ComponentRunRequest,
+  ComponentRunTermination,
   ComponentStop,
   ModuleDescriptor,
+  PhysicalResumeRequest,
   RunId,
   SessionState,
   SessionThread,
@@ -16,6 +18,7 @@ import type {
   SourceBreakpointRequest,
   SourceDebuggerComponentDescriptor,
   SourceFile,
+  SourceProperty,
   SourceScope,
   SourceValue,
   StopId,
@@ -50,10 +53,9 @@ export interface GdbRspEndpoint {
  * can become WIT resources without standardizing TCP or Node APIs. */
 export interface SourceDebuggerComponentHost {
   connectGdbRsp(endpoint: GdbRspEndpoint): Promise<GdbRspConnection>;
-  /** Direct, asynchronous form of the low-level Wasm debuggee capability.
-   * It is optional during the TypeScript migration because existing isolated
-   * LLDB components import only GDB RSP. */
-  openWasmDebuggee?(): Promise<WasmDebuggee>;
+  /** Direct, asynchronous form of the low-level Wasm debuggee capability. A
+   * host which cannot provide it rejects the call. */
+  openWasmDebuggee(): Promise<WasmDebuggee>;
 }
 
 export interface SourceDebuggerComponentDefinition {
@@ -61,43 +63,67 @@ export interface SourceDebuggerComponentDefinition {
   probeModule(module: Omit<ModuleDescriptor, "owner">): Promise<ModuleClaim>;
 }
 
-export interface SourceDebuggerComponent extends SourceDebuggerComponentDefinition {
-  instantiate(host: SourceDebuggerComponentHost): Promise<SourceDebuggerComponentInstance>;
-}
-
-export interface SourceDebuggerComponentInstance {
+/** One live, isolated source debugger engine. Construction and target-specific
+ * activation are loader concerns, not part of this exported protocol. */
+export interface SourceDebuggerComponent {
   readonly id: ComponentId;
 
   describe(): Promise<SourceDebuggerComponentDescriptor>;
   addModules(modules: ModuleDescriptor[], initialStop: StopId): Promise<void>;
   removeModules(moduleIds: string[]): Promise<void>;
   sources(moduleId?: string): Promise<SourceFile[]>;
+  /** Fetch source text lazily. `null` means the component knows the source
+   * descriptor but cannot provide its contents. */
+  sourceContent(sourceId: string): Promise<string | null>;
 
   state(stopId: StopId): Promise<SessionState>;
   threads(stopId: StopId): Promise<SessionThread[]>;
   frames(stopId: StopId, threadId: ThreadId): Promise<ComponentFrame[]>;
   scopes(stopId: StopId, frameId: string): Promise<SourceScope[]>;
   evaluate(stopId: StopId, frameId: string, expression: string): Promise<SourceValue | null>;
+  /** Expand a stop-scoped value id previously returned by scopes, evaluate,
+   * or this method. Components must not accept ids from an older stop. */
+  valueChildren(stopId: StopId, valueId: string): Promise<SourceProperty[]>;
 
   setBreakpoint(request: SourceBreakpointRequest): Promise<SourceBreakpoint>;
   removeBreakpoint(id: string): Promise<void>;
   breakpoints(): Promise<SourceBreakpoint[]>;
 
-  startRun(request: ComponentRunRequest): Promise<void>;
-  waitForStop(runId: RunId): Promise<ComponentStop>;
-  // LLDB thread plans can resume the physical debuggee more than once before
-  // their source-level operation completes. A component which exposes this
-  // gate lets the session re-arm every observer before each such resume.
-  waitForPhysicalResume?(runId: RunId, afterSequence: number): Promise<number | undefined>;
-  releasePhysicalResume?(runId: RunId, sequence: number): Promise<void>;
-  synchronizeRun?(runId: RunId): Promise<void>;
-  /** Abort this component's active source plan at an already-observed physical
-   * stop. Used when a sibling component owns a preempting breakpoint. */
-  abortRun?(runId: RunId): Promise<void>;
-  cancelRun(runId: RunId): Promise<void>;
+  /** Arm one source operation and return its stop-scoped control resource.
+   * Resolving this call is the observer barrier: the component must already be
+   * ready to observe the next physical stop. */
+  beginRun(request: ComponentRunRequest): Promise<SourceDebuggerRun>;
 
   // Optional debugger-native escape hatch. It is intentionally not used by
   // generic SourceDebuggerSession inspection/control operations.
   command?(command: string): Promise<CommandResult>;
+  dispose(): Promise<void>;
+}
+
+/** One armed source-level operation. The resource makes the distributed run
+ * state machine explicit and prevents run ids or resume sequences from being
+ * accidentally mixed across operations. */
+export interface SourceDebuggerRun {
+  readonly id: RunId;
+  readonly role: ComponentRunRequest["role"];
+
+  waitForStop(): Promise<ComponentStop>;
+
+  /** Wait for the debugger to propose its next physical resume. `undefined`
+   * means the source operation completed without another resume. Observers
+   * expose requests as readiness signals, but the session never grants them. */
+  waitForResume(): Promise<PhysicalResumeRequest | undefined>;
+
+  /** Grant a previously returned driver resume token. */
+  grantResume(request: PhysicalResumeRequest): Promise<void>;
+
+  /** After an observer reported a synchronized intermediate stop, arm its
+   * next continue before the driver is allowed to resume again. */
+  rearmObserver(): Promise<void>;
+
+  /** End an in-flight source plan at an already-observed stop, or cancel it
+   * after a session failure/user interrupt. */
+  terminate(reason: ComponentRunTermination): Promise<void>;
+
   dispose(): Promise<void>;
 }

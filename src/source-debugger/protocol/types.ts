@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-// Wire-friendly vocabulary shared by SourceDebuggerComponents, the
+// Portable, wire-friendly vocabulary shared by SourceDebuggerComponents, the
 // SourceDebuggerSession coordinator, and frontends. These are deliberately
 // plain structured-cloneable records: the TypeScript transport can move to
 // workers now and to WIT/component-model bindings later without exposing JS
@@ -20,7 +20,7 @@ export type BreakpointId = string;
 export type ValueId = string;
 
 export interface SourceDebuggerComponentDescriptor {
-  protocolVersion: "0.1";
+  protocolVersion: "0.2";
   id: ComponentId;
   name: string;
   capabilities: {
@@ -60,9 +60,6 @@ export interface SourceFile {
   moduleId?: ModuleId;
   url: string;
   language?: string;
-  /** Virtual sources such as generated WebAssembly text can carry their
-   * contents directly instead of requiring a filesystem or URL fetch. */
-  content?: string;
 }
 
 export interface SourceLocation {
@@ -120,7 +117,7 @@ export interface SessionThread {
 export interface ComponentFrame {
   id: ComponentFrameId;
   // Stop-scoped physical position. This intentionally avoids requiring a
-  // stable activation-id extension in the first protocol version.
+  // stable activation-id extension in protocol 0.2.
   physicalFrameIndex: number;
   inlineFrameIndex: number;
   functionName: string;
@@ -138,13 +135,18 @@ export interface LogicalFrame extends ComponentFrame {
   componentFrameId: ComponentFrameId;
 }
 
-export interface SourceValue {
+interface SourceValueBase {
   id?: ValueId;
   name?: string;
   type?: string;
   display: string;
-  hasChildren: boolean;
 }
+
+/** Expandable values must carry a stop-scoped id. This makes `hasChildren`
+ * actionable instead of a presentation hint with no protocol operation. */
+export type SourceValue =
+  | (SourceValueBase & { hasChildren: false })
+  | (SourceValueBase & { hasChildren: true; id: ValueId });
 
 export interface SourceProperty {
   name: string;
@@ -184,6 +186,16 @@ export interface ComponentStop {
   reason: SessionStopReason;
   output?: string;
 }
+
+/** Opaque permission requested by a debugger before it resumes the shared
+ * physical target. Only the session-selected driver is granted the token. */
+export interface PhysicalResumeRequest {
+  token: string;
+}
+
+/** Why the session is ending a component's active run before its source
+ * operation completed. Components choose the engine-specific mechanism. */
+export type ComponentRunTermination = "synchronize" | "preempt" | "cancel";
 
 export interface CommandResult {
   output: string;

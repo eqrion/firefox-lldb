@@ -2,10 +2,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-import type { RdpWasmSession } from "../rdp/session.js";
-import type { Logger } from "../logging.js";
+import type { Logger } from "../../logging.js";
 import { SourceDebuggerComponentCatalog } from "./catalog.js";
-import { SourceDebuggerSessionHost } from "./host.js";
+import { SourceDebuggerSessionHost } from "../target/host.js";
 import type {
   LoadedSourceDebuggerComponent,
   SourceDebuggerComponentActivation,
@@ -15,23 +14,14 @@ import {
   createProbeModuleOwnerResolver,
   type ModuleOwnerResolver,
   type SourceDebuggerComponentProbe,
-  type UnownedModuleDescriptor,
 } from "./ownership.js";
 import { SourceDebuggerSession } from "./session.js";
-
-export interface SourceDebuggerDiscoveryTarget {
-  modules(): Promise<UnownedModuleDescriptor[]>;
-  assignModuleOwner?(moduleId: string, componentId: string): void;
-  removeModuleOwner?(moduleId: string): void;
-  moduleOwner?(moduleId: string): string | undefined;
-  close(): void | Promise<void>;
-}
+import type { SourceDebuggerTarget } from "../protocol/target.js";
 
 export interface SourceDebuggerSessionRuntimeOptions {
   loaders: readonly SourceDebuggerComponentLoader[];
-  target?: SourceDebuggerDiscoveryTarget;
+  target?: SourceDebuggerTarget;
   host?: SourceDebuggerSessionHost;
-  getRdpSession?: () => RdpWasmSession | undefined;
   createModuleOwnerResolver?: (
     definitions: readonly SourceDebuggerComponentProbe[]
   ) => ModuleOwnerResolver;
@@ -51,7 +41,7 @@ export class SourceDebuggerSessionRuntime {
   readonly session: SourceDebuggerSession;
   readonly catalog: SourceDebuggerComponentCatalog;
   readonly #host: SourceDebuggerSessionHost;
-  readonly #target: SourceDebuggerDiscoveryTarget | undefined;
+  readonly #target: SourceDebuggerTarget | undefined;
   readonly #components: LoadedSourceDebuggerComponent[];
   readonly #lateActivations = new Map<string, Promise<LoadedSourceDebuggerComponent>>();
   #activationPromise: Promise<SourceDebuggerComponentActivation> | undefined;
@@ -71,12 +61,9 @@ export class SourceDebuggerSessionRuntime {
     this.session = new SourceDebuggerSession({
       components: components.map(({ component }) => component),
       debuggeeHost: host,
-      getRdpSession: options.getRdpSession,
+      target: options.target,
       resolveModuleOwner,
       ensureComponent: async (id) => (await this.#ensureComponent(id)).component,
-      assignModuleOwner: (moduleId, componentId) =>
-        options.target?.assignModuleOwner?.(moduleId, componentId),
-      removeModuleOwner: (moduleId) => options.target?.removeModuleOwner?.(moduleId),
       logger: options.logger,
     });
   }
@@ -92,7 +79,6 @@ export class SourceDebuggerSessionRuntime {
       options.host ??
       new SourceDebuggerSessionHost({
         logger: options.logger,
-        rdpSession: options.getRdpSession?.(),
         canAccessWasmModule: (componentId, moduleId) =>
           options.target?.moduleOwner?.(moduleId) === componentId,
       });

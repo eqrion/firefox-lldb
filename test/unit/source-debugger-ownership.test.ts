@@ -8,7 +8,7 @@ import {
   createProbeModuleOwnerResolver,
   probeModuleClaims,
   type SourceDebuggerComponentProbe,
-} from "../../src/source-debugger/ownership.js";
+} from "../../src/source-debugger/session/ownership.js";
 
 const module = { id: "app", url: "https://example.test/app.wasm" };
 

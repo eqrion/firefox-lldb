@@ -11,13 +11,14 @@ import { parseCliArgs } from "../core/platform-session.js";
 import { quietLogger } from "./logger.js";
 import { runRepl } from "./repl.js";
 import { debugEnvEnabled, sourceDebuggerTraceEnabled } from "../config.js";
-import { FirefoxSourceDebuggerTarget } from "../source-debugger/firefox-target.js";
+import { FirefoxSourceDebuggerTarget } from "../source-debugger/target/firefox.js";
 import {
   LldbSourceDebuggerComponentLoader,
   LldbSourceDebuggerTarget,
-} from "../source-debugger/lldb-loader.js";
-import { SourceDebuggerSessionRuntime } from "../source-debugger/runtime.js";
-import { WasmSourceDebuggerComponentLoader } from "../source-debugger/wasm-source-component.js";
+} from "../source-debugger/components/lldb/loader.js";
+import { SourceDebuggerSessionRuntime } from "../source-debugger/session/runtime.js";
+import { SourceDebuggerSessionHost } from "../source-debugger/target/host.js";
+import { WasmSourceDebuggerComponentLoader } from "../source-debugger/components/wasm-text/loader.js";
 import {
   createRoutedModuleOwnerResolver,
   parseComponentRoutes,
@@ -71,10 +72,15 @@ async function main(): Promise<void> {
       })
   );
   const loaders = [...lldbLoaders, new WasmSourceDebuggerComponentLoader()];
+  const host = new SourceDebuggerSessionHost({
+    logger: sourceLogger,
+    rdpSession: target.session,
+    canAccessWasmModule: (componentId, moduleId) => target.moduleOwner(moduleId) === componentId,
+  });
   const runtime = await SourceDebuggerSessionRuntime.load({
     loaders,
     target,
-    getRdpSession: () => target.session,
+    host,
     ...(routedComponents
       ? {
           createModuleOwnerResolver: (
@@ -112,6 +118,7 @@ async function main(): Promise<void> {
 
   repl = runRepl({
     session: runtime.session,
+    getRdpSession: () => target.session,
     onExit: () => void cleanup(0),
     onTargetResume: () => target.focus(),
     onTargetInterrupt: () => target.interrupt(),

@@ -7,7 +7,7 @@
 // command blocks until onTargetInterrupt releases it.
 
 import { runRepl } from "../../src/cli/repl.js";
-import type { SourceDebuggerSession } from "../../src/source-debugger/session.js";
+import type { SourceDebuggerSession } from "../../src/source-debugger/session/session.js";
 
 let releaseCmd: ((v: { output: string; error: string; status: number }) => void) | null = null;
 

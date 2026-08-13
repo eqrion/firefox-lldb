@@ -9,11 +9,14 @@
 import readline from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { grip, type FrameForm, type RdpWasmSession } from "../rdp/session.js";
-import { SourceDebuggerSession } from "../source-debugger/session.js";
-import type { LogicalFrame, LogicalFrameId } from "../source-debugger/types.js";
+import { SourceDebuggerSession } from "../source-debugger/session/session.js";
+import type { LogicalFrame, LogicalFrameId } from "../source-debugger/protocol/types.js";
 
 export interface ReplDeps {
   session: SourceDebuggerSession;
+  /** Optional Firefox-specific JavaScript inspection escape hatch. It is a
+   * frontend integration, not part of SourceDebuggerSession. */
+  getRdpSession?: () => RdpWasmSession | undefined;
   input?: Readable;
   output?: Writable;
   /** Called when the REPL exits (Ctrl-D, `quit`, or double Ctrl-C). */
@@ -274,7 +277,7 @@ export function runRepl(deps: ReplDeps): Repl {
         if (!sources.length) write("no sources");
         for (const source of sources) {
           write(
-            `${source.id}${source.moduleId ? `\t[${source.moduleId}]` : ""}${source.language ? `\t${source.language}` : ""}`
+            `${source.url}${source.moduleId ? `\t[${source.moduleId}]` : ""}${source.language ? `\t${source.language}` : ""}`
           );
         }
         return true;
@@ -312,10 +315,12 @@ export function runRepl(deps: ReplDeps): Repl {
         const frame = (await deps.session.frames()).find(({ id }) => id === frameId);
         if (!frame?.location) throw new Error("the selected frame has no source location");
         const source = await deps.session.source(frame.location.sourceId);
-        if (!source?.content) {
+        if (!source) {
           throw new Error(`source text is unavailable for ${frame.location.sourceId}`);
         }
-        const lines = source.content.split("\n");
+        const content = await deps.session.sourceContent(source.id);
+        if (content === null) throw new Error(`source text is unavailable for ${source.url}`);
+        const lines = content.split("\n");
         const first = Math.max(1, frame.location.line - 5);
         const last = Math.min(lines.length, frame.location.line + 5);
         for (let line = first; line <= last; line++) {
@@ -443,7 +448,7 @@ export function runRepl(deps: ReplDeps): Repl {
   }
 
   async function dispatchJs(rest: string): Promise<void> {
-    const session = deps.session.rdpSession();
+    const session = deps.getRdpSession?.();
     if (!session) {
       write("js: no attached tab");
       return;

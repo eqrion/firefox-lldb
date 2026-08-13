@@ -6,14 +6,15 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type {
   SourceDebuggerComponentDefinition,
-  SourceDebuggerComponentInstance,
-} from "../../src/source-debugger/component.js";
-import { SourceDebuggerSessionHost } from "../../src/source-debugger/host.js";
-import { connectSourceDebuggerComponentHost } from "../../src/source-debugger/host-rpc.js";
+  SourceDebuggerComponent,
+} from "../../src/source-debugger/protocol/component.js";
+import { SourceDebuggerSessionHost } from "../../src/source-debugger/target/host.js";
+import { connectSourceDebuggerComponentHost } from "../../src/source-debugger/transport/host-rpc.js";
 import {
   serveSourceDebuggerComponentIsolate,
   SourceDebuggerComponentIsolate,
-} from "../../src/source-debugger/isolate.js";
+} from "../../src/source-debugger/transport/isolate.js";
+import { testSourceDebuggerRun } from "../helpers/source-debugger-run.js";
 
 test("generic isolate transport wires definition, instance, and scoped host imports", async () => {
   const sessionHost = new SourceDebuggerSessionHost();
@@ -69,7 +70,7 @@ test("generic isolate rejects mismatched definition and instance identities", as
     fakeComponent("instance")
   );
   try {
-    await assert.rejects(isolate.connect(), /definition id definition.*instance id instance/);
+    await assert.rejects(isolate.connect(), /descriptor id definition does not match instance/);
   } finally {
     isolate.close();
     workerEndpoint.close();
@@ -79,7 +80,7 @@ test("generic isolate rejects mismatched definition and instance identities", as
 
 function descriptor(id: string) {
   return {
-    protocolVersion: "0.1" as const,
+    protocolVersion: "0.2" as const,
     id,
     name: `Fake ${id}`,
     capabilities: {
@@ -93,18 +94,20 @@ function descriptor(id: string) {
   };
 }
 
-function fakeComponent(id: string): SourceDebuggerComponentInstance {
+function fakeComponent(id: string): SourceDebuggerComponent {
   return {
     id,
     describe: async () => descriptor(id),
     addModules: async () => {},
     removeModules: async () => {},
     sources: async () => [],
+    sourceContent: async () => null,
     state: async (stopId) => ({ stopId, reason: { kind: "stopped" } }),
     threads: async () => [],
     frames: async () => [],
     scopes: async () => [],
     evaluate: async () => null,
+    valueChildren: async () => [],
     setBreakpoint: async (request) => ({
       id: "1",
       componentId: id,
@@ -113,13 +116,7 @@ function fakeComponent(id: string): SourceDebuggerComponentInstance {
     }),
     removeBreakpoint: async () => {},
     breakpoints: async () => [],
-    startRun: async () => {},
-    waitForStop: async (runId) => ({
-      runId,
-      disposition: "accepted",
-      reason: { kind: "stopped" },
-    }),
-    cancelRun: async () => {},
+    beginRun: async (request) => testSourceDebuggerRun(request),
     dispose: async () => {},
   };
 }

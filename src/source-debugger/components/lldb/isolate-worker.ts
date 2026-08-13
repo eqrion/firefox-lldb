@@ -4,17 +4,17 @@
 
 import { readFile } from "node:fs/promises";
 import { workerData } from "node:worker_threads";
-import type { Logger } from "../logging.js";
-import type { GdbRspEndpoint } from "./component.js";
-import { connectSourceDebuggerComponentHost } from "./host-rpc.js";
-import { serveSourceDebuggerComponentIsolate } from "./isolate.js";
-import { EmbeddedLldbComponentRuntime } from "./lldb-runtime.js";
+import type { Logger } from "../../../logging.js";
+import type { GdbRspEndpoint } from "../../protocol/component.js";
+import { connectSourceDebuggerComponentHost } from "../../transport/host-rpc.js";
+import { serveSourceDebuggerComponentIsolate } from "../../transport/isolate.js";
+import { EmbeddedLldbComponentRuntime } from "./runtime.js";
 import type {
   LldbIsolateControlRequest,
   LldbIsolateHostMessage,
   LldbIsolateWorkerData,
   LldbIsolateWorkerMessage,
-} from "./lldb-isolate-protocol.js";
+} from "./isolate-protocol.js";
 
 const data = workerData as LldbIsolateWorkerData;
 const { definitionPort, componentPort, hostPort, controlPort, options } = data;

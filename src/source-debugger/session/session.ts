@@ -2,17 +2,26 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-import type { RdpWasmSession } from "../rdp/session.js";
-import { noopLogger, type Logger } from "../logging.js";
-import type { SourceDebuggerComponentInstance } from "./component.js";
-import type { SourceDebuggerSessionHost } from "./host.js";
+import { noopLogger, type Logger } from "../../logging.js";
+import type { SourceDebuggerComponent, SourceDebuggerRun } from "../protocol/component.js";
+import type { SourceDebuggerSessionHost } from "../target/host.js";
+import type { SourceDebuggerTarget } from "../protocol/target.js";
+import { SourceDebuggerError } from "../protocol/error.js";
+import {
+  validateComponentDescriptor,
+  validateComponentFrame,
+  validateComponentStop,
+  validateRunResource,
+  validateSourceValue,
+} from "../protocol/validation.js";
 import type { ModuleOwnerResolver } from "./ownership.js";
-import { isSourceDebuggerRpcTransportError } from "./rpc.js";
+import { isSourceDebuggerRpcTransportError } from "../transport/rpc.js";
 import type {
   BreakpointId,
   CommandResult,
   ComponentId,
   ComponentRunAction,
+  ComponentRunRequest,
   ComponentStop,
   LogicalFrame,
   LogicalFrameId,
@@ -29,31 +38,44 @@ import type {
   ThreadId,
   SourceDebuggerComponentDescriptor,
   SourceFile,
-} from "./types.js";
+  SourceId,
+  SourceProperty,
+  ValueId,
+} from "../protocol/types.js";
 
 export interface SourceDebuggerSessionOptions {
-  components: SourceDebuggerComponentInstance[];
-  getRdpSession?: () => RdpWasmSession | undefined;
+  components: SourceDebuggerComponent[];
+  target?: SourceDebuggerTarget;
   resolveModuleOwner?: ModuleOwnerResolver;
   /** Lazily create and attach an installed component selected for a module
    * which appeared after initial discovery. Called only while stopped. */
-  ensureComponent?: (componentId: ComponentId) => Promise<SourceDebuggerComponentInstance>;
-  assignModuleOwner?: (moduleId: string, componentId: ComponentId) => void;
-  removeModuleOwner?: (moduleId: string) => void;
+  ensureComponent?: (componentId: ComponentId) => Promise<SourceDebuggerComponent>;
   /** Imported debuggee capabilities owned and revoked with this session. */
   debuggeeHost?: SourceDebuggerSessionHost;
   logger?: Logger;
 }
 
 interface BreakpointRoute {
-  component: SourceDebuggerComponentInstance;
+  component: SourceDebuggerComponent;
   componentBreakpointId: string;
 }
 
+interface SourceRoute {
+  component: SourceDebuggerComponent;
+  componentSourceId: SourceId;
+  moduleId?: string;
+}
+
+interface ValueRoute {
+  component: SourceDebuggerComponent;
+  componentValueId: ValueId;
+  stopId: StopId;
+}
+
 interface ComponentRunWait {
-  component: SourceDebuggerComponentInstance;
-  stop: Promise<{ component: SourceDebuggerComponentInstance; stop: ComponentStop }>;
-  resumeSequence: number;
+  component: SourceDebuggerComponent;
+  run: SourceDebuggerRun;
+  stop: Promise<{ component: SourceDebuggerComponent; stop: ComponentStop }>;
 }
 
 const MAX_TRANSPARENT_STEP_IN_STOPS = 32;
@@ -63,18 +85,18 @@ const MAX_TRANSPARENT_STEP_IN_STOPS = 32;
 // an observer-first barrier so isolated debuggers enter each physical run
 // before its driver is allowed to resume the target.
 export class SourceDebuggerSession {
-  readonly #components: SourceDebuggerComponentInstance[];
-  readonly #componentById: Map<ComponentId, SourceDebuggerComponentInstance>;
-  readonly #getRdpSession: () => RdpWasmSession | undefined;
+  readonly #components: SourceDebuggerComponent[];
+  readonly #componentById: Map<ComponentId, SourceDebuggerComponent>;
+  readonly #target: SourceDebuggerTarget | undefined;
   readonly #resolveModuleOwner: ModuleOwnerResolver;
   readonly #ensureComponent:
-    | ((componentId: ComponentId) => Promise<SourceDebuggerComponentInstance>)
+    | ((componentId: ComponentId) => Promise<SourceDebuggerComponent>)
     | undefined;
   readonly #debuggeeHost: SourceDebuggerSessionHost | undefined;
-  readonly #assignModuleOwner: ((moduleId: string, componentId: ComponentId) => void) | undefined;
-  readonly #removeModuleOwner: ((moduleId: string) => void) | undefined;
   readonly #logger: Logger;
   readonly #frames = new Map<LogicalFrameId, LogicalFrame>();
+  readonly #sourceRoutes = new Map<SourceId, SourceRoute>();
+  readonly #valueRoutes = new Map<ValueId, ValueRoute>();
   readonly #breakpointRoutes = new Map<BreakpointId, BreakpointRoute>();
   readonly #componentDescriptors = new Map<ComponentId, SourceDebuggerComponentDescriptor>();
   readonly #quarantined = new Map<ComponentId, Error>();
@@ -84,6 +106,7 @@ export class SourceDebuggerSession {
   #runNumber = 0;
   #stopId: StopId = "stop-0";
   #activeRunId: RunId | undefined;
+  #activeRuns: ComponentRunWait[] = [];
   #stateComponentId: ComponentId;
 
   constructor(options: SourceDebuggerSessionOptions) {
@@ -95,22 +118,16 @@ export class SourceDebuggerSession {
     if (this.#componentById.size !== this.#components.length) {
       throw new Error("SourceDebuggerComponent ids must be unique within a session");
     }
-    this.#getRdpSession = options.getRdpSession ?? (() => undefined);
+    this.#target = options.target;
     this.#resolveModuleOwner = options.resolveModuleOwner ?? (async () => this.#components[0].id);
     this.#ensureComponent = options.ensureComponent;
     this.#debuggeeHost = options.debuggeeHost;
-    this.#assignModuleOwner = options.assignModuleOwner;
-    this.#removeModuleOwner = options.removeModuleOwner;
     this.#logger = options.logger ?? noopLogger;
     this.#stateComponentId = this.#components[0].id;
   }
 
   currentStopId(): StopId {
     return this.#stopId;
-  }
-
-  rdpSession(): RdpWasmSession | undefined {
-    return this.#getRdpSession();
   }
 
   async components(): Promise<SourceDebuggerComponentDescriptor[]> {
@@ -133,7 +150,13 @@ export class SourceDebuggerSession {
           };
         }
         try {
-          const descriptor = await this.#invoke(component, "describe", () => component.describe());
+          // Status is also the liveness probe. Do not serve the cached
+          // descriptor here or an exited isolate would remain "ready" until a
+          // different operation happened to touch it.
+          const descriptor = validateComponentDescriptor(
+            await this.#invoke(component, "describe", () => component.describe()),
+            component.id
+          );
           this.#componentDescriptors.set(component.id, descriptor);
           return { id: component.id, status: "ready", descriptor };
         } catch (error) {
@@ -163,13 +186,26 @@ export class SourceDebuggerSession {
       const module = this.#moduleById.get(moduleId);
       if (!module) throw new Error(`unknown Wasm module ${moduleId}`);
       const component = this.#component(module.owner);
-      return this.#invoke(component, "sources", () => component.sources(moduleId));
+      const sources = await this.#invoke(component, "sources", () => component.sources(moduleId));
+      return sources.map((source) => this.#routeSource(component, source));
     }
-    return (await this.#collectAvailable("sources", (component) => component.sources())).flat();
+    const sources = await this.#collectAvailable("sources", async (component) =>
+      (await component.sources()).map((source) => this.#routeSource(component, source))
+    );
+    return sources.flat();
   }
 
   async source(sourceId: string): Promise<SourceFile | undefined> {
     return (await this.sources()).find(({ id }) => id === sourceId);
+  }
+
+  async sourceContent(sourceId: SourceId): Promise<string | null> {
+    if (!this.#sourceRoutes.has(sourceId)) await this.sources();
+    const route = this.#sourceRoutes.get(sourceId);
+    if (!route) throw new SourceDebuggerError("not-found", `unknown source ${sourceId}`);
+    return this.#invoke(route.component, "source content", () =>
+      route.component.sourceContent(route.componentSourceId)
+    );
   }
 
   async state(): Promise<SessionState> {
@@ -201,6 +237,7 @@ export class SourceDebuggerSession {
     const frames = projections
       .flatMap(({ component, frames: componentFrames }) =>
         componentFrames.map((frame) => {
+          validateComponentFrame(component.id, frame);
           const id = [
             this.#stopId,
             selectedThread,
@@ -210,6 +247,14 @@ export class SourceDebuggerSession {
           ].join(":");
           const logical: LogicalFrame = {
             ...frame,
+            ...(frame.location
+              ? {
+                  location: {
+                    ...frame.location,
+                    sourceId: this.#logicalSourceId(component, frame.location.sourceId),
+                  },
+                }
+              : {}),
             id,
             stopId: this.#stopId,
             threadId: selectedThread,
@@ -230,33 +275,80 @@ export class SourceDebuggerSession {
   async scopes(frameId: LogicalFrameId): Promise<SourceScope[]> {
     const frame = this.#frame(frameId);
     const component = this.#component(frame.componentId);
-    return this.#invoke(component, "scopes", () =>
+    const scopes = await this.#invoke(component, "scopes", () =>
       component.scopes(this.#stopId, frame.componentFrameId)
     );
+    return scopes.map((scope) => ({
+      ...scope,
+      values: scope.values.map((property) => this.#routeProperty(component, property)),
+    }));
   }
 
   async evaluate(frameId: LogicalFrameId, expression: string): Promise<SourceValue | null> {
     const frame = this.#frame(frameId);
     const component = this.#component(frame.componentId);
-    return this.#invoke(component, "evaluate", () =>
+    await this.#requireCapability(component, "evaluate", "evaluate");
+    const value = await this.#invoke(component, "evaluate", () =>
       component.evaluate(this.#stopId, frame.componentFrameId, expression)
     );
+    return value ? this.#routeValue(component, value) : null;
+  }
+
+  async valueChildren(valueId: ValueId): Promise<SourceProperty[]> {
+    const route = this.#valueRoutes.get(valueId);
+    if (!route || route.stopId !== this.#stopId) {
+      throw new SourceDebuggerError("invalid-state", `stale or unknown value ${valueId}`);
+    }
+    const children = await this.#invoke(route.component, "value children", () =>
+      route.component.valueChildren(this.#stopId, route.componentValueId)
+    );
+    return children.map((property) => this.#routeProperty(route.component, property));
   }
 
   async setBreakpoint(request: SessionBreakpointRequest): Promise<SourceBreakpoint> {
     await this.modules();
+    const sourceRoute =
+      request.target.kind === "source"
+        ? this.#sourceRoutes.get(request.target.location.sourceId)
+        : undefined;
     const component = request.componentId
       ? this.#component(request.componentId)
-      : this.#unambiguousComponent("breakpoint");
+      : (sourceRoute?.component ?? this.#unambiguousComponent("breakpoint"));
+    await this.#requireCapability(component, "breakpoints", "set breakpoint");
+    if (request.condition || request.hitCondition) {
+      await this.#requireCapability(
+        component,
+        "conditionalBreakpoints",
+        "set conditional breakpoint"
+      );
+    }
+    if (sourceRoute && sourceRoute.component !== component) {
+      throw new Error(
+        `source ${sourceRoute.componentSourceId} belongs to component ${sourceRoute.component.id}, not ${component.id}`
+      );
+    }
+    const componentRequest: SessionBreakpointRequest =
+      request.target.kind === "source" && sourceRoute
+        ? {
+            ...request,
+            target: {
+              kind: "source",
+              location: {
+                ...request.target.location,
+                sourceId: sourceRoute.componentSourceId,
+              },
+            },
+          }
+        : request;
     const breakpoint = await this.#invoke(component, "setBreakpoint", () =>
-      component.setBreakpoint(request)
+      component.setBreakpoint(componentRequest)
     );
     const id = `${component.id}:${breakpoint.id}`;
     this.#breakpointRoutes.set(id, {
       component,
       componentBreakpointId: breakpoint.id,
     });
-    return { ...breakpoint, id };
+    return { ...breakpoint, id, target: request.target };
   }
 
   async removeBreakpoint(id: BreakpointId): Promise<void> {
@@ -273,6 +365,17 @@ export class SourceDebuggerSession {
       (await component.breakpoints()).map((breakpoint) => ({
         ...breakpoint,
         id: `${component.id}:${breakpoint.id}`,
+        componentId: component.id,
+        target:
+          breakpoint.target.kind === "source"
+            ? {
+                kind: "source" as const,
+                location: {
+                  ...breakpoint.target.location,
+                  sourceId: this.#logicalSourceId(component, breakpoint.target.location.sourceId),
+                },
+              }
+            : breakpoint.target,
       }))
     );
     return all.flat();
@@ -372,11 +475,10 @@ export class SourceDebuggerSession {
   }
 
   async cancelActiveRun(): Promise<void> {
-    const runId = this.#activeRunId;
-    if (!runId) return;
+    if (!this.#activeRunId) return;
     await Promise.allSettled(
-      this.#activeComponents().map((component) =>
-        this.#invoke(component, "cancelRun", () => component.cancelRun(runId))
+      this.#activeRuns.map(({ component, run }) =>
+        this.#invoke(component, "cancel run", () => run.terminate("cancel"))
       )
     );
   }
@@ -388,6 +490,8 @@ export class SourceDebuggerSession {
       this.#debuggeeHost?.close();
     }
     this.#frames.clear();
+    this.#sourceRoutes.clear();
+    this.#valueRoutes.clear();
     this.#breakpointRoutes.clear();
     this.#componentDescriptors.clear();
     this.#moduleById.clear();
@@ -395,32 +499,24 @@ export class SourceDebuggerSession {
   }
 
   async #refreshModules(): Promise<ModuleDescriptor[]> {
-    const rdp = this.#getRdpSession();
-    const sources = await rdp?.wasmSources();
+    const modules = (await this.#target?.modules()) ?? [];
     const next = new Map<string, ModuleDescriptor>();
-    for (const source of sources ?? []) {
-      const existing = next.get(source.url) ?? this.#moduleById.get(source.url);
+    for (const module of modules) {
+      const existing = next.get(module.id) ?? this.#moduleById.get(module.id);
       if (existing) {
         next.set(existing.id, existing);
         continue;
       }
       if (this.#activeRunId) {
         throw new Error(
-          `cannot assign newly loaded Wasm module ${source.url} during active run ${this.#activeRunId}`
+          `cannot assign newly loaded Wasm module ${module.url} during active run ${this.#activeRunId}`
         );
       }
-
-      const debugInfo = await rdp?.wasmModuleDebugInfo?.(source.url);
-      const module = {
-        id: source.url,
-        url: source.url,
-        ...(debugInfo ? { debugInfo } : {}),
-      };
       // Ownership is sticky for the lifetime of a loaded module. Re-running
       // discovery on every refresh could silently move it between debuggers if
       // a component is installed, removed, or changes its probe result.
       const owner = await this.#resolveModuleOwner(module);
-      this.#assignModuleOwner?.(module.id, owner);
+      this.#target?.assignModuleOwner?.(module.id, owner);
       if (!this.#componentById.has(owner)) {
         if (!this.#ensureComponent) {
           throw new Error(`unknown SourceDebuggerComponent ${owner}`);
@@ -441,7 +537,12 @@ export class SourceDebuggerSession {
     }
 
     for (const id of this.#moduleById.keys()) {
-      if (!next.has(id)) this.#removeModuleOwner?.(id);
+      if (!next.has(id)) {
+        this.#target?.removeModuleOwner?.(id);
+        for (const [sourceId, route] of this.#sourceRoutes) {
+          if (route.moduleId === id) this.#sourceRoutes.delete(sourceId);
+        }
+      }
     }
 
     for (const component of this.#activeComponents()) {
@@ -490,71 +591,62 @@ export class SourceDebuggerSession {
     const active = this.#activeComponents();
     if (active.length === 0) throw new Error("all SourceDebuggerComponents are quarantined");
     const driver = driverId ? this.#component(driverId) : active[0];
+    const runCapability = capabilityForRunAction(action);
+    if (runCapability) await this.#requireCapability(driver, runCapability, action.kind);
     const runId: RunId = `run-${++this.#runNumber}`;
     this.#activeRunId = runId;
-    let observers = active.filter((component) => component !== driver);
+    const runs: ComponentRunWait[] = [];
+    this.#activeRuns = runs;
     try {
       // Observers arm first so no component can miss a fast physical stop when
       // the driver starts its underlying RSP operation.
       const armed = await Promise.allSettled(
-        observers.map((component) =>
-          this.#invoke(component, "startRun", () =>
-            component.startRun({
+        active
+          .filter((component) => component !== driver)
+          .map(async (component) => {
+            const request: ComponentRunRequest = {
               runId,
               role: "observer",
               action: { kind: "continue" },
-            })
-          )
-        )
+            };
+            const run = await this.#invoke(component, "begin observer run", () =>
+              component.beginRun(request)
+            );
+            validateRunResource(component.id, request, run);
+            const wait = this.#runWait(component, run);
+            await this.#invoke(component, "arm observer resume", () => run.waitForResume());
+            return wait;
+          })
       );
-      const survivingObservers: SourceDebuggerComponentInstance[] = [];
-      for (let index = 0; index < armed.length; index++) {
-        const result = armed[index];
-        if (result.status === "fulfilled") survivingObservers.push(observers[index]);
+      for (const result of armed) {
+        if (result.status === "fulfilled") runs.push(result.value);
         else if (!(result.reason instanceof ComponentUnavailableError)) throw result.reason;
       }
-      observers = survivingObservers;
       this.#logger.debug(`[session] ${runId} observers armed; starting ${driver.id}`);
-      await this.#invoke(driver, "startRun", () =>
-        driver.startRun({ runId, role: "driver", action })
+      const driverRequest: ComponentRunRequest = { runId, role: "driver", action };
+      const driverRun = await this.#invoke(driver, "begin driver run", () =>
+        driver.beginRun(driverRequest)
       );
+      validateRunResource(driver.id, driverRequest, driverRun);
+      const driverWait = this.#runWait(driver, driverRun);
+      runs.push(driverWait);
       this.#logger.debug(`[session] ${runId} driver armed`);
-      const driverWait = this.#invoke(driver, "waitForStop", () => driver.waitForStop(runId)).then(
-        (stop) => ({ component: driver, stop })
+      const observerWaits = runs.filter((wait) => wait !== driverWait);
+      const firstResume = await this.#invoke(driver, "wait for physical resume", () =>
+        driverRun.waitForResume()
       );
-      const observerWaits: ComponentRunWait[] = await Promise.all(
-        observers.map(async (component) => ({
-          component,
-          stop: this.#invoke(component, "waitForStop", () => component.waitForStop(runId)).then(
-            (stop) => ({ component, stop })
-          ),
-          resumeSequence:
-            (await this.#invoke(component, "waitForPhysicalResume", () =>
-              component.waitForPhysicalResume?.(runId, 0)
-            )) ?? 0,
-        }))
-      );
-      this.#logger.debug(`[session] ${runId} observer resume sequences captured`);
-      const firstResume = await this.#invoke(driver, "waitForPhysicalResume", () =>
-        driver.waitForPhysicalResume?.(runId, 0)
-      );
-      this.#logger.debug(`[session] ${runId} first driver resume ${String(firstResume)}`);
-      if (
-        firstResume !== undefined &&
-        driver.waitForPhysicalResume &&
-        driver.releasePhysicalResume
-      ) {
-        await this.#invoke(driver, "releasePhysicalResume", () =>
-          driver.releasePhysicalResume!(runId, firstResume)
+      this.#logger.debug(`[session] ${runId} first driver resume ${firstResume?.token ?? "none"}`);
+      if (firstResume !== undefined) {
+        await this.#invoke(driver, "grant physical resume", () =>
+          driverRun.grantResume(firstResume)
         );
-        let resumeSequence = firstResume;
         for (;;) {
-          this.#logger.debug(`[session] ${runId} waiting after driver resume ${resumeSequence}`);
+          this.#logger.debug(`[session] ${runId} waiting after driver resume ${firstResume.token}`);
           const progress = await Promise.race([
-            driverWait.then((result) => ({ kind: "complete" as const, result })),
-            this.#invoke(driver, "waitForPhysicalResume", () =>
-              driver.waitForPhysicalResume!(runId, resumeSequence)
-            ).then((sequence) => ({ kind: "resume" as const, sequence })),
+            driverWait.stop.then((result) => ({ kind: "complete" as const, result })),
+            this.#invoke(driver, "wait for physical resume", () => driverRun.waitForResume()).then(
+              (request) => ({ kind: "resume" as const, request })
+            ),
             this.#waitForObserverPreemption(observerWaits).then((result) => ({
               kind: "preempted" as const,
               result,
@@ -562,13 +654,13 @@ export class SourceDebuggerSession {
           ]);
           if (progress.kind === "preempted") {
             this.#logger.debug(`[session] ${runId} preempted by ${progress.result.component.id}`);
-            return this.#commitPreemptedStop(progress.result, driverWait, observerWaits, runId);
+            return this.#commitPreemptedStop(progress.result, runs, runId);
           }
-          if (progress.kind === "complete" || progress.sequence === undefined) {
-            const result = progress.kind === "complete" ? progress.result : await driverWait;
+          if (progress.kind === "complete" || progress.request === undefined) {
+            const result = progress.kind === "complete" ? progress.result : await driverWait.stop;
             await Promise.all(
-              observers.map((component) =>
-                this.#invoke(component, "synchronizeRun", () => component.synchronizeRun?.(runId))
+              observerWaits.map(({ component, run }) =>
+                this.#invoke(component, "synchronize run", () => run.terminate("synchronize"))
               )
             );
             return this.#commitRunStop([
@@ -584,84 +676,95 @@ export class SourceDebuggerSession {
           // be started again. In both cases, hold the driver's physical lease
           // until every observer is ready for the next stop.
           const prepared = await Promise.all(
-            observerWaits.map((observer) => this.#prepareObserverResume(observer, runId))
+            observerWaits.map((observer) => this.#prepareObserverResume(observer))
           );
           const preempted = prepared.find((result) => result !== undefined);
           if (preempted) {
-            return this.#commitPreemptedStop(preempted, driverWait, observerWaits, runId);
+            return this.#commitPreemptedStop(preempted, runs, runId);
           }
-          resumeSequence = progress.sequence;
-          await this.#invoke(driver, "releasePhysicalResume", () =>
-            driver.releasePhysicalResume!(runId, resumeSequence)
-          );
+          const request = progress.request;
+          await this.#invoke(driver, "grant physical resume", () => driverRun.grantResume(request));
         }
       }
 
-      const waits = [driverWait, ...observerWaits.map(({ stop }) => stop)];
+      const waits = runs.map(({ stop }) => stop);
       const first = await Promise.race(waits);
       await Promise.all(
-        this.#activeComponents()
-          .filter((component) => component !== first.component)
-          .map((component) =>
-            this.#invoke(component, "synchronizeRun", () => component.synchronizeRun?.(runId))
+        runs
+          .filter(({ component }) => component !== first.component)
+          .map(({ component, run }) =>
+            this.#invoke(component, "terminate run", () =>
+              run.terminate(first.stop.disposition === "preempted" ? "preempt" : "synchronize")
+            )
           )
       );
       return this.#commitRunStop(await Promise.all(waits));
     } catch (error) {
       await Promise.allSettled(
-        this.#activeComponents().map((component) =>
-          this.#invoke(component, "cancelRun", () => component.cancelRun(runId))
+        runs.map(({ component, run }) =>
+          this.#invoke(component, "cancel run", () => run.terminate("cancel"))
         )
       );
       if (error instanceof ComponentUnavailableError) this.#advanceStop();
       throw error;
     } finally {
-      if (this.#activeRunId === runId) this.#activeRunId = undefined;
+      await Promise.allSettled(
+        runs.map(({ component, run }) =>
+          this.#invoke(component, "dispose run", () => run.dispose())
+        )
+      );
+      if (this.#activeRunId === runId) {
+        this.#activeRunId = undefined;
+        this.#activeRuns = [];
+      }
     }
   }
 
+  #runWait(component: SourceDebuggerComponent, run: SourceDebuggerRun): ComponentRunWait {
+    const stop = this.#invoke(component, "wait for stop", () => run.waitForStop()).then(
+      (componentStop) => ({
+        component,
+        stop: validateComponentStop(component.id, run.id, componentStop),
+      })
+    );
+    // A sibling run can fail while this component is still armed. Keep the
+    // concurrent stop rejection observed until the session terminates all runs.
+    void stop.catch(() => {});
+    return {
+      component,
+      run,
+      stop,
+    };
+  }
+
   async #prepareObserverResume(
-    observer: ComponentRunWait,
-    runId: RunId
-  ): Promise<{ component: SourceDebuggerComponentInstance; stop: ComponentStop } | undefined> {
-    let completed: { component: SourceDebuggerComponentInstance; stop: ComponentStop } | undefined;
-    if (observer.component.waitForPhysicalResume) {
-      const progress = await Promise.race([
-        observer.stop.then((result) => ({ kind: "complete" as const, result })),
-        this.#invoke(observer.component, "waitForPhysicalResume", () =>
-          observer.component.waitForPhysicalResume!(runId, observer.resumeSequence)
-        ).then((sequence) => ({ kind: "resume" as const, sequence })),
-      ]);
-      if (progress.kind === "resume" && progress.sequence !== undefined) {
-        observer.resumeSequence = progress.sequence;
-        return;
-      }
-      completed = progress.kind === "complete" ? progress.result : await observer.stop;
-    } else {
-      completed = await observer.stop;
+    observer: ComponentRunWait
+  ): Promise<{ component: SourceDebuggerComponent; stop: ComponentStop } | undefined> {
+    const progress = await Promise.race([
+      observer.stop.then((result) => ({ kind: "complete" as const, result })),
+      this.#invoke(observer.component, "wait for observer resume", () =>
+        observer.run.waitForResume()
+      ).then((request) => ({ kind: "resume" as const, request })),
+    ]);
+    if (progress.kind === "resume" && progress.request !== undefined) {
+      return;
     }
+    const completed = progress.kind === "complete" ? progress.result : await observer.stop;
 
     if (completed?.stop.disposition === "preempted") return completed;
 
-    await this.#invoke(observer.component, "startRun", () =>
-      observer.component.startRun({
-        runId,
-        role: "observer",
-        action: { kind: "continue" },
-      })
-    );
-    observer.stop = this.#invoke(observer.component, "waitForStop", () =>
-      observer.component.waitForStop(runId)
+    await this.#invoke(observer.component, "rearm observer", () => observer.run.rearmObserver());
+    observer.stop = this.#invoke(observer.component, "wait for stop", () =>
+      observer.run.waitForStop()
     ).then((stop) => ({ component: observer.component, stop }));
-    observer.resumeSequence =
-      (await this.#invoke(observer.component, "waitForPhysicalResume", () =>
-        observer.component.waitForPhysicalResume?.(runId, 0)
-      )) ?? 0;
+    await this.#invoke(observer.component, "arm observer resume", () =>
+      observer.run.waitForResume()
+    );
   }
 
   #waitForObserverPreemption(
     observers: ComponentRunWait[]
-  ): Promise<{ component: SourceDebuggerComponentInstance; stop: ComponentStop }> {
+  ): Promise<{ component: SourceDebuggerComponent; stop: ComponentStop }> {
     return Promise.race(
       observers.map(({ stop }) =>
         stop.then((result) =>
@@ -672,43 +775,31 @@ export class SourceDebuggerSession {
   }
 
   async #commitPreemptedStop(
-    preempted: { component: SourceDebuggerComponentInstance; stop: ComponentStop },
-    driverWait: Promise<{ component: SourceDebuggerComponentInstance; stop: ComponentStop }>,
-    observers: ComponentRunWait[],
+    preempted: { component: SourceDebuggerComponent; stop: ComponentStop },
+    runs: ComponentRunWait[],
     runId: RunId
   ): Promise<SessionState & { output?: string }> {
-    const interrupted = this.#activeComponents().filter(
-      (component) => component !== preempted.component
-    );
+    const interrupted = runs.filter(({ component }) => component !== preempted.component);
     this.#logger.debug(
-      `[session] ${runId} aborting ${interrupted.map(({ id }) => id).join(", ")} for ${preempted.component.id}`
+      `[session] ${runId} aborting ${interrupted.map(({ component }) => component.id).join(", ")} for ${preempted.component.id}`
     );
     await Promise.all(
-      interrupted.map((component) =>
-        this.#invoke(component, "preempt run", () =>
-          component.abortRun
-            ? component.abortRun(runId)
-            : component.synchronizeRun
-              ? component.synchronizeRun(runId)
-              : component.cancelRun(runId)
-        )
+      interrupted.map(({ component, run }) =>
+        this.#invoke(component, "preempt run", () => run.terminate("preempt"))
       )
     );
     return this.#commitRunStop([
       preempted,
-      await driverWait,
       ...(await Promise.all(
-        observers
-          .filter(({ component }) => component !== preempted.component)
-          .map(({ stop }) => stop)
+        runs.filter(({ component }) => component !== preempted.component).map(({ stop }) => stop)
       )),
     ]);
   }
 
   #commitRunStop(
     results: Array<{
-      component: SourceDebuggerComponentInstance;
-      stop: Awaited<ReturnType<SourceDebuggerComponentInstance["waitForStop"]>>;
+      component: SourceDebuggerComponent;
+      stop: ComponentStop;
     }>
   ): SessionState & { output?: string } {
     const accepted =
@@ -727,33 +818,100 @@ export class SourceDebuggerSession {
   #advanceStop(): void {
     this.#stopId = `stop-${++this.#stopNumber}`;
     this.#frames.clear();
+    this.#valueRoutes.clear();
+  }
+
+  #routeSource(component: SourceDebuggerComponent, source: SourceFile): SourceFile {
+    const id = this.#logicalSourceId(component, source.id);
+    this.#sourceRoutes.set(id, {
+      component,
+      componentSourceId: source.id,
+      ...(source.moduleId ? { moduleId: source.moduleId } : {}),
+    });
+    return { ...source, id };
+  }
+
+  #logicalSourceId(component: SourceDebuggerComponent, componentSourceId: SourceId): SourceId {
+    const id = `source:${encodeURIComponent(component.id)}:${encodeURIComponent(componentSourceId)}`;
+    if (!this.#sourceRoutes.has(id)) {
+      this.#sourceRoutes.set(id, { component, componentSourceId });
+    }
+    return id;
+  }
+
+  #routeProperty(component: SourceDebuggerComponent, property: SourceProperty): SourceProperty {
+    return { ...property, value: this.#routeValue(component, property.value) };
+  }
+
+  #routeValue(component: SourceDebuggerComponent, value: SourceValue): SourceValue {
+    validateSourceValue(component.id, value);
+    if (!value.id) return value;
+    const id = `value:${encodeURIComponent(this.#stopId)}:${encodeURIComponent(component.id)}:${encodeURIComponent(value.id)}`;
+    this.#valueRoutes.set(id, {
+      component,
+      componentValueId: value.id,
+      stopId: this.#stopId,
+    });
+    return { ...value, id };
   }
 
   #frame(id: LogicalFrameId): LogicalFrame {
     const frame = this.#frames.get(id);
-    if (!frame || frame.stopId !== this.#stopId) throw new Error(`stale or unknown frame ${id}`);
+    if (!frame || frame.stopId !== this.#stopId) {
+      throw new SourceDebuggerError("invalid-state", `stale or unknown frame ${id}`);
+    }
     return frame;
   }
 
-  #component(id: ComponentId): SourceDebuggerComponentInstance {
+  #component(id: ComponentId): SourceDebuggerComponent {
     const component = this.#knownComponent(id);
     const failure = this.#quarantined.get(id);
     if (failure) throw new ComponentUnavailableError(id, failure);
     return component;
   }
 
-  #knownComponent(id: ComponentId): SourceDebuggerComponentInstance {
+  #knownComponent(id: ComponentId): SourceDebuggerComponent {
     const component = this.#componentById.get(id);
-    if (!component) throw new Error(`unknown SourceDebuggerComponent ${id}`);
+    if (!component) {
+      throw new SourceDebuggerError("not-found", `unknown SourceDebuggerComponent ${id}`, {
+        componentId: id,
+      });
+    }
     return component;
   }
 
-  #activeComponents(): SourceDebuggerComponentInstance[] {
+  async #descriptor(
+    component: SourceDebuggerComponent
+  ): Promise<SourceDebuggerComponentDescriptor> {
+    const cached = this.#componentDescriptors.get(component.id);
+    if (cached) return cached;
+    const descriptor = validateComponentDescriptor(
+      await this.#invoke(component, "describe", () => component.describe()),
+      component.id
+    );
+    this.#componentDescriptors.set(component.id, descriptor);
+    return descriptor;
+  }
+
+  async #requireCapability(
+    component: SourceDebuggerComponent,
+    capability: keyof SourceDebuggerComponentDescriptor["capabilities"],
+    operation: string
+  ): Promise<void> {
+    if ((await this.#descriptor(component)).capabilities[capability]) return;
+    throw new SourceDebuggerError(
+      "unsupported-operation",
+      `SourceDebuggerComponent ${component.id} does not support ${operation}`,
+      { componentId: component.id, operation }
+    );
+  }
+
+  #activeComponents(): SourceDebuggerComponent[] {
     return this.#components.filter((component) => !this.#quarantined.has(component.id));
   }
 
   async #invoke<T>(
-    component: SourceDebuggerComponentInstance,
+    component: SourceDebuggerComponent,
     operation: string,
     invoke: () => T | Promise<T>
   ): Promise<T> {
@@ -768,7 +926,7 @@ export class SourceDebuggerSession {
     }
   }
 
-  #quarantine(component: SourceDebuggerComponentInstance, operation: string, error: Error): void {
+  #quarantine(component: SourceDebuggerComponent, operation: string, error: Error): void {
     if (this.#quarantined.has(component.id)) return;
     this.#quarantined.set(component.id, error);
     for (const [id, frame] of this.#frames) {
@@ -784,7 +942,7 @@ export class SourceDebuggerSession {
 
   async #firstAvailable<T>(
     operation: string,
-    invoke: (component: SourceDebuggerComponentInstance) => Promise<T>,
+    invoke: (component: SourceDebuggerComponent) => Promise<T>,
     preferredId?: ComponentId
   ): Promise<T> {
     const active = this.#activeComponents();
@@ -805,7 +963,7 @@ export class SourceDebuggerSession {
 
   async #collectAvailable<T>(
     operation: string,
-    invoke: (component: SourceDebuggerComponentInstance) => Promise<T>
+    invoke: (component: SourceDebuggerComponent) => Promise<T>
   ): Promise<T[]> {
     const components = this.#activeComponents();
     const results = await Promise.allSettled(
@@ -822,21 +980,29 @@ export class SourceDebuggerSession {
     return values;
   }
 
-  #unambiguousComponent(operation: string): SourceDebuggerComponentInstance {
+  #unambiguousComponent(operation: string): SourceDebuggerComponent {
     const active = this.#activeComponents();
     if (active.length !== 1) {
-      throw new Error(`${operation} requires an explicit component in a multi-component session`);
+      throw new SourceDebuggerError(
+        "ambiguous",
+        `${operation} requires an explicit component in a multi-component session`,
+        { operation }
+      );
     }
     return active[0];
   }
 }
 
-class ComponentUnavailableError extends Error {
+class ComponentUnavailableError extends SourceDebuggerError {
   constructor(
-    readonly componentId: ComponentId,
+    override readonly componentId: ComponentId,
     cause: Error
   ) {
-    super(`SourceDebuggerComponent ${componentId} is quarantined: ${cause.message}`, { cause });
+    super(
+      "component-unavailable",
+      `SourceDebuggerComponent ${componentId} is quarantined: ${cause.message}`,
+      { componentId, cause }
+    );
     this.name = "SourceDebuggerComponentUnavailableError";
   }
 }
@@ -845,6 +1011,22 @@ function isRunControlCommand(command: string): boolean {
   return /^\s*(?:c|continue|process\s+continue|run|r|thread\s+(?:step|step-in|step-over|step-out|step-inst))\b/i.test(
     command
   );
+}
+
+function capabilityForRunAction(
+  action: ComponentRunAction
+): keyof SourceDebuggerComponentDescriptor["capabilities"] | undefined {
+  switch (action.kind) {
+    case "continue":
+      return undefined;
+    case "step-into":
+    case "prepare-frame":
+      return "stepInto";
+    case "step-over":
+      return "stepOver";
+    case "step-out":
+      return "stepOut";
+  }
 }
 
 function sameSourceStack(before: LogicalFrame[], after: LogicalFrame[]): boolean {

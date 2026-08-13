@@ -4,11 +4,11 @@
 
 import type {
   SourceDebuggerComponentDefinition,
-  SourceDebuggerComponentInstance,
-} from "./component.js";
-import type { SourceDebuggerComponentHostBinding } from "./host.js";
+  SourceDebuggerComponent,
+} from "../protocol/component.js";
+import type { SourceDebuggerComponentHostBinding } from "../target/host.js";
 import type { SourceDebuggerComponentProbe } from "./ownership.js";
-import type { ComponentId } from "./types.js";
+import type { ComponentId } from "../protocol/types.js";
 
 export interface SourceDebuggerComponentActivation {
   /** Optional text a frontend can present when every component is ready. */
@@ -27,7 +27,7 @@ export interface LoadedSourceDebuggerComponentDefinition extends SourceDebuggerC
  * session or component catalog consumes. */
 export interface LoadedSourceDebuggerComponent extends SourceDebuggerComponentProbe {
   readonly definition: SourceDebuggerComponentDefinition;
-  readonly component: SourceDebuggerComponentInstance;
+  readonly component: SourceDebuggerComponent;
   /** Connect the isolated engine to its configured debug target. Target and
    * engine-specific bootstrap stays inside the installed loader. */
   activate(): Promise<SourceDebuggerComponentActivation | void>;

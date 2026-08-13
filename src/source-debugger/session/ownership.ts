@@ -2,10 +2,12 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-import type { ModuleClaim } from "./component.js";
-import type { ComponentId, ModuleDescriptor } from "./types.js";
+import type { ModuleClaim } from "../protocol/component.js";
+import type { ComponentId } from "../protocol/types.js";
+import type { UnownedModuleDescriptor } from "../protocol/target.js";
+import { validateModuleClaim } from "../protocol/validation.js";
 
-export type UnownedModuleDescriptor = Omit<ModuleDescriptor, "owner">;
+export type { UnownedModuleDescriptor } from "../protocol/target.js";
 
 export type ModuleOwnerResolver = (module: UnownedModuleDescriptor) => Promise<ComponentId>;
 
@@ -56,11 +58,7 @@ export async function probeModuleClaims(
           { cause: error }
         );
       }
-      if (!Number.isFinite(claim.confidence) || claim.confidence < 0 || claim.confidence > 100) {
-        throw new Error(
-          `SourceDebuggerComponent ${probe.id} returned invalid confidence ${String(claim.confidence)} for Wasm module ${module.url}`
-        );
-      }
+      validateModuleClaim(probe.id, claim);
       return { componentId: probe.id, claim };
     })
   );

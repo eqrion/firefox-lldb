@@ -11,9 +11,9 @@ import assert from "node:assert/strict";
 import { PassThrough, Writable } from "node:stream";
 import { parseCliArgs, startPlatformServer } from "../../src/core/platform-session.ts";
 import { runRepl } from "../../src/cli/repl.ts";
-import { IsolatedLldbComponentRuntime } from "../../src/source-debugger/lldb-isolate.ts";
-import { SourceDebuggerSessionHost } from "../../src/source-debugger/host.ts";
-import { SourceDebuggerSession } from "../../src/source-debugger/session.ts";
+import { IsolatedLldbComponentRuntime } from "../../src/source-debugger/components/lldb/isolate.ts";
+import { SourceDebuggerSessionHost } from "../../src/source-debugger/target/host.ts";
+import { SourceDebuggerSession } from "../../src/source-debugger/session/session.ts";
 import { freePort } from "../../src/platform/gdb-server-spawner.ts";
 import { consoleLogger } from "../../src/cli/logger.ts";
 import { startStaticServer, sleep } from "./harness.mjs";
@@ -177,7 +177,17 @@ test("two isolated LLDB components compose an interleaved stack over one Firefox
 
     session = new SourceDebuggerSession({
       components: [primary.component, secondary.component],
-      getRdpSession: () => primaryRdpSession,
+      target: {
+        modules: async () =>
+          Promise.all(
+            (await primaryRdpSession.wasmSources()).map(async ({ url }) => ({
+              id: url,
+              url,
+              debugInfo: await primaryRdpSession.wasmModuleDebugInfo(url),
+            }))
+          ),
+        close: () => {},
+      },
       resolveModuleOwner: async (module) =>
         module.url.includes("component=b") ? "lldb-b" : "lldb-a",
       debuggeeHost,

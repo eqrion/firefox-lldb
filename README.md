@@ -93,6 +93,8 @@ That route-free path is now exercised by the built-in `wasm-text` fallback.
 LLDB claims DWARF and source-map modules; a module with neither is assigned to
 an independent direct-Wasm debugger which generates a virtual `module.wat`.
 It does not use LLDB, gdbstub, RSP, or the LLDB abort sentinel.
+It runs in a separate worker and imports its direct Wasm debuggee through the
+same generic component-host resource transport used for LLDB's RSP import.
 
 Each installed ecosystem enters through a generic
 `SourceDebuggerComponentLoader`. A shared `SourceDebuggerSessionHost` gives the

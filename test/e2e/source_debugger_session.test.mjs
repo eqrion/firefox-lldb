@@ -18,7 +18,7 @@ after(async () => {
 });
 
 test("generic session commands debug C++ through the LLDB component", async () => {
-  assert.match(await session.type("components"), /lldb\s+LLDB\s+protocol 0\.1/);
+  assert.match(await session.type("components"), /lldb\s+LLDB\s+protocol 0\.2/);
   assert.match(await session.type("modules"), /\[lldb\].*math\.wasm.*debug: dwarf/);
 
   const breakpoint = await session.type("break compute_factorial");

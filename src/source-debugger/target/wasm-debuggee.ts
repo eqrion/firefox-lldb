@@ -2,66 +2,18 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-import type { FrameForm, RdpWasmSession, StoppedEvent } from "../rdp/session.js";
-import { grip } from "../rdp/session.js";
-import type { SessionStopReason } from "./types.js";
-
-export interface WasmDebuggeeModule {
-  id: string;
-  url: string;
-}
-
-export interface WasmDebuggeeThread {
-  id: string;
-  stopped: boolean;
-}
-
-export interface WasmDebuggeeFrame {
-  id: string;
-  threadId: string;
-  physicalFrameIndex: number;
-  moduleId?: string;
-  offset?: number;
-  functionName?: string;
-}
-
-export interface WasmDebuggeeVariable {
-  name: string;
-  type?: string;
-  display: string;
-}
-
-export interface WasmDebuggeeStop {
-  threadId: string;
-  reason: SessionStopReason;
-}
-
-export type WasmDebuggeeResumeAction = { kind: "continue" } | { kind: "step"; threadId: string };
-
-/** Low-level capability imported by a source debugger which understands raw
- * WebAssembly itself. It deliberately exposes Wasm modules, byte offsets,
- * frames, values, breakpoints, and physical run control—not Firefox actors or
- * the GDB remote protocol. */
-export interface WasmDebuggee {
-  modules(): Promise<WasmDebuggeeModule[]>;
-  moduleBytecode(moduleId: string): Promise<Uint8Array>;
-  breakpointOffsets(moduleId: string): Promise<number[]>;
-
-  threads(): Promise<WasmDebuggeeThread[]>;
-  frames(threadId: string): Promise<WasmDebuggeeFrame[]>;
-  frameVariables(frameId: string): Promise<WasmDebuggeeVariable[]>;
-
-  addBreakpoint(moduleId: string, offset: number): Promise<number>;
-  removeBreakpoint(moduleId: string, offset: number): Promise<void>;
-
-  /** Register for the next shared all-stop. Calling this arms only the local
-   * observation; resume() is the separate broker-controlled physical lease. */
-  waitForStop(): Promise<WasmDebuggeeStop>;
-  cancelWaitForStop(): void;
-  resume(action: WasmDebuggeeResumeAction): Promise<void>;
-  interrupt(): void;
-  dispose(): void;
-}
+import type { FrameForm, RdpWasmSession, StoppedEvent } from "../../rdp/session.js";
+import { grip } from "../../rdp/session.js";
+import type { SessionStopReason } from "../protocol/types.js";
+import type {
+  WasmDebuggee,
+  WasmDebuggeeFrame,
+  WasmDebuggeeModule,
+  WasmDebuggeeResumeAction,
+  WasmDebuggeeStop,
+  WasmDebuggeeThread,
+  WasmDebuggeeVariable,
+} from "../protocol/wasm-debuggee.js";
 
 /** Firefox/RDP implementation of the direct Wasm debuggee capability. One
  * instance is scoped to a SourceDebuggerComponent, but it borrows rather than
@@ -186,7 +138,7 @@ export class FirefoxWasmDebuggee implements WasmDebuggee {
     });
   }
 
-  cancelWaitForStop(): void {
+  async cancelWaitForStop(): Promise<void> {
     for (const cancel of [...this.#pendingStops]) cancel();
   }
 
@@ -197,13 +149,13 @@ export class FirefoxWasmDebuggee implements WasmDebuggee {
     else this.session.stepOne(parseThreadId(action.threadId), "step");
   }
 
-  interrupt(): void {
+  async interrupt(): Promise<void> {
     this.#requireOpen();
     const tid = this.session.preferredInterruptTid();
     if (tid !== undefined) this.session.interrupt(tid);
   }
 
-  dispose(): void {
+  async dispose(): Promise<void> {
     if (this.#disposed) return;
     this.#disposed = true;
     for (const cancel of [...this.#pendingStops]) cancel();

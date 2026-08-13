@@ -4,17 +4,17 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { RdpWasmSession } from "../../src/rdp/session.js";
 import type {
   SourceDebuggerComponentDefinition,
-  SourceDebuggerComponentInstance,
-} from "../../src/source-debugger/component.js";
-import { SourceDebuggerSessionHost } from "../../src/source-debugger/host.js";
+  SourceDebuggerComponent,
+} from "../../src/source-debugger/protocol/component.js";
+import { SourceDebuggerSessionHost } from "../../src/source-debugger/target/host.js";
 import type {
   LoadedSourceDebuggerComponent,
   SourceDebuggerComponentLoader,
-} from "../../src/source-debugger/loader.js";
-import { SourceDebuggerSessionRuntime } from "../../src/source-debugger/runtime.js";
+} from "../../src/source-debugger/session/loader.js";
+import { SourceDebuggerSessionRuntime } from "../../src/source-debugger/session/runtime.js";
+import { testSourceDebuggerRun } from "../helpers/source-debugger-run.js";
 
 test("session runtime loads, activates, and closes components in dependency order", async () => {
   const events: string[] = [];
@@ -109,10 +109,6 @@ test("catalog discovery probes every definition and instantiates only module own
 test("a module loaded after startup activates its owner before the next run", async () => {
   const events: string[] = [];
   const sources = [{ url: "component-a.wasm" }];
-  const rdp = {
-    wasmSources: async () => sources,
-    wasmModuleDebugInfo: async () => ["dwarf"],
-  } as unknown as RdpWasmSession;
   const target = {
     modules: async () => sources.map(({ url }) => ({ id: url, url, debugInfo: ["dwarf"] })),
     close: () => {
@@ -121,7 +117,6 @@ test("a module loaded after startup activates its owner before the next run", as
   };
   const runtime = await SourceDebuggerSessionRuntime.load({
     target,
-    getRdpSession: () => rdp,
     loaders: [
       routedDiscoveryLoader("component-a", events),
       routedDiscoveryLoader("component-b", events),
@@ -275,7 +270,7 @@ function routedDiscoveryLoader(id: string, events: string[]): SourceDebuggerComp
 
 function descriptor(id: string) {
   return {
-    protocolVersion: "0.1" as const,
+    protocolVersion: "0.2" as const,
     id,
     name: `Fake ${id}`,
     capabilities: {
@@ -289,18 +284,20 @@ function descriptor(id: string) {
   };
 }
 
-function fakeComponent(id: string, events: string[]): SourceDebuggerComponentInstance {
+function fakeComponent(id: string, events: string[]): SourceDebuggerComponent {
   return {
     id,
     describe: async () => descriptor(id),
     addModules: async () => {},
     removeModules: async () => {},
     sources: async () => [],
+    sourceContent: async () => null,
     state: async (stopId) => ({ stopId, reason: { kind: "stopped" } }),
     threads: async () => [],
     frames: async () => [],
     scopes: async () => [],
     evaluate: async () => null,
+    valueChildren: async () => [],
     setBreakpoint: async (request) => ({
       id: "1",
       componentId: id,
@@ -309,13 +306,7 @@ function fakeComponent(id: string, events: string[]): SourceDebuggerComponentIns
     }),
     removeBreakpoint: async () => {},
     breakpoints: async () => [],
-    startRun: async () => {},
-    waitForStop: async (runId) => ({
-      runId,
-      disposition: "accepted",
-      reason: { kind: "stopped" },
-    }),
-    cancelRun: async () => {},
+    beginRun: async (request) => testSourceDebuggerRun(request),
     dispose: async () => {
       events.push(`dispose:${id}`);
     },

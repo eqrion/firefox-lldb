@@ -3,33 +3,44 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 import type { MessagePort } from "node:worker_threads";
+import { SourceDebuggerError, isSourceDebuggerError } from "../protocol/error.js";
 import type {
   ModuleClaim,
   SourceDebuggerComponentDefinition,
-  SourceDebuggerComponentInstance,
-} from "./component.js";
+  SourceDebuggerComponent,
+  SourceDebuggerRun,
+} from "../protocol/component.js";
 import type {
   CommandResult,
   ComponentFrame,
   ComponentRunRequest,
+  ComponentRunTermination,
   ComponentStop,
   ModuleDescriptor,
-  RunId,
+  PhysicalResumeRequest,
   SessionState,
   SessionThread,
   SourceBreakpoint,
   SourceBreakpointRequest,
   SourceDebuggerComponentDescriptor,
   SourceFile,
+  SourceProperty,
   SourceScope,
   SourceValue,
   StopId,
   ThreadId,
-} from "./types.js";
+} from "../protocol/types.js";
 
-type RpcMethod = Exclude<keyof SourceDebuggerComponentInstance, "id">;
+type RpcMethod = Exclude<keyof SourceDebuggerComponent, "id">;
 type DefinitionRpcMethod = keyof SourceDebuggerComponentDefinition;
-type RpcCallMethod = RpcMethod | DefinitionRpcMethod | "$hello";
+type RunRpcMethod =
+  | "$run-wait-for-stop"
+  | "$run-wait-for-resume"
+  | "$run-grant-resume"
+  | "$run-rearm-observer"
+  | "$run-terminate"
+  | "$run-dispose";
+type RpcCallMethod = RpcMethod | DefinitionRpcMethod | RunRpcMethod | "$hello";
 
 export type SourceDebuggerRpcTransportFailure = "closed" | "peer-closed" | "timeout";
 
@@ -56,13 +67,18 @@ interface RpcRequest {
   args: unknown[];
 }
 
-type ComponentRpcRequest = RpcRequest & { method: RpcMethod | "$hello" };
+type ComponentRpcRequest = RpcRequest & { method: RpcMethod | RunRpcMethod | "$hello" };
 type DefinitionRpcRequest = RpcRequest & { method: DefinitionRpcMethod };
 
 interface SerializedError {
   name: string;
   message: string;
   stack?: string;
+  sourceDebugger?: {
+    code: SourceDebuggerError["code"];
+    componentId?: string;
+    operation?: string;
+  };
 }
 
 interface RpcResponse {
@@ -77,6 +93,12 @@ interface RpcHello {
   methods: RpcMethod[];
 }
 
+interface RpcRunReference {
+  resourceId: number;
+  id: string;
+  role: ComponentRunRequest["role"];
+}
+
 interface PendingCall {
   method: RpcCallMethod;
   resolve: (value: unknown) => void;
@@ -89,42 +111,37 @@ const RPC_METHODS: RpcMethod[] = [
   "addModules",
   "removeModules",
   "sources",
+  "sourceContent",
   "state",
   "threads",
   "frames",
   "scopes",
   "evaluate",
+  "valueChildren",
   "setBreakpoint",
   "removeBreakpoint",
   "breakpoints",
-  "startRun",
-  "waitForStop",
-  "waitForPhysicalResume",
-  "releasePhysicalResume",
-  "synchronizeRun",
-  "abortRun",
-  "cancelRun",
+  "beginRun",
   "command",
   "dispose",
 ];
-const RPC_METHOD_SET = new Set<string>(RPC_METHODS);
+const RUN_RPC_METHODS: RunRpcMethod[] = [
+  "$run-wait-for-stop",
+  "$run-wait-for-resume",
+  "$run-grant-resume",
+  "$run-rearm-observer",
+  "$run-terminate",
+  "$run-dispose",
+];
+const RPC_METHOD_SET = new Set<string>([...RPC_METHODS, ...RUN_RPC_METHODS]);
 const DEFINITION_RPC_METHOD_SET = new Set<string>(["describe", "probeModule"]);
 
-const REQUIRED_METHODS: RpcMethod[] = RPC_METHODS.filter(
-  (method) =>
-    ![
-      "waitForPhysicalResume",
-      "releasePhysicalResume",
-      "synchronizeRun",
-      "abortRun",
-      "command",
-    ].includes(method)
-);
+const REQUIRED_METHODS: RpcMethod[] = RPC_METHODS.filter((method) => method !== "command");
 
 export interface SourceDebuggerRpcOptions {
   /** Reject a component call which does not settle within this deadline.
-   * Long-running waitForStop, waitForPhysicalResume, and debugger-native
-   * command calls are exempt because waiting is part of their contract. */
+   * Long-running run waits and debugger-native command calls are exempt because
+   * waiting is part of their contract. */
   requestTimeoutMs?: number;
   /** Called after a timeout or peer closure makes the entire RPC client
    * unusable. An isolation host can terminate the containing worker here. */
@@ -135,24 +152,34 @@ export interface SourceDebuggerRpcEndpoint {
   close(): void;
 }
 
-export type RemoteSourceDebuggerComponentInstance = SourceDebuggerComponentInstance &
-  SourceDebuggerRpcEndpoint;
+export type RemoteSourceDebuggerComponent = SourceDebuggerComponent & SourceDebuggerRpcEndpoint;
 
 export function serveSourceDebuggerComponent(
   port: MessagePort,
-  component: SourceDebuggerComponentInstance
+  component: SourceDebuggerComponent
 ): SourceDebuggerRpcEndpoint {
   const methods = RPC_METHODS.filter((method) => hasComponentMethod(component, method));
+  const runs = new Map<number, SourceDebuggerRun>();
+  let nextRunResourceId = 1;
   let closed = false;
 
   const onMessage = (message: unknown): void => {
     if (!isRequest(message)) return;
     void (async () => {
       try {
-        const result =
-          message.method === "$hello"
-            ? ({ id: component.id, methods } satisfies RpcHello)
-            : await componentMethod(component, message.method)(...message.args);
+        let result: unknown;
+        if (message.method === "$hello") {
+          result = { id: component.id, methods } satisfies RpcHello;
+        } else if (isRunRpcMethod(message.method)) {
+          result = await callRunResource(runs, message.method, message.args);
+        } else if (message.method === "beginRun") {
+          const run = await component.beginRun(message.args[0] as ComponentRunRequest);
+          const resourceId = nextRunResourceId++;
+          runs.set(resourceId, run);
+          result = { resourceId, id: run.id, role: run.role } satisfies RpcRunReference;
+        } else {
+          result = await componentMethod(component, message.method)(...message.args);
+        }
         if (!closed) {
           port.postMessage({ type: "source-debugger-response", id: message.id, result });
         }
@@ -178,6 +205,8 @@ export function serveSourceDebuggerComponent(
     close(): void {
       if (closed) return;
       closed = true;
+      for (const run of runs.values()) void run.dispose().catch(() => {});
+      runs.clear();
       port.off("message", onMessage);
       port.close();
     },
@@ -240,7 +269,7 @@ export function connectSourceDebuggerComponentDefinition(
 export async function connectSourceDebuggerComponent(
   port: MessagePort,
   options: SourceDebuggerRpcOptions = {}
-): Promise<RemoteSourceDebuggerComponentInstance> {
+): Promise<RemoteSourceDebuggerComponent> {
   const client = new SourceDebuggerRpcClient(
     port,
     options.requestTimeoutMs,
@@ -253,7 +282,7 @@ export async function connectSourceDebuggerComponent(
         throw new Error(`SourceDebuggerComponent ${hello.id} does not export ${method}`);
       }
     }
-    return new RemoteSourceDebuggerComponent(client, hello);
+    return new RemoteSourceDebuggerComponentProxy(client, hello);
   } catch (error) {
     client.close();
     throw error;
@@ -370,20 +399,13 @@ class SourceDebuggerRpcClient {
 }
 
 const NO_DEADLINE_METHODS = new Set<RpcCallMethod>([
-  "waitForStop",
-  "waitForPhysicalResume",
+  "$run-wait-for-stop",
+  "$run-wait-for-resume",
   "command",
 ]);
 
-class RemoteSourceDebuggerComponent implements RemoteSourceDebuggerComponentInstance {
+class RemoteSourceDebuggerComponentProxy implements RemoteSourceDebuggerComponent {
   readonly id: string;
-  readonly waitForPhysicalResume?: (
-    runId: RunId,
-    afterSequence: number
-  ) => Promise<number | undefined>;
-  readonly releasePhysicalResume?: (runId: RunId, sequence: number) => Promise<void>;
-  readonly synchronizeRun?: (runId: RunId) => Promise<void>;
-  readonly abortRun?: (runId: RunId) => Promise<void>;
   readonly command?: (command: string) => Promise<CommandResult>;
 
   constructor(
@@ -392,20 +414,6 @@ class RemoteSourceDebuggerComponent implements RemoteSourceDebuggerComponentInst
   ) {
     this.id = hello.id;
     const methods = new Set(hello.methods);
-    if (methods.has("waitForPhysicalResume")) {
-      this.waitForPhysicalResume = (runId, afterSequence) =>
-        this.client.call("waitForPhysicalResume", runId, afterSequence);
-    }
-    if (methods.has("releasePhysicalResume")) {
-      this.releasePhysicalResume = (runId, sequence) =>
-        this.client.call("releasePhysicalResume", runId, sequence);
-    }
-    if (methods.has("synchronizeRun")) {
-      this.synchronizeRun = (runId) => this.client.call("synchronizeRun", runId);
-    }
-    if (methods.has("abortRun")) {
-      this.abortRun = (runId) => this.client.call("abortRun", runId);
-    }
     if (methods.has("command")) {
       this.command = (command) => this.client.call("command", command);
     }
@@ -425,6 +433,10 @@ class RemoteSourceDebuggerComponent implements RemoteSourceDebuggerComponentInst
 
   sources(moduleId?: string): Promise<SourceFile[]> {
     return this.client.call("sources", moduleId);
+  }
+
+  sourceContent(sourceId: string): Promise<string | null> {
+    return this.client.call("sourceContent", sourceId);
   }
 
   state(stopId: StopId): Promise<SessionState> {
@@ -447,6 +459,10 @@ class RemoteSourceDebuggerComponent implements RemoteSourceDebuggerComponentInst
     return this.client.call("evaluate", stopId, frameId, expression);
   }
 
+  valueChildren(stopId: StopId, valueId: string): Promise<SourceProperty[]> {
+    return this.client.call("valueChildren", stopId, valueId);
+  }
+
   setBreakpoint(request: SourceBreakpointRequest): Promise<SourceBreakpoint> {
     return this.client.call("setBreakpoint", request);
   }
@@ -459,16 +475,14 @@ class RemoteSourceDebuggerComponent implements RemoteSourceDebuggerComponentInst
     return this.client.call("breakpoints");
   }
 
-  startRun(request: ComponentRunRequest): Promise<void> {
-    return this.client.call("startRun", request);
-  }
-
-  waitForStop(runId: RunId): Promise<ComponentStop> {
-    return this.client.call("waitForStop", runId);
-  }
-
-  cancelRun(runId: RunId): Promise<void> {
-    return this.client.call("cancelRun", runId);
+  async beginRun(request: ComponentRunRequest): Promise<SourceDebuggerRun> {
+    const reference = await this.client.call<RpcRunReference>("beginRun", request);
+    if (reference.id !== request.runId || reference.role !== request.role) {
+      throw new Error(
+        `SourceDebuggerComponent returned mismatched run ${reference.id}/${reference.role}`
+      );
+    }
+    return new RemoteSourceDebuggerRun(this.client, reference);
   }
 
   async dispose(): Promise<void> {
@@ -484,8 +498,89 @@ class RemoteSourceDebuggerComponent implements RemoteSourceDebuggerComponentInst
   }
 }
 
+class RemoteSourceDebuggerRun implements SourceDebuggerRun {
+  readonly id: string;
+  readonly role: ComponentRunRequest["role"];
+  readonly #resourceId: number;
+  #disposed = false;
+
+  constructor(
+    private readonly client: SourceDebuggerRpcClient,
+    reference: RpcRunReference
+  ) {
+    this.#resourceId = reference.resourceId;
+    this.id = reference.id;
+    this.role = reference.role;
+  }
+
+  waitForStop(): Promise<ComponentStop> {
+    this.#requireOpen();
+    return this.client.call("$run-wait-for-stop", this.#resourceId);
+  }
+
+  waitForResume(): Promise<PhysicalResumeRequest | undefined> {
+    this.#requireOpen();
+    return this.client.call("$run-wait-for-resume", this.#resourceId);
+  }
+
+  grantResume(request: PhysicalResumeRequest): Promise<void> {
+    this.#requireOpen();
+    return this.client.call("$run-grant-resume", this.#resourceId, request);
+  }
+
+  rearmObserver(): Promise<void> {
+    this.#requireOpen();
+    return this.client.call("$run-rearm-observer", this.#resourceId);
+  }
+
+  terminate(reason: ComponentRunTermination): Promise<void> {
+    this.#requireOpen();
+    return this.client.call("$run-terminate", this.#resourceId, reason);
+  }
+
+  async dispose(): Promise<void> {
+    if (this.#disposed) return;
+    this.#disposed = true;
+    await this.client.call("$run-dispose", this.#resourceId);
+  }
+
+  #requireOpen(): void {
+    if (this.#disposed) throw new Error(`source debugger run ${this.id} is disposed`);
+  }
+}
+
+async function callRunResource(
+  runs: Map<number, SourceDebuggerRun>,
+  method: RunRpcMethod,
+  args: unknown[]
+): Promise<unknown> {
+  const resourceId = args[0];
+  if (!Number.isInteger(resourceId)) throw new Error("invalid source debugger run resource id");
+  const run = runs.get(resourceId as number);
+  if (!run) throw new Error(`unknown source debugger run resource ${String(resourceId)}`);
+  switch (method) {
+    case "$run-wait-for-stop":
+      return run.waitForStop();
+    case "$run-wait-for-resume":
+      return run.waitForResume();
+    case "$run-grant-resume":
+      return run.grantResume(args[1] as PhysicalResumeRequest);
+    case "$run-rearm-observer":
+      return run.rearmObserver();
+    case "$run-terminate":
+      return run.terminate(args[1] as ComponentRunTermination);
+    case "$run-dispose":
+      runs.delete(resourceId as number);
+      return run.dispose();
+  }
+}
+
+function isRunRpcMethod(method: RpcCallMethod): method is RunRpcMethod {
+  return (RUN_RPC_METHODS as string[]).includes(method);
+}
+
 function componentMethod(
-  component: SourceDebuggerComponentInstance,
+  component: SourceDebuggerComponent,
   method: RpcMethod
 ): (...args: unknown[]) => unknown {
   const value = (component as unknown as Record<RpcMethod, unknown>)[method];
@@ -494,10 +589,7 @@ function componentMethod(
   return value.bind(component) as (...args: unknown[]) => unknown;
 }
 
-function hasComponentMethod(
-  component: SourceDebuggerComponentInstance,
-  method: RpcMethod
-): boolean {
+function hasComponentMethod(component: SourceDebuggerComponent, method: RpcMethod): boolean {
   return typeof (component as unknown as Record<RpcMethod, unknown>)[method] === "function";
 }
 
@@ -544,14 +636,30 @@ function serializeError(error: unknown): SerializedError {
       name: error.name,
       message: error.message,
       ...(error.stack ? { stack: error.stack } : {}),
+      ...(isSourceDebuggerError(error)
+        ? {
+            sourceDebugger: {
+              code: error.code,
+              ...(error.componentId ? { componentId: error.componentId } : {}),
+              ...(error.operation ? { operation: error.operation } : {}),
+            },
+          }
+        : {}),
     };
   }
   return { name: "Error", message: String(error) };
 }
 
 function deserializeError(error: SerializedError): Error {
-  const result = new Error(error.message);
-  result.name = error.name;
+  const result = error.sourceDebugger
+    ? new SourceDebuggerError(error.sourceDebugger.code, error.message, {
+        ...(error.sourceDebugger.componentId
+          ? { componentId: error.sourceDebugger.componentId }
+          : {}),
+        ...(error.sourceDebugger.operation ? { operation: error.sourceDebugger.operation } : {}),
+      })
+    : new Error(error.message);
+  if (!error.sourceDebugger) result.name = error.name;
   if (error.stack) result.stack = error.stack;
   return result;
 }

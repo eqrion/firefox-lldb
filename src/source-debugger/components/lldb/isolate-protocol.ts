@@ -3,9 +3,9 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 import type { MessagePort } from "node:worker_threads";
-import type { RdpDebuggeeResumeAction } from "../gdb/rdp-debuggee.js";
-import type { SourceDebuggerComponentWorkerPorts } from "./isolate.js";
-import type { CommandResult } from "./types.js";
+import type { RdpDebuggeeResumeAction } from "../../../gdb/rdp-debuggee.js";
+import type { SourceDebuggerComponentWorkerPorts } from "../../transport/isolate.js";
+import type { CommandResult } from "../../protocol/types.js";
 
 export interface LldbIsolateWorkerData extends SourceDebuggerComponentWorkerPorts {
   controlPort: MessagePort;

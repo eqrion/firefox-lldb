@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 import { print } from "@bytecodealliance/jco-transpile/wasm-tools";
-import { wasmFunctionRanges, type WasmFunctionRange } from "../gdb/wasm-bytecode.js";
+import { wasmFunctionRanges, type WasmFunctionRange } from "../../../gdb/wasm-bytecode.js";
 
 interface TextFunction {
   headerLine: number;

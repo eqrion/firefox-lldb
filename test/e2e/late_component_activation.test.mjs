@@ -11,12 +11,12 @@ import test from "node:test";
 import { parseCliArgs } from "../../src/core/platform-session.ts";
 import { freePort } from "../../src/platform/gdb-server-spawner.ts";
 import { createRoutedModuleOwnerResolver } from "../../src/source-debugger/config.ts";
-import { FirefoxSourceDebuggerTarget } from "../../src/source-debugger/firefox-target.ts";
+import { FirefoxSourceDebuggerTarget } from "../../src/source-debugger/target/firefox.ts";
 import {
   LldbSourceDebuggerComponentLoader,
   LldbSourceDebuggerTarget,
-} from "../../src/source-debugger/lldb-loader.ts";
-import { SourceDebuggerSessionRuntime } from "../../src/source-debugger/runtime.ts";
+} from "../../src/source-debugger/components/lldb/loader.ts";
+import { SourceDebuggerSessionRuntime } from "../../src/source-debugger/session/runtime.ts";
 import { startStaticServer } from "./harness.mjs";
 
 test("a late Wasm module activates a second isolated LLDB at the current stop", async () => {
@@ -56,7 +56,6 @@ test("a late Wasm module activates a second isolated LLDB at the current stop", 
     runtime = await SourceDebuggerSessionRuntime.load({
       loaders,
       target,
-      getRdpSession: () => target.session,
       createModuleOwnerResolver: (definitions) =>
         createRoutedModuleOwnerResolver(routes, definitions),
     });

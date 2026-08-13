@@ -6,9 +6,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { LLDBClient } from "lldb-wasm";
 import {
-  LldbSourceDebuggerComponentInstance,
+  LldbSourceDebuggerComponent,
   type LldbComponentRunControl,
-} from "../../src/source-debugger/lldb-component.js";
+} from "../../src/source-debugger/components/lldb/component.js";
 
 test("a synchronization race does not hide an observer's own breakpoint", async () => {
   let stoppedBreakpointId = 7;
@@ -32,26 +32,26 @@ test("a synchronization race does not hide an observer's own breakpoint", async 
     abortRun: () => {},
     isSynchronizing: () => true,
   } satisfies LldbComponentRunControl;
-  const component = new LldbSourceDebuggerComponentInstance(client, {
+  const component = new LldbSourceDebuggerComponent(client, {
     id: "observer",
     runControl,
   });
   await component.setBreakpoint({ target: { kind: "function", name: "owned" } });
 
-  await component.startRun({
+  const ownedRun = await component.beginRun({
     runId: "owned-stop",
     role: "observer",
     action: { kind: "continue" },
   });
-  assert.equal((await component.waitForStop("owned-stop")).disposition, "preempted");
+  assert.equal((await ownedRun.waitForStop()).disposition, "preempted");
 
   stoppedBreakpointId = 8;
-  await component.startRun({
+  const foreignRun = await component.beginRun({
     runId: "foreign-stop",
     role: "observer",
     action: { kind: "continue" },
   });
-  assert.equal((await component.waitForStop("foreign-stop")).disposition, "synchronized");
+  assert.equal((await foreignRun.waitForStop()).disposition, "synchronized");
 });
 
 test("an exclusive late component projects owned images after foreign images", async () => {
@@ -80,7 +80,7 @@ test("an exclusive late component projects owned images after foreign images", a
       status: 2,
     }),
   } as unknown as LLDBClient;
-  const component = new LldbSourceDebuggerComponentInstance(client, {
+  const component = new LldbSourceDebuggerComponent(client, {
     id: "late",
     exclusiveModules: true,
   });

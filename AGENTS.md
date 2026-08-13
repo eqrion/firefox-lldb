@@ -13,6 +13,11 @@ src/platform/      LLDB platform server (process list, qLaunchGDBServer)
 src/rdp/           RDP client, RdpWasmSession, headless Firefox launcher
 src/gdb/           RdpDebuggee, worker + SAB-RPC, jco-generated gdbstub
 src/sourcemap/     source-map -> DWARF converter (host glue + jco-generated component)
+src/source-debugger/protocol/ portable SourceDebuggerComponent/Session contracts
+src/source-debugger/session/  catalog, ownership, routing, mixed-debugger coordinator
+src/source-debugger/target/   host capabilities + Firefox target adapters
+src/source-debugger/transport/worker RPC, imported-resource RPC, RSP byte channels
+src/source-debugger/components/ LLDB and generated-WAT component implementations
 src/core/          shared Firefox + per-tab launcher + platform server bring-up
 src/cli/           CLI entry points (firefox-lldb, firefox-lldb-server) + REPL
 src/mcp/           MCP server that drives the real REPL for coding agents
@@ -60,15 +65,14 @@ EMSDK=~/src/emsdk npm run build:fixtures
 ## Running a debug session
 
 The primary path is the embedded wasm LLDB: `firefox-lldb` launches Firefox,
-runs the platform server in-process, and drops you into an interactive `(lldb)`
+runs the platform server in-process, and drops you into an interactive `(sdb)`
 prompt — no native lldb binary involved.
 
 ```sh
 URL=http://localhost:8080/index.html npm run launch
-# then, at the prompt:
-(lldb) attach --pid 1          # alias for: process attach --plugin wasm --pid 1
-(lldb) breakpoint set -n compute_factorial
-(lldb) continue
+# then, at the prompt (generic commands shown):
+(sdb) break compute_factorial
+(sdb) continue
 ```
 
 ## Driving the REPL from a coding agent

@@ -61,11 +61,12 @@ in the module descriptor. LLDB gives those artifacts stronger claims while
 remaining a low-confidence fallback for unrecognized Wasm.
 
 The installed `wasm-text` definition outclaims that LLDB fallback when a
-module has neither DWARF nor a source map. Its instance imports a direct async
-Wasm debuggee resource from `SourceDebuggerSessionHost`, generates annotated
-virtual WAT, and implements generic frames, breakpoints, raw locals, continue,
-and instruction step-in without gdbstub/RSP or an abort sentinel. The target's
-owner registry filters that image out of LLDB's projection before attach.
+module has neither DWARF nor a source map. Its isolated worker imports a direct
+async Wasm debuggee resource from `SourceDebuggerSessionHost`, generates
+annotated virtual WAT, and implements generic frames, breakpoints, raw locals,
+continue, and instruction step-in without gdbstub/RSP or an abort sentinel. The
+target's owner registry filters that image out of LLDB's projection before
+attach.
 
 With multiple Firefox threads, an observer may be locally stepping a stale
 breakpoint on a worker when a sibling stops the main thread. The debuggee WIT
@@ -103,7 +104,7 @@ Set `SOURCE_DEBUGGER_TRACE=1` to log only session/runtime barrier transitions
 when diagnosing these handoffs, without enabling the full RDP/RSP wire trace.
 
 The CLI presents those adapters to `SourceDebuggerSession` through
-`src/source-debugger/rpc.ts`, a concurrent request/response transport over
+`src/source-debugger/transport/rpc.ts`, a concurrent request/response transport over
 `MessagePort`. Separate definition and instance ports keep discovery
 (`describe`/`probeModule`) independent from target-specific operations; the
 third generic port carries the component's imported
@@ -119,11 +120,11 @@ not needed at startup. The runtime serializes its instantiation and target
 attach with run control, adds its modules, and only then lets the new component
 join subsequent observer barriers. The production CLI does not directly create an
 LLDB platform server, bridge RSP ports, attach an LLDB process, or retain LLDB
-run-control objects. Those operations live in `lldb-loader.ts`, behind the same
+run-control objects. Those operations live in `components/lldb/loader.ts`, behind the same
 lifecycle another installed ecosystem would implement. The LLDB control
 channel no longer carries component API or host calls. This exercises
-structured cloning and keeps a pending
-`waitForStop` from blocking a sibling `abortRun` or `cancelRun` call. The LLDB
+structured cloning and lets concurrent `SourceDebuggerRun.waitForStop()` and
+`terminate()` calls settle without blocking each other. The LLDB
 adapter, runtime, and nested `lldb-wasm` worker live inside a per-component
 outer worker (`lldb-isolate-worker.ts`). A shared `SourceDebuggerSessionHost`
 owns opaque one-shot RSP endpoints and every live TCP byte-channel bridge;

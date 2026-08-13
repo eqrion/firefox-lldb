@@ -6,14 +6,9 @@ import { createHash } from "node:crypto";
 import type {
   ModuleClaim,
   SourceDebuggerComponentDefinition,
-  SourceDebuggerComponentInstance,
-} from "./component.js";
-import type { SourceDebuggerComponentHostBinding } from "./host.js";
-import type {
-  LoadedSourceDebuggerComponent,
-  LoadedSourceDebuggerComponentDefinition,
-  SourceDebuggerComponentLoader,
-} from "./loader.js";
+  SourceDebuggerComponent,
+  SourceDebuggerRun,
+} from "../../protocol/component.js";
 import type {
   ComponentFrame,
   ComponentRunRequest,
@@ -27,13 +22,15 @@ import type {
   SourceBreakpointRequest,
   SourceDebuggerComponentDescriptor,
   SourceFile,
+  SourceProperty,
   SourceScope,
   SourceValue,
   StopId,
   ThreadId,
-} from "./types.js";
-import type { WasmDebuggee, WasmDebuggeeStop } from "./wasm-debuggee.js";
-import { generateWasmText, type GeneratedWasmText } from "./wasm-text.js";
+} from "../../protocol/types.js";
+import type { WasmDebuggee, WasmDebuggeeStop } from "../../protocol/wasm-debuggee.js";
+import { generateWasmText, type GeneratedWasmText } from "./source.js";
+import { SequencedSourceDebuggerRun } from "../run.js";
 
 export const WASM_SOURCE_DEBUGGER_ID = "wasm-text";
 
@@ -56,51 +53,7 @@ interface PendingRun {
   released: boolean;
 }
 
-export class WasmSourceDebuggerComponentLoader implements SourceDebuggerComponentLoader {
-  readonly id: string;
-
-  constructor(
-    id = WASM_SOURCE_DEBUGGER_ID,
-    private readonly name = "WebAssembly Text"
-  ) {
-    this.id = id;
-  }
-
-  async loadDefinition(): Promise<LoadedSourceDebuggerComponentDefinition> {
-    const definition = wasmSourceDebuggerDefinition(this.id, this.name);
-    return {
-      id: this.id,
-      definition,
-      probeModule: definition.probeModule,
-      close: () => {},
-    };
-  }
-
-  async instantiate(
-    host: SourceDebuggerComponentHostBinding
-  ): Promise<LoadedSourceDebuggerComponent> {
-    if (!host.openWasmDebuggee) {
-      throw new Error(`SourceDebuggerComponent host does not expose a direct Wasm debuggee`);
-    }
-    const debuggee = await host.openWasmDebuggee();
-    const component = new WasmSourceDebuggerComponentInstance(debuggee, this.id, this.name);
-    let closed = false;
-    return {
-      id: this.id,
-      definition: wasmSourceDebuggerDefinition(this.id, this.name),
-      component,
-      probeModule: probeWasmSourceDebuggerModule,
-      activate: async () => ({}),
-      close: async () => {
-        if (closed) return;
-        closed = true;
-        await component.dispose();
-      },
-    };
-  }
-}
-
-export class WasmSourceDebuggerComponentInstance implements SourceDebuggerComponentInstance {
+export class WasmSourceDebuggerComponent implements SourceDebuggerComponent {
   readonly #modules = new Map<string, OwnedModule>();
   readonly #moduleBySourceId = new Map<string, OwnedModule>();
   readonly #breakpoints = new Map<string, InstalledBreakpoint>();
@@ -141,7 +94,6 @@ export class WasmSourceDebuggerComponentInstance implements SourceDebuggerCompon
         moduleId: descriptor.id,
         url: sourceId,
         language: "webassembly",
-        content: text.content,
       };
       const module = { descriptor, source, text };
       this.#modules.set(descriptor.id, module);
@@ -171,6 +123,10 @@ export class WasmSourceDebuggerComponentInstance implements SourceDebuggerCompon
       return module ? [module.source] : [];
     }
     return [...this.#modules.values()].map(({ source }) => source);
+  }
+
+  async sourceContent(sourceId: string): Promise<string | null> {
+    return this.#moduleBySourceId.get(sourceId)?.text.content ?? null;
   }
 
   async state(stopId: StopId): Promise<SessionState> {
@@ -206,18 +162,20 @@ export class WasmSourceDebuggerComponentInstance implements SourceDebuggerCompon
 
   async scopes(_stopId: StopId, frameId: string): Promise<SourceScope[]> {
     this.#requireFrame(frameId);
-    const values = (await this.debuggee.frameVariables(frameId)).map((variable) => {
-      const name = localName(variable.name);
-      return {
-        name,
-        value: {
+    const values: SourceProperty[] = (await this.debuggee.frameVariables(frameId)).map(
+      (variable) => {
+        const name = localName(variable.name);
+        return {
           name,
-          ...(variable.type ? { type: variable.type } : {}),
-          display: variable.display,
-          hasChildren: false,
-        },
-      };
-    });
+          value: {
+            name,
+            ...(variable.type ? { type: variable.type } : {}),
+            display: variable.display,
+            hasChildren: false,
+          },
+        };
+      }
+    );
     return [{ name: "Locals", kind: "locals", values }];
   }
 
@@ -239,6 +197,10 @@ export class WasmSourceDebuggerComponentInstance implements SourceDebuggerCompon
       display: variable.display,
       hasChildren: false,
     };
+  }
+
+  async valueChildren(_stopId: StopId, _valueId: string): Promise<SourceProperty[]> {
+    return [];
   }
 
   async setBreakpoint(request: SourceBreakpointRequest): Promise<SourceBreakpoint> {
@@ -301,7 +263,23 @@ export class WasmSourceDebuggerComponentInstance implements SourceDebuggerCompon
     return [...this.#breakpoints.values()].map(({ breakpoint }) => breakpoint);
   }
 
-  async startRun(request: ComponentRunRequest): Promise<void> {
+  async beginRun(request: ComponentRunRequest): Promise<SourceDebuggerRun> {
+    await this.#startRun(request);
+    return new SequencedSourceDebuggerRun(request, {
+      waitForStop: () => this.#waitForStop(request.runId),
+      waitForResume: (afterSequence) => this.#waitForPhysicalResume(request.runId, afterSequence),
+      grantResume: (sequence) => this.#releasePhysicalResume(request.runId, sequence),
+      rearmObserver: () =>
+        this.#startRun({ ...request, role: "observer", action: { kind: "continue" } }),
+      terminate: (reason) => {
+        if (reason === "cancel") return this.#cancelRun(request.runId);
+        return this.#synchronizeRun(request.runId);
+      },
+      dispose: () => {},
+    });
+  }
+
+  async #startRun(request: ComponentRunRequest): Promise<void> {
     this.#requireOpen();
     if (this.#runs.has(request.runId)) throw new Error(`run ${request.runId} already exists`);
     if (request.action.kind === "step-over" || request.action.kind === "step-out") {
@@ -321,7 +299,7 @@ export class WasmSourceDebuggerComponentInstance implements SourceDebuggerCompon
     this.#runs.set(request.runId, pending);
   }
 
-  async waitForStop(runId: RunId): Promise<ComponentStop> {
+  async #waitForStop(runId: RunId): Promise<ComponentStop> {
     const pending = this.#runs.get(runId);
     if (!pending) throw new Error(`unknown run ${runId}`);
     try {
@@ -331,14 +309,14 @@ export class WasmSourceDebuggerComponentInstance implements SourceDebuggerCompon
     }
   }
 
-  waitForPhysicalResume(runId: RunId, afterSequence: number): Promise<number | undefined> {
+  #waitForPhysicalResume(runId: RunId, afterSequence: number): Promise<number | undefined> {
     const pending = this.#runs.get(runId);
     if (!pending) return Promise.resolve(undefined);
     if (afterSequence < 1) return Promise.resolve(1);
     return pending.stop.then(() => undefined);
   }
 
-  async releasePhysicalResume(runId: RunId, sequence: number): Promise<void> {
+  async #releasePhysicalResume(runId: RunId, sequence: number): Promise<void> {
     const pending = this.#runs.get(runId);
     if (!pending || pending.request.role !== "driver" || sequence !== 1 || pending.released) return;
     pending.released = true;
@@ -354,21 +332,16 @@ export class WasmSourceDebuggerComponentInstance implements SourceDebuggerCompon
     await this.debuggee.resume({ kind: "step", threadId });
   }
 
-  async synchronizeRun(_runId: RunId): Promise<void> {
+  async #synchronizeRun(_runId: RunId): Promise<void> {
     // A direct observer has already consumed the shared physical stop. It has
     // no private debugger engine or thread plan which needs cancellation.
   }
 
-  async abortRun(_runId: RunId): Promise<void> {
-    // Same as synchronization: one physical instruction/continue is the whole
-    // plan, so there is no LLDB-like internal plan to abort at this stop.
-  }
-
-  async cancelRun(runId: RunId): Promise<void> {
+  async #cancelRun(runId: RunId): Promise<void> {
     const pending = this.#runs.get(runId);
     if (!pending) return;
-    if (pending.released) this.debuggee.interrupt();
-    this.debuggee.cancelWaitForStop();
+    if (pending.released) await this.debuggee.interrupt();
+    await this.debuggee.cancelWaitForStop();
   }
 
   async dispose(): Promise<void> {
@@ -384,7 +357,7 @@ export class WasmSourceDebuggerComponentInstance implements SourceDebuggerCompon
     this.#modules.clear();
     this.#moduleBySourceId.clear();
     this.#threadByFrameId.clear();
-    this.debuggee.dispose();
+    await this.debuggee.dispose();
   }
 
   async #classifyStop(pending: PendingRun, stop: WasmDebuggeeStop): Promise<ComponentStop> {
@@ -446,7 +419,7 @@ export function wasmSourceDebuggerDescriptor(
   name = "WebAssembly Text"
 ): SourceDebuggerComponentDescriptor {
   return {
-    protocolVersion: "0.1",
+    protocolVersion: "0.2",
     id,
     name,
     capabilities: {

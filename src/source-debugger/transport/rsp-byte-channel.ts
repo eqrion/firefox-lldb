@@ -4,8 +4,8 @@
 
 import net from "node:net";
 import { MessageChannel, type MessagePort } from "node:worker_threads";
-import { noopLogger, type Logger } from "../logging.js";
-import type { GdbRspConnection } from "./component.js";
+import { noopLogger, type Logger } from "../../logging.js";
+import type { GdbRspConnection } from "../protocol/component.js";
 
 export type RspByteChannelMessage = { type: "rsp-data"; data: Uint8Array } | { type: "rsp-close" };
 

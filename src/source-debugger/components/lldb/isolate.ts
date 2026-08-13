@@ -3,20 +3,20 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 import { MessageChannel, type MessagePort, Worker } from "node:worker_threads";
-import type { RdpDebuggeeResumeAction, RdpDebuggeeRunControl } from "../gdb/rdp-debuggee.js";
-import { noopLogger, type Logger } from "../logging.js";
-import type { ModuleClaim, SourceDebuggerComponentInstance } from "./component.js";
-import type { SourceDebuggerComponentHostBinding } from "./host.js";
-import { SourceDebuggerComponentIsolate } from "./isolate.js";
+import type { RdpDebuggeeResumeAction, RdpDebuggeeRunControl } from "../../../gdb/rdp-debuggee.js";
+import { noopLogger, type Logger } from "../../../logging.js";
+import type { ModuleClaim, SourceDebuggerComponent } from "../../protocol/component.js";
+import type { SourceDebuggerComponentHostBinding } from "../../target/host.js";
+import { SourceDebuggerComponentIsolate } from "../../transport/isolate.js";
 import type {
   LldbIsolateControlMethod,
   LldbIsolateControlRequest,
   LldbIsolateControlResults,
   LldbIsolateHostMessage,
   LldbIsolateWorkerData,
-} from "./lldb-isolate-protocol.js";
-import type { SourceDebuggerComponentProbe } from "./ownership.js";
-import type { CommandResult, ModuleDescriptor } from "./types.js";
+} from "./isolate-protocol.js";
+import type { SourceDebuggerComponentProbe } from "../../session/ownership.js";
+import type { CommandResult, ModuleDescriptor } from "../../protocol/types.js";
 
 interface PendingControl {
   resolve: (value: unknown) => void;
@@ -119,7 +119,7 @@ export class IsolatedLldbComponentRuntime implements SourceDebuggerComponentProb
     return this.#isolate.definition;
   }
 
-  get component(): SourceDebuggerComponentInstance {
+  get component(): SourceDebuggerComponent {
     return this.#isolate.component;
   }
 
@@ -148,8 +148,8 @@ export class IsolatedLldbComponentRuntime implements SourceDebuggerComponentProb
       },
     };
     const workerEntry = import.meta.url.endsWith(".ts")
-      ? new URL("./lldb-isolate-worker-dev.mjs", import.meta.url)
-      : new URL("./lldb-isolate-worker.js", import.meta.url);
+      ? new URL("./isolate-worker-dev.mjs", import.meta.url)
+      : new URL("./isolate-worker.js", import.meta.url);
     try {
       const worker = new Worker(workerEntry, {
         workerData,

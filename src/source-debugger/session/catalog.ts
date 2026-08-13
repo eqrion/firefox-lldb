@@ -7,7 +7,8 @@ import type {
   SourceDebuggerComponentLoader,
 } from "./loader.js";
 import type { SourceDebuggerComponentProbe } from "./ownership.js";
-import type { ComponentId } from "./types.js";
+import type { ComponentId } from "../protocol/types.js";
+import { validateComponentDescriptor } from "../protocol/validation.js";
 
 export interface SourceDebuggerCatalogEntry extends SourceDebuggerComponentProbe {
   readonly loader: SourceDebuggerComponentLoader;
@@ -44,7 +45,10 @@ export class SourceDebuggerComponentCatalog {
     try {
       for (const loader of loaders) {
         const loadedDefinition = await loader.loadDefinition();
-        const descriptor = await loadedDefinition.definition.describe();
+        const descriptor = validateComponentDescriptor(
+          await loadedDefinition.definition.describe(),
+          loader.id
+        );
         if (loadedDefinition.id !== loader.id || descriptor.id !== loader.id) {
           await Promise.resolve(loadedDefinition.close()).catch(() => {});
           throw new Error(

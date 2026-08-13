@@ -8,4 +8,4 @@
 import { register } from "tsx/esm/api";
 
 register();
-await import("./lldb-isolate-worker.ts");
+await import("./isolate-worker.ts");

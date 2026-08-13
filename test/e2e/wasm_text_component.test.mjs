@@ -10,16 +10,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { parseCliArgs } from "../../src/core/platform-session.ts";
 import { freePort } from "../../src/platform/gdb-server-spawner.ts";
-import { FirefoxSourceDebuggerTarget } from "../../src/source-debugger/firefox-target.ts";
+import { FirefoxSourceDebuggerTarget } from "../../src/source-debugger/target/firefox.ts";
 import {
   LldbSourceDebuggerComponentLoader,
   LldbSourceDebuggerTarget,
-} from "../../src/source-debugger/lldb-loader.ts";
-import { SourceDebuggerSessionRuntime } from "../../src/source-debugger/runtime.ts";
-import {
-  WASM_SOURCE_DEBUGGER_ID,
-  WasmSourceDebuggerComponentLoader,
-} from "../../src/source-debugger/wasm-source-component.ts";
+} from "../../src/source-debugger/components/lldb/loader.ts";
+import { SourceDebuggerSessionRuntime } from "../../src/source-debugger/session/runtime.ts";
+import { SourceDebuggerSessionHost } from "../../src/source-debugger/target/host.ts";
+import { WASM_SOURCE_DEBUGGER_ID } from "../../src/source-debugger/components/wasm-text/component.ts";
+import { WasmSourceDebuggerComponentLoader } from "../../src/source-debugger/components/wasm-text/loader.ts";
 import { startStaticServer } from "./harness.mjs";
 
 test("LLDB and generated Wasm text coordinate one mixed source session", async () => {
@@ -55,7 +54,11 @@ test("LLDB and generated Wasm text coordinate one mixed source session", async (
         new WasmSourceDebuggerComponentLoader(),
       ],
       target,
-      getRdpSession: () => target.session,
+      host: new SourceDebuggerSessionHost({
+        rdpSession: target.session,
+        canAccessWasmModule: (componentId, moduleId) =>
+          target.moduleOwner(moduleId) === componentId,
+      }),
     });
 
     assert.deepEqual(
@@ -70,13 +73,15 @@ test("LLDB and generated Wasm text coordinate one mixed source session", async (
       WASM_SOURCE_DEBUGGER_ID
     );
 
-    const wasmComponent = runtime.components.find(
-      ({ id }) => id === WASM_SOURCE_DEBUGGER_ID
-    ).component;
-    const [watSource] = await wasmComponent.sources();
+    const watSource = (await runtime.session.sources()).find(
+      ({ language }) => language === "webassembly"
+    );
+    assert.ok(watSource, "the session did not expose the generated Wasm text source");
+    const watContent = await runtime.session.sourceContent(watSource.id);
+    assert.ok(watContent, "the Wasm text component did not provide source content");
     assert.match(watSource.url, /^wasm-text:\/\/.+\/module\.wat$/);
-    assert.match(watSource.content, /\(func \$wat_factorial/);
-    assert.match(watSource.content, /;; @0x[0-9a-f]+/);
+    assert.match(watContent, /\(func \$wat_factorial/);
+    assert.match(watContent, /;; @0x[0-9a-f]+/);
 
     const functionBreakpoint = await runtime.session.setBreakpoint({
       componentId: WASM_SOURCE_DEBUGGER_ID,
@@ -84,11 +89,9 @@ test("LLDB and generated Wasm text coordinate one mixed source session", async (
     });
     assert.equal(functionBreakpoint.verified, true, functionBreakpoint.message);
     await runtime.session.removeBreakpoint(functionBreakpoint.id);
-    const multiplyLine =
-      watSource.content.split("\n").findIndex((line) => /\bi32\.mul\b/.test(line)) + 1;
+    const multiplyLine = watContent.split("\n").findIndex((line) => /\bi32\.mul\b/.test(line)) + 1;
     assert.ok(multiplyLine > 0, "the generated source omitted i32.mul");
     const watBreakpoint = await runtime.session.setBreakpoint({
-      componentId: WASM_SOURCE_DEBUGGER_ID,
       target: {
         kind: "source",
         location: { sourceId: watSource.id, line: multiplyLine },
@@ -97,7 +100,7 @@ test("LLDB and generated Wasm text coordinate one mixed source session", async (
     assert.equal(
       watBreakpoint.verified,
       true,
-      `${watBreakpoint.message ?? "unverified breakpoint"}\n${watSource.content}`
+      `${watBreakpoint.message ?? "unverified breakpoint"}\n${watContent}`
     );
 
     // LLDB owns the run lease, but the direct component's breakpoint wins and

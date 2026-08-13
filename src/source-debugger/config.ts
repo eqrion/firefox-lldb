@@ -2,13 +2,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-import type { ComponentId } from "./types.js";
+import type { ComponentId } from "./protocol/types.js";
 import {
   probeModuleClaims,
   type ModuleOwnerResolver,
   type ModuleProbeOptions,
   type SourceDebuggerComponentProbe,
-} from "./ownership.js";
+} from "./session/ownership.js";
 
 export interface SourceDebuggerComponentRoute {
   id: ComponentId;

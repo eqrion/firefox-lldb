@@ -2,27 +2,27 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-import { noopLogger, type Logger } from "../logging.js";
+import { noopLogger, type Logger } from "../../../logging.js";
 import type {
   ModuleClaim,
   SourceDebuggerComponentDefinition,
-  SourceDebuggerComponentInstance,
-} from "./component.js";
-import { componentForModuleUrl, type SourceDebuggerComponentRoute } from "./config.js";
-import type { FirefoxGdbRspProjection, FirefoxSourceDebuggerTarget } from "./firefox-target.js";
-import type { SourceDebuggerComponentHostBinding } from "./host.js";
-import { lldbSourceDebuggerDescriptor, probeLldbSourceDebuggerModule } from "./lldb-component.js";
+  SourceDebuggerComponent,
+} from "../../protocol/component.js";
+import { componentForModuleUrl, type SourceDebuggerComponentRoute } from "../../config.js";
+import type { FirefoxGdbRspProjection, FirefoxSourceDebuggerTarget } from "../../target/firefox.js";
+import type { SourceDebuggerComponentHostBinding } from "../../target/host.js";
+import { lldbSourceDebuggerDescriptor, probeLldbSourceDebuggerModule } from "./component.js";
 import {
   IsolatedLldbComponentRuntime,
   type IsolatedLldbComponentRuntimeOptions,
-} from "./lldb-isolate.js";
+} from "./isolate.js";
 import type {
   LoadedSourceDebuggerComponent,
   SourceDebuggerComponentActivation,
   SourceDebuggerComponentLoader,
   LoadedSourceDebuggerComponentDefinition,
-} from "./loader.js";
-import type { ModuleDescriptor } from "./types.js";
+} from "../../session/loader.js";
+import type { ModuleDescriptor } from "../../protocol/types.js";
 
 export interface LldbSourceDebuggerTargetOptions {
   target: FirefoxSourceDebuggerTarget;
@@ -244,7 +244,7 @@ class LoadedLldbSourceDebuggerComponent implements LoadedSourceDebuggerComponent
     return this.#runtime.definition;
   }
 
-  get component(): SourceDebuggerComponentInstance {
+  get component(): SourceDebuggerComponent {
     return this.#runtime.component;
   }
 

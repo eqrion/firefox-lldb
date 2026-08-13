@@ -23,60 +23,78 @@ be translatable to WebAssembly Component Model interfaces later.
 - Core frontend operations use `SourceDebuggerSession`; debugger-native
   commands are an explicit transitional escape hatch.
 
-## Current vertical slice
+## TypeScript protocol 0.2
 
-The first implementation lives under `src/source-debugger/`:
+The portable contract is deliberately smaller than a browser debugging API.
+It has four surfaces:
 
-- `types.ts` defines structured-cloneable protocol records and opaque IDs.
-- `component.ts` defines the imported/exported component contracts.
-- `ownership.ts` probes installed component definitions and selects the unique
-  highest-confidence owner for each newly loaded module.
-- `../wasm/metadata.ts` scans custom-section names in the host and normalizes
-  them into small, payload-free debug-info hints.
-- `host.ts` owns one session's imported debuggee capabilities and issues
-  component-scoped direct-Wasm resources and one-shot RSP endpoints.
-- `wasm-debuggee.ts` defines the direct, asynchronous low-level Wasm debuggee
-  capability and adapts it to the shared Firefox RDP session.
-- `wasm-source-component.ts` is an independent generated-WAT source debugger;
-  `wasm-text.ts` correlates printed instructions with Firefox byte offsets.
-- `host-rpc.ts` projects those imported capabilities into an isolate without
-  exposing TCP, RDP, or Node APIs.
-- `rsp-byte-channel.ts` adapts host-owned TCP endpoints to transferable RSP
-  streams without exposing sockets to debugger isolates.
-- `loader.ts` defines the browser-facing installation seam for debugger
-  ecosystems, split into lightweight definition loading and selected-instance
-  creation/activation.
-- `catalog.ts` retains installed definitions and probes them without creating
-  debugger engines.
-- `runtime.ts` selects module owners from the catalog, instantiates only those
-  owners (plus explicit compatibility observers), constructs the generic
-  session, and tears everything down in reverse order.
-- `firefox-target.ts` starts and observes the browser before any language
-  debugger exists, provides normalized module metadata, owns the physical RDP
-  stop, and lends selected components filtered GDB RSP projections.
-- `isolate.ts` implements the generic three-port definition, instance, and
-  imported-host transport used by TypeScript workers.
-- `lldb-loader.ts` contains LLDB's Firefox target adapter: platform-server
-  creation, RSP bridging, shared-RDP attach, interrupt/focus, and teardown.
-- `lldb-component.ts` adapts the real wasm-compiled LLDB and its public API.
-- `lldb-runtime.ts` owns one isolated LLDB worker, pthread pool, and in-process
-  channels, and imports host-supplied RSP byte streams.
-- `lldb-isolate.ts` is the host proxy for an outer component worker. The worker
-  owns the LLDB adapter, its runtime, and the nested `lldb-wasm` worker; the
-  LLDB-specific channel retains only bootstrap, native commands, and physical
-  run-lease proxies.
-- `rpc.ts` exposes an instance over concurrent request/response calls on a
-  `MessagePort`, and separately exposes a definition's discovery methods over
-  the same generic transport. Both preserve structured records, errors, and
-  configurable call deadlines.
-- `session.ts` composes component frame projections, routes frame/value work,
-  owns module assignments and logical breakpoint IDs, invalidates stop-scoped
-  handles, and implements the driver/observer run and stop barriers.
+| Surface                             | Responsibility                                                                                                                                                  |
+| ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SourceDebuggerComponentDefinition` | Describe an installed ecosystem and probe normalized module metadata without starting its debugger engine.                                                      |
+| `SourceDebuggerComponentHost`       | Import component-scoped target resources. Today these are an ordered GDB RSP byte stream and a direct low-level Wasm debuggee.                                  |
+| `SourceDebuggerComponent`           | Accept/revoke owned modules; enumerate sources; inspect stop-scoped state, frames, scopes, and values; manage breakpoints; and begin source run operations.     |
+| `SourceDebuggerRun`                 | Represent one armed driver or observer operation, including stop observation, opaque physical-resume permissions, observer rearming, termination, and disposal. |
 
-Component definitions expose `describe()`, `probeModule()`, and
-`instantiate(host)` independently of their target-specific instance API. A
-probe returns whether it supports a module, a confidence from 0 through 100,
-and an optional reason.
+All boundary records are structured-cloneable data. IDs are opaque strings.
+`sourceContent()` is lazy rather than embedding potentially large text in every
+source descriptor. An expandable `SourceValue` must have an ID, and
+`valueChildren()` is explicitly stop-scoped. The session replaces
+component-local source, frame, value, and breakpoint IDs with routed IDs before
+returning them to a frontend. A stale frame or value therefore fails locally
+instead of accidentally reaching a debugger at a later stop.
+
+Run control is a resource instead of a set of instance methods carrying freely
+mixable run IDs and sequence numbers. A component returns a `SourceDebuggerRun`
+from `beginRun()`. Physical resume tokens are opaque, scoped to that resource,
+and can only be granted on a driver. The session arms every observer first,
+then grants the selected driver's token only after the observer barrier is
+ready. `terminate("synchronize" | "preempt" | "cancel")` describes intent;
+each debugger chooses its own mechanism, such as LLDB's private abort sentinel.
+
+Descriptors, module claims, frames, run resources, stops, and expandable values
+have runtime validators in `protocol/validation.ts`. Protocol failures use a
+typed `SourceDebuggerError` with stable codes, preserved across worker RPC.
+Declared breakpoint/evaluation/stepping capabilities are enforced by the
+session rather than treated as documentation.
+
+The remaining deliberate shortcut is physical frame identity. Version 0.2
+uses a non-negative, stop-scoped `physicalFrameIndex` for stack composition.
+Stable activation IDs are not required for the current two-debugger proof and
+remain a hardening item for identical-PC recursion, tail calls, unwinding, and
+non-top-frame operations across stops.
+
+## Source organization
+
+The implementation under `src/source-debugger/` mirrors those boundaries:
+
+- `protocol/` is the browser- and transport-neutral public contract, imported
+  resource types, errors, target discovery surface, and runtime validation.
+- `session/` owns catalog loading, module ownership, component activation, ID
+  routing, frame composition, and the driver/observer coordinator.
+- `target/` adapts a physical host. `firefox.ts` is the Firefox implementation;
+  `host.ts` scopes imported capabilities; `wasm-debuggee.ts` implements the
+  portable raw-Wasm resource without exposing RDP actors to components.
+- `transport/` binds the portable interfaces to workers and `MessagePort`.
+  Component RPC, imported resource RPC, and RSP byte channels stay here and are
+  not part of the portable session API.
+- `components/lldb/` contains the LLDB adapter, worker, loader, and target
+  bootstrap. LLDB imports GDB RSP because that is its supported Wasm debuggee
+  interface.
+- `components/wasm-text/` contains an independent generated-WAT debugger,
+  source generator, worker, and loader. It imports the direct `WasmDebuggee`
+  resource and never uses LLDB or RSP.
+- `components/run.ts` is a reusable adapter from engine-private numbered resume
+  sequences to opaque `SourceDebuggerRun` tokens.
+
+Both production component implementations now run behind the same generic
+definition/instance/host worker transport. Firefox RDP appears only in the
+Firefox target adapters and in the optional JavaScript REPL extension; the
+generic session has no RDP dependency.
+
+Component definitions expose `describe()` and `probeModule()` independently of
+their target-specific instance API. The installation loader owns
+`instantiate(host)`. A probe returns whether it supports a module, a confidence
+from 0 through 100, and an optional reason.
 The unique highest-confidence supported claim wins. No claims, equal winning
 claims, invalid confidence values, and failed probes all stop assignment with
 diagnostics; registration order is never a tie-breaker. Each probe has an
@@ -259,8 +277,9 @@ instruction positions Firefox actually accepts, and export generic frames,
 source/function breakpoints, `$localN` values, continue, and instruction
 step-in. It shares the physical stop with LLDB but has no private debugger
 thread plan, so sibling synchronization and abort are no-ops rather than an
-abort-sentinel implementation. Step-over/out and Component Model isolation for
-this component remain follow-up work.
+abort-sentinel implementation. It runs in its own worker through the same
+generic component and imported-resource RPC as LLDB. Step-over/out remain
+follow-up work.
 
 LLDB scopes currently select and materialize frames through the public command
 interpreter. The bulk SB wrapper runs on a different wasm pthread, cannot
@@ -274,7 +293,7 @@ adapter.
 
 1. **Complete the LLDB source adapter (in progress).** Extend the wasm LLDB SB wrapper with
    structured thread, source, breakpoint-location, scope, and lazy `SBValue`
-   operations. Remove presentation parsing from `lldb-component.ts`.
+   operations. Remove presentation parsing from `components/lldb/component.ts`.
 2. **Move raw debuggee ownership into the session (TypeScript prototype complete).** The
    platform can now lend one physical `RdpWasmSession` to multiple filtered
    gdbstub projections without transferring its lifetime. TCP stays in the

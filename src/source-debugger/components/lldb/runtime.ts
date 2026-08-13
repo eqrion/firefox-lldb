@@ -3,20 +3,24 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 import { LLDBClient, type FileProvider } from "lldb-wasm";
-import { noopLogger, type Logger } from "../logging.js";
+import { noopLogger, type Logger } from "../../../logging.js";
 import {
   SOURCE_DEBUGGER_ABORT_FUNCTION,
   type RdpDebuggeeResumeAction,
   type RdpDebuggeeRunControl,
-} from "../gdb/rdp-debuggee.js";
-import type { GdbRspConnection, GdbRspEndpoint, SourceDebuggerComponentHost } from "./component.js";
-import type { ComponentRunRequest, RunId } from "./types.js";
+} from "../../../gdb/rdp-debuggee.js";
+import type {
+  GdbRspConnection,
+  GdbRspEndpoint,
+  SourceDebuggerComponentHost,
+} from "../../protocol/component.js";
+import type { ComponentRunRequest, RunId } from "../../protocol/types.js";
 import {
   LldbSourceDebuggerComponent,
-  LldbSourceDebuggerComponentInstance,
+  LldbSourceDebuggerComponentDefinition,
   type LldbComponentRunControl,
   type LldbSourceDebuggerComponentOptions,
-} from "./lldb-component.js";
+} from "./component.js";
 
 const LLDB_FAILED_STATUS = 6;
 
@@ -182,8 +186,8 @@ export interface EmbeddedLldbComponentRuntimeOptions extends LldbSourceDebuggerC
 // and in-process channels. TCP/RDP resources stay in the component host; this
 // runtime imports only transferred GDB RSP byte streams.
 export class EmbeddedLldbComponentRuntime {
-  readonly definition: LldbSourceDebuggerComponent;
-  readonly component: LldbSourceDebuggerComponentInstance;
+  readonly definition: LldbSourceDebuggerComponentDefinition;
+  readonly component: LldbSourceDebuggerComponent;
   readonly runControl: RdpDebuggeeRunControl;
   readonly #client: LLDBClient;
   readonly #host: SourceDebuggerComponentHost;
@@ -198,8 +202,8 @@ export class EmbeddedLldbComponentRuntime {
     client: LLDBClient,
     options: EmbeddedLldbComponentRuntimeOptions,
     runtimeRunControl: LldbRuntimeRunControl,
-    definition: LldbSourceDebuggerComponent,
-    component: LldbSourceDebuggerComponentInstance
+    definition: LldbSourceDebuggerComponentDefinition,
+    component: LldbSourceDebuggerComponent
   ) {
     this.#client = client;
     this.definition = definition;
@@ -223,7 +227,7 @@ export class EmbeddedLldbComponentRuntime {
         options.exclusiveModules ?? false
       );
       let runtime: EmbeddedLldbComponentRuntime | undefined;
-      const definition: LldbSourceDebuggerComponent = new LldbSourceDebuggerComponent(client, {
+      const definition = new LldbSourceDebuggerComponentDefinition(client, {
         id: options.id,
         name: options.name,
         onDispose: () => runtime?.close(),
@@ -234,9 +238,7 @@ export class EmbeddedLldbComponentRuntime {
           : undefined,
         logger,
       });
-      const component: LldbSourceDebuggerComponentInstance = await definition.instantiate(
-        options.host
-      );
+      const component: LldbSourceDebuggerComponent = await definition.instantiate(options.host);
       runtime = new EmbeddedLldbComponentRuntime(
         client,
         options,

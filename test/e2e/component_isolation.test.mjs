@@ -6,16 +6,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { parseCliArgs } from "../../src/core/platform-session.ts";
 import { freePort } from "../../src/platform/gdb-server-spawner.ts";
-import { FirefoxSourceDebuggerTarget } from "../../src/source-debugger/firefox-target.ts";
-import { SourceDebuggerSessionHost } from "../../src/source-debugger/host.ts";
-import { IsolatedLldbComponentRuntime } from "../../src/source-debugger/lldb-isolate.ts";
+import { FirefoxSourceDebuggerTarget } from "../../src/source-debugger/target/firefox.ts";
+import { SourceDebuggerSessionHost } from "../../src/source-debugger/target/host.ts";
+import { IsolatedLldbComponentRuntime } from "../../src/source-debugger/components/lldb/isolate.ts";
 import {
   LldbSourceDebuggerComponentLoader,
   LldbSourceDebuggerTarget,
-} from "../../src/source-debugger/lldb-loader.ts";
-import { createProbeModuleOwnerResolver } from "../../src/source-debugger/ownership.ts";
-import { SourceDebuggerSessionRuntime } from "../../src/source-debugger/runtime.ts";
-import { SourceDebuggerSession } from "../../src/source-debugger/session.ts";
+} from "../../src/source-debugger/components/lldb/loader.ts";
+import { createProbeModuleOwnerResolver } from "../../src/source-debugger/session/ownership.ts";
+import { SourceDebuggerSessionRuntime } from "../../src/source-debugger/session/runtime.ts";
+import { SourceDebuggerSession } from "../../src/source-debugger/session/session.ts";
 import { startStaticServer } from "./harness.mjs";
 
 test("catalog discovery instantiates LLDB but not an unsupported installed ecosystem", async () => {
@@ -28,7 +28,7 @@ test("catalog discovery instantiates LLDB but not an unsupported installed ecosy
     async loadDefinition() {
       const definition = {
         describe: async () => ({
-          protocolVersion: "0.1",
+          protocolVersion: "0.2",
           id: "unsupported",
           name: "Unsupported test ecosystem",
           capabilities: {
@@ -74,7 +74,6 @@ test("catalog discovery instantiates LLDB but not an unsupported installed ecosy
   });
   const runtime = await SourceDebuggerSessionRuntime.load({
     target,
-    getRdpSession: () => target.session,
     loaders: [unsupportedLoader, new LldbSourceDebuggerComponentLoader(lldbTarget, route)],
   });
   try {

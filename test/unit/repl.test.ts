@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { PassThrough, Writable } from "node:stream";
 import { runRepl } from "../../src/cli/repl.js";
 import type { RdpWasmSession } from "../../src/rdp/session.js";
-import type { SourceDebuggerSession } from "../../src/source-debugger/session.js";
+import type { SourceDebuggerSession } from "../../src/source-debugger/session/session.js";
 
 const stripAnsi = (s: string) => s.replace(/\[[0-9;?]*[A-Za-z]/g, "");
 const tick = () => new Promise<void>((r) => setImmediate(r));
@@ -40,15 +40,14 @@ function harness(client: FakeClient, session?: Partial<RdpWasmSession>, extra?: 
     },
   });
   const debuggerSession = {
-    rdpSession: () => session,
     command: (command: string) => client.sessionCommand(command),
     cancelActiveRun: () => client.pause(),
-    components: async () => [{ id: "lldb", name: "LLDB", protocolVersion: "0.1" }],
+    components: async () => [{ id: "lldb", name: "LLDB", protocolVersion: "0.2" }],
     componentStatuses: async () => [
       {
         id: "lldb",
         status: "ready",
-        descriptor: { id: "lldb", name: "LLDB", protocolVersion: "0.1" },
+        descriptor: { id: "lldb", name: "LLDB", protocolVersion: "0.2" },
       },
     ],
     modules: async () => [],
@@ -72,6 +71,7 @@ function harness(client: FakeClient, session?: Partial<RdpWasmSession>, extra?: 
   } as unknown as SourceDebuggerSession;
   const repl = runRepl({
     session: debuggerSession,
+    getRdpSession: () => session as RdpWasmSession | undefined,
     input,
     output,
     onExit: () => {
@@ -145,12 +145,12 @@ test("components reports healthy and quarantined debugger isolates", async () =>
           {
             id: "lldb-a",
             status: "ready",
-            descriptor: { id: "lldb-a", name: "LLDB A", protocolVersion: "0.1" },
+            descriptor: { id: "lldb-a", name: "LLDB A", protocolVersion: "0.2" },
           },
           {
             id: "lldb-b",
             status: "quarantined",
-            descriptor: { id: "lldb-b", name: "LLDB B", protocolVersion: "0.1" },
+            descriptor: { id: "lldb-b", name: "LLDB B", protocolVersion: "0.2" },
             message: "SourceDebuggerComponent RPC peer closed",
           },
         ],
@@ -160,7 +160,7 @@ test("components reports healthy and quarantined debugger isolates", async () =>
   await h.start();
 
   const out = await h.type("components");
-  assert.match(out, /lldb-a\s+LLDB A\s+protocol 0\.1/);
+  assert.match(out, /lldb-a\s+LLDB A\s+protocol 0\.2/);
   assert.match(out, /lldb-b\s+LLDB B\s+quarantined: .*peer closed/);
 });
 

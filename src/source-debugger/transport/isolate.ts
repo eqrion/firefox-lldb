@@ -6,11 +6,11 @@ import { MessageChannel, type MessagePort } from "node:worker_threads";
 import type {
   ModuleClaim,
   SourceDebuggerComponentDefinition,
-  SourceDebuggerComponentInstance,
-} from "./component.js";
-import type { SourceDebuggerComponentHostBinding } from "./host.js";
+  SourceDebuggerComponent,
+} from "../protocol/component.js";
+import type { SourceDebuggerComponentHostBinding } from "../target/host.js";
 import { serveSourceDebuggerComponentHost } from "./host-rpc.js";
-import type { SourceDebuggerComponentProbe } from "./ownership.js";
+import type { SourceDebuggerComponentProbe } from "../session/ownership.js";
 import {
   connectSourceDebuggerComponent,
   connectSourceDebuggerComponentDefinition,
@@ -18,9 +18,10 @@ import {
   serveSourceDebuggerComponentDefinition,
   type SourceDebuggerRpcEndpoint,
   type SourceDebuggerRpcOptions,
-  type RemoteSourceDebuggerComponentInstance,
+  type RemoteSourceDebuggerComponent,
 } from "./rpc.js";
-import type { ModuleDescriptor } from "./types.js";
+import type { ModuleDescriptor } from "../protocol/types.js";
+import { validateComponentDescriptor } from "../protocol/validation.js";
 
 export interface SourceDebuggerComponentWorkerPorts {
   definitionPort: MessagePort;
@@ -40,7 +41,7 @@ export class SourceDebuggerComponentIsolate implements SourceDebuggerComponentPr
   readonly #hostEndpoint: SourceDebuggerRpcEndpoint;
   readonly #hostComponentId: string;
   #definition: (SourceDebuggerComponentDefinition & SourceDebuggerRpcEndpoint) | undefined;
-  #component: RemoteSourceDebuggerComponentInstance | undefined;
+  #component: RemoteSourceDebuggerComponent | undefined;
   #closed = false;
 
   constructor(
@@ -71,7 +72,10 @@ export class SourceDebuggerComponentIsolate implements SourceDebuggerComponentPr
         this.options
       );
       this.#component = await connectSourceDebuggerComponent(this.#componentPort, this.options);
-      const descriptor = await this.#definition.describe();
+      const descriptor = validateComponentDescriptor(
+        await this.#definition.describe(),
+        this.#component.id
+      );
       if (descriptor.id !== this.#component.id) {
         throw new Error(
           `SourceDebuggerComponent definition id ${descriptor.id} does not match instance id ${this.#component.id}`
@@ -93,7 +97,7 @@ export class SourceDebuggerComponentIsolate implements SourceDebuggerComponentPr
     return this.#definition;
   }
 
-  get component(): SourceDebuggerComponentInstance {
+  get component(): SourceDebuggerComponent {
     if (!this.#component) throw new Error("SourceDebuggerComponent isolate is not connected");
     return this.#component;
   }
@@ -121,7 +125,7 @@ export class SourceDebuggerComponentIsolate implements SourceDebuggerComponentPr
 export function serveSourceDebuggerComponentIsolate(
   ports: Pick<SourceDebuggerComponentWorkerPorts, "definitionPort" | "componentPort">,
   definition: SourceDebuggerComponentDefinition,
-  component: SourceDebuggerComponentInstance
+  component: SourceDebuggerComponent
 ): SourceDebuggerRpcEndpoint {
   const definitionEndpoint = serveSourceDebuggerComponentDefinition(
     ports.definitionPort,

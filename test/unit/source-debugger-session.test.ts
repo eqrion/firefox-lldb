@@ -5,31 +5,59 @@
 import { test } from "node:test";
 import { MessageChannel } from "node:worker_threads";
 import assert from "node:assert/strict";
-import { SourceDebuggerSession } from "../../src/source-debugger/session.js";
-import { SourceDebuggerSessionHost } from "../../src/source-debugger/host.js";
-import type { SourceDebuggerComponentInstance } from "../../src/source-debugger/component.js";
+import { SourceDebuggerSession } from "../../src/source-debugger/session/session.js";
+import { SourceDebuggerSessionHost } from "../../src/source-debugger/target/host.js";
+import type { SourceDebuggerComponent } from "../../src/source-debugger/protocol/component.js";
+import { SequencedSourceDebuggerRun } from "../../src/source-debugger/components/run.js";
+import { SourceDebuggerError } from "../../src/source-debugger/protocol/error.js";
 import type { RdpWasmSession } from "../../src/rdp/session.js";
+import type { SourceDebuggerTarget } from "../../src/source-debugger/protocol/target.js";
 import type {
   ComponentRunRequest,
   ComponentStop,
   SourceBreakpoint,
   SourceBreakpointRequest,
-} from "../../src/source-debugger/types.js";
+} from "../../src/source-debugger/protocol/types.js";
 import {
   connectSourceDebuggerComponent,
   serveSourceDebuggerComponent,
-} from "../../src/source-debugger/rpc.js";
+} from "../../src/source-debugger/transport/rpc.js";
+
+interface TestRunHooks {
+  startRun(request: ComponentRunRequest): Promise<void>;
+  waitForStop(runId: string): Promise<ComponentStop>;
+  waitForPhysicalResume(runId: string, afterSequence: number): Promise<number | undefined>;
+  releasePhysicalResume(runId: string, sequence: number): Promise<void>;
+  synchronizeRun(runId: string): Promise<void>;
+  abortRun(runId: string): Promise<void>;
+  cancelRun(runId: string): Promise<void>;
+}
+
+type FakeComponent = SourceDebuggerComponent & TestRunHooks;
+
+function testTarget(rdp: RdpWasmSession): SourceDebuggerTarget {
+  return {
+    modules: async () =>
+      Promise.all(
+        (await rdp.wasmSources()).map(async ({ url }) => {
+          const debugInfo = await rdp.wasmModuleDebugInfo(url);
+          return { id: url, url, ...(debugInfo ? { debugInfo } : {}) };
+        })
+      ),
+    close: () => {},
+  };
+}
 
 function fakeComponent(
   id = "fake",
   options: { events?: string[]; physicalFrameIndex?: number } = {}
-): SourceDebuggerComponentInstance {
+): FakeComponent {
   const breakpoints = new Map<string, SourceBreakpoint>();
   const runs = new Map<string, Promise<ComponentStop>>();
-  return {
+  const component: FakeComponent = {
     id,
     describe: async () => ({
-      protocolVersion: "0.1",
+      protocolVersion: "0.2",
       id,
       name: "Fake debugger",
       capabilities: {
@@ -48,6 +76,7 @@ function fakeComponent(
       options.events?.push(`remove:${id}:${moduleIds.join(",")}`);
     },
     sources: async () => [],
+    sourceContent: async () => null,
     state: async (stopId) => ({
       stopId,
       reason: { kind: "breakpoint", threadId: "7" },
@@ -76,6 +105,7 @@ function fakeComponent(
       display: expression === "n + 1" ? "6" : expression,
       hasChildren: false,
     }),
+    valueChildren: async () => [],
     setBreakpoint: async (request: SourceBreakpointRequest) => {
       const breakpoint: SourceBreakpoint = {
         id: String(breakpoints.size + 1),
@@ -90,6 +120,23 @@ function fakeComponent(
       breakpoints.delete(breakpointId);
     },
     breakpoints: async () => [...breakpoints.values()],
+    beginRun: async (request) => {
+      await component.startRun(request);
+      return new SequencedSourceDebuggerRun(request, {
+        waitForStop: () => component.waitForStop(request.runId),
+        waitForResume: (afterSequence) =>
+          component.waitForPhysicalResume(request.runId, afterSequence),
+        grantResume: (sequence) => component.releasePhysicalResume(request.runId, sequence),
+        rearmObserver: () =>
+          component.startRun({ ...request, role: "observer", action: { kind: "continue" } }),
+        terminate: (reason) => {
+          if (reason === "synchronize") return component.synchronizeRun(request.runId);
+          if (reason === "preempt") return component.abortRun(request.runId);
+          return component.cancelRun(request.runId);
+        },
+        dispose: () => {},
+      });
+    },
     startRun: async (request: ComponentRunRequest) => {
       options.events?.push(`start:${id}:${request.role}:${request.action.kind}`);
       runs.set(
@@ -110,10 +157,14 @@ function fakeComponent(
     synchronizeRun: async () => {
       options.events?.push(`sync:${id}`);
     },
+    abortRun: async (runId) => component.synchronizeRun(runId),
+    waitForPhysicalResume: async () => undefined,
+    releasePhysicalResume: async () => {},
     cancelRun: async () => {},
     command: async () => ({ output: "", error: "", status: 0 }),
     dispose: async () => {},
   };
+  return component;
 }
 
 test("logical frames are stop-scoped and route inspection to their component", async () => {
@@ -129,6 +180,80 @@ test("logical frames are stop-scoped and route inspection to their component", a
   assert.match((await session.frames())[0].id, /^stop-1:/);
 });
 
+test("source and value resources are namespaced and routed back to their component", async () => {
+  const component = fakeComponent("routed");
+  let breakpointSourceId: string | undefined;
+  component.sources = async () => [
+    { id: "component-source", url: "virtual:///source.wat", language: "webassembly" },
+  ];
+  component.sourceContent = async (sourceId) => {
+    assert.equal(sourceId, "component-source");
+    return "(module)";
+  };
+  component.frames = async () => [
+    {
+      id: "frame-0",
+      physicalFrameIndex: 0,
+      inlineFrameIndex: 0,
+      functionName: "entry",
+      location: { sourceId: "component-source", line: 1 },
+      inline: false,
+    },
+  ];
+  component.scopes = async () => [
+    {
+      name: "Locals",
+      kind: "locals",
+      values: [
+        {
+          name: "object",
+          value: { id: "component-value", display: "{...}", hasChildren: true },
+        },
+      ],
+    },
+  ];
+  component.valueChildren = async (stopId, valueId) => {
+    assert.equal(stopId, "stop-0");
+    assert.equal(valueId, "component-value");
+    return [{ name: "field", value: { display: "42", hasChildren: false } }];
+  };
+  component.setBreakpoint = async (request) => {
+    assert.equal(request.target.kind, "source");
+    if (request.target.kind === "source") breakpointSourceId = request.target.location.sourceId;
+    return {
+      id: "source-breakpoint",
+      componentId: component.id,
+      verified: true,
+      target: request.target,
+    };
+  };
+
+  const session = new SourceDebuggerSession({ components: [component] });
+  const [source] = await session.sources();
+  assert.notEqual(source.id, "component-source");
+  assert.equal(await session.sourceContent(source.id), "(module)");
+  const [frame] = await session.frames();
+  assert.equal(frame.location?.sourceId, source.id);
+
+  const breakpoint = await session.setBreakpoint({
+    target: { kind: "source", location: { sourceId: source.id, line: 1 } },
+  });
+  assert.equal(breakpointSourceId, "component-source");
+  assert.equal(
+    breakpoint.target.kind === "source" ? breakpoint.target.location.sourceId : undefined,
+    source.id
+  );
+
+  const [scope] = await session.scopes(frame.id);
+  const valueId = scope.values[0].value.id;
+  assert.ok(valueId);
+  assert.notEqual(valueId, "component-value");
+  assert.equal((await session.valueChildren(valueId))[0].value.display, "42");
+
+  await session.continue();
+  await assert.rejects(session.valueChildren(valueId), /stale or unknown value/);
+});
+
 test("session breakpoint IDs retain their owning component route", async () => {
   const session = new SourceDebuggerSession({ components: [fakeComponent("owner")] });
   const breakpoint = await session.setBreakpoint({
@@ -138,6 +263,42 @@ test("session breakpoint IDs retain their owning component route", async () => {
   assert.equal((await session.breakpoints())[0].id, "owner:1");
   await session.removeBreakpoint(breakpoint.id);
   assert.deepEqual(await session.breakpoints(), []);
+});
+
+test("session enforces declared component capabilities with typed errors", async () => {
+  const component = fakeComponent("limited");
+  component.describe = async () => ({
+    protocolVersion: "0.2",
+    id: component.id,
+    name: "Limited debugger",
+    capabilities: {
+      breakpoints: true,
+      conditionalBreakpoints: false,
+      evaluate: false,
+      stepInto: true,
+      stepOver: true,
+      stepOut: false,
+    },
+  });
+  const session = new SourceDebuggerSession({ components: [component] });
+  const [frame] = await session.frames();
+
+  for (const operation of [
+    () => session.evaluate(frame.id, "n"),
+    () =>
+      session.setBreakpoint({
+        target: { kind: "function", name: "compute" },
+        condition: "n > 1",
+      }),
+    () => session.stepOut(frame.id),
+  ]) {
+    await assert.rejects(operation(), (error: unknown) => {
+      assert.ok(error instanceof SourceDebuggerError);
+      assert.equal(error.code, "unsupported-operation");
+      assert.equal(error.componentId, "limited");
+      return true;
+    });
+  }
 });
 
 test("component IDs must be unique", () => {
@@ -272,7 +433,7 @@ test("multiple components compose owned frames and arm observers before the step
 
   const stop = await session.stepInto(frames[0].id);
   assert.equal(stop.reason.kind, "step");
-  assert.deepEqual(events.slice(0, 2), [
+  assert.deepEqual(events.filter((event) => event.startsWith("start:")).slice(0, 2), [
     "start:outer:observer:continue",
     "start:inner:driver:step-into",
   ]);
@@ -655,7 +816,7 @@ test("module refresh assigns one owner and reports additions and removals", asyn
   } as unknown as RdpWasmSession;
   const session = new SourceDebuggerSession({
     components: [fakeComponent("a", { events }), fakeComponent("b", { events })],
-    getRdpSession: () => rdp,
+    target: testTarget(rdp),
     resolveModuleOwner: async (module) => {
       ownershipRequests++;
       probedDebugInfo.push(module.debugInfo);
@@ -702,13 +863,13 @@ test("run control waits for a late component activation and module handoff", asy
   const ensureStarted = new Promise<void>((resolve) => {
     announceEnsure = resolve;
   });
-  let finishEnsure: ((component: SourceDebuggerComponentInstance) => void) | undefined;
-  const ensured = new Promise<SourceDebuggerComponentInstance>((resolve) => {
+  let finishEnsure: ((component: SourceDebuggerComponent) => void) | undefined;
+  const ensured = new Promise<SourceDebuggerComponent>((resolve) => {
     finishEnsure = resolve;
   });
   const session = new SourceDebuggerSession({
     components: [fakeComponent("component-a", { events })],
-    getRdpSession: () => rdp,
+    target: testTarget(rdp),
     resolveModuleOwner: async (module) =>
       module.url.includes("component-b") ? "component-b" : "component-a",
     ensureComponent: async () => {
@@ -759,7 +920,7 @@ test("a module which appears during an active run is assigned at the next stop",
   };
   const session = new SourceDebuggerSession({
     components: [driver],
-    getRdpSession: () => rdp,
+    target: testTarget(rdp),
     resolveModuleOwner: async () => "component-a",
   });
   await session.modules();

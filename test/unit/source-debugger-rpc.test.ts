@@ -7,24 +7,24 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type {
   SourceDebuggerComponentDefinition,
-  SourceDebuggerComponentInstance,
-} from "../../src/source-debugger/component.js";
+  SourceDebuggerComponent,
+} from "../../src/source-debugger/protocol/component.js";
 import {
   connectSourceDebuggerComponent,
   connectSourceDebuggerComponentDefinition,
   SourceDebuggerRpcTransportError,
   serveSourceDebuggerComponent,
   serveSourceDebuggerComponentDefinition,
-} from "../../src/source-debugger/rpc.js";
-import type { ComponentStop } from "../../src/source-debugger/types.js";
+} from "../../src/source-debugger/transport/rpc.js";
+import type { ComponentStop } from "../../src/source-debugger/protocol/types.js";
+import { testSourceDebuggerRun } from "../helpers/source-debugger-run.js";
+import { SourceDebuggerError } from "../../src/source-debugger/protocol/error.js";
 
-function fakeComponent(
-  overrides: Partial<SourceDebuggerComponentInstance> = {}
-): SourceDebuggerComponentInstance {
+function fakeComponent(overrides: Partial<SourceDebuggerComponent> = {}): SourceDebuggerComponent {
   return {
     id: "fake",
     describe: async () => ({
-      protocolVersion: "0.1",
+      protocolVersion: "0.2",
       id: "fake",
       name: "Fake",
       capabilities: {
@@ -39,11 +39,13 @@ function fakeComponent(
     addModules: async () => {},
     removeModules: async () => {},
     sources: async () => [],
+    sourceContent: async () => null,
     state: async (stopId) => ({ stopId, reason: { kind: "stopped" } }),
     threads: async () => [],
     frames: async () => [],
     scopes: async () => [],
     evaluate: async () => null,
+    valueChildren: async () => [],
     setBreakpoint: async (request) => ({
       id: "1",
       componentId: "fake",
@@ -52,13 +54,7 @@ function fakeComponent(
     }),
     removeBreakpoint: async () => {},
     breakpoints: async () => [],
-    startRun: async () => {},
-    waitForStop: async (runId) => ({
-      runId,
-      disposition: "accepted",
-      reason: { kind: "stopped" },
-    }),
-    cancelRun: async () => {},
+    beginRun: async (request) => testSourceDebuggerRun(request),
     dispose: async () => {},
     ...overrides,
   };
@@ -113,7 +109,7 @@ test("component RPC structured-clones results and preserves optional exports", a
   const scope = {
     name: "Locals",
     kind: "locals",
-    values: [{ name: "n", value: { display: "7", hasChildren: false } }],
+    values: [{ name: "n", value: { display: "7", hasChildren: false as const } }],
   };
   let disposed = false;
   const component = fakeComponent({
@@ -127,7 +123,7 @@ test("component RPC structured-clones results and preserves optional exports", a
   const remote = await connectSourceDebuggerComponent(port2);
 
   assert.equal(remote.id, "fake");
-  assert.equal(remote.abortRun, undefined);
+  assert.equal(remote.command, undefined);
   const scopes = await remote.scopes("stop-1", "frame-0");
   assert.deepEqual(scopes, [scope]);
   assert.notEqual(scopes[0], scope);
@@ -137,20 +133,32 @@ test("component RPC structured-clones results and preserves optional exports", a
   endpoint.close();
 });
 
-test("component RPC allows cancelRun to settle a concurrent waitForStop", async () => {
+test("component RPC allows run termination to settle a concurrent stop wait", async () => {
   let settle!: (stop: ComponentStop) => void;
   const component = fakeComponent({
-    waitForStop: async () => new Promise((resolve) => (settle = resolve)),
-    cancelRun: async (runId) => {
-      settle({ runId, disposition: "accepted", reason: { kind: "interrupt" } });
-    },
+    beginRun: async (request) =>
+      testSourceDebuggerRun(request, {
+        waitForStop: async () => new Promise((resolve) => (settle = resolve)),
+        terminate: async () => {
+          settle({
+            runId: request.runId,
+            disposition: "accepted",
+            reason: { kind: "interrupt" },
+          });
+        },
+      }),
   });
   const { port1, port2 } = new MessageChannel();
   const endpoint = serveSourceDebuggerComponent(port1, component);
   const remote = await connectSourceDebuggerComponent(port2);
 
-  const stopped = remote.waitForStop("run-1");
-  await remote.cancelRun("run-1");
+  const run = await remote.beginRun({
+    runId: "run-1",
+    role: "driver",
+    action: { kind: "continue" },
+  });
+  const stopped = run.waitForStop();
+  await run.terminate("cancel");
   assert.equal((await stopped).reason.kind, "interrupt");
 
   await remote.dispose();
@@ -171,6 +179,31 @@ test("component RPC preserves remote error details", async () => {
     assert.ok(error instanceof Error);
     assert.equal(error.name, "TypeError");
     assert.equal(error.message, "expression is not available");
+    return true;
+  });
+
+  await remote.dispose();
+  endpoint.close();
+});
+
+test("component RPC preserves typed source debugger errors", async () => {
+  const component = fakeComponent({
+    evaluate: async () => {
+      throw new SourceDebuggerError("unsupported-operation", "evaluation is disabled", {
+        componentId: "fake",
+        operation: "evaluate",
+      });
+    },
+  });
+  const { port1, port2 } = new MessageChannel();
+  const endpoint = serveSourceDebuggerComponent(port1, component);
+  const remote = await connectSourceDebuggerComponent(port2);
+
+  await assert.rejects(remote.evaluate("stop-1", "frame-0", "n"), (error: unknown) => {
+    assert.ok(error instanceof SourceDebuggerError);
+    assert.equal(error.code, "unsupported-operation");
+    assert.equal(error.componentId, "fake");
+    assert.equal(error.operation, "evaluate");
     return true;
   });
 
@@ -199,13 +232,19 @@ test("component RPC rejects a call which exceeds its configured deadline", async
 
 test("component RPC leaves run waits and native commands outside the bounded-call deadline", async () => {
   const component = fakeComponent({
-    waitForStop: async () => new Promise(() => {}),
+    beginRun: async (request) =>
+      testSourceDebuggerRun(request, { waitForStop: async () => new Promise(() => {}) }),
     command: async () => new Promise(() => {}),
   });
   const { port1, port2 } = new MessageChannel();
   const endpoint = serveSourceDebuggerComponent(port1, component);
   const remote = await connectSourceDebuggerComponent(port2, { requestTimeoutMs: 20 });
-  const stop = remote.waitForStop("run-1");
+  const run = await remote.beginRun({
+    runId: "run-1",
+    role: "driver",
+    action: { kind: "continue" },
+  });
+  const stop = run.waitForStop();
   const command = remote.command!("continue");
 
   await new Promise((resolve) => setTimeout(resolve, 50));

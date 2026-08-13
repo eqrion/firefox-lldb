@@ -2,16 +2,21 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-import { noopLogger, type Logger } from "../logging.js";
-import type { GdbRspConnection, GdbRspEndpoint, SourceDebuggerComponentHost } from "./component.js";
+import { noopLogger, type Logger } from "../../logging.js";
+import type {
+  GdbRspConnection,
+  GdbRspEndpoint,
+  SourceDebuggerComponentHost,
+} from "../protocol/component.js";
 import {
   connectRspByteChannel,
   openTcpRspByteChannel,
   type HostRspByteChannel,
-} from "./rsp-byte-channel.js";
-import type { ComponentId } from "./types.js";
-import { FirefoxWasmDebuggee, type WasmDebuggee } from "./wasm-debuggee.js";
-import type { RdpWasmSession } from "../rdp/session.js";
+} from "../transport/rsp-byte-channel.js";
+import type { ComponentId } from "../protocol/types.js";
+import type { WasmDebuggee } from "../protocol/wasm-debuggee.js";
+import { FirefoxWasmDebuggee } from "./wasm-debuggee.js";
+import type { RdpWasmSession } from "../../rdp/session.js";
 
 interface RegisteredRspEndpoint {
   componentId: ComponentId;
@@ -98,7 +103,7 @@ export class SourceDebuggerSessionHost {
     this.#closed = true;
     this.#endpoints.clear();
     this.#bindings.clear();
-    for (const debuggee of this.#wasmDebuggees) debuggee.dispose();
+    for (const debuggee of this.#wasmDebuggees) void debuggee.dispose();
     this.#wasmDebuggees.clear();
     for (const channel of this.#channels) channel.close();
     this.#channels.clear();

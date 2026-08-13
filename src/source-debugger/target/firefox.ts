@@ -2,13 +2,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-import type { Args, PlatformServerHandle } from "../core/platform-session.js";
-import { startPlatformServer } from "../core/platform-session.js";
-import { RdpDebuggee, type RdpDebuggeeRunControl } from "../gdb/rdp-debuggee.js";
-import { noopLogger, type Logger } from "../logging.js";
-import { focusFirefoxWindow, launchFirefox, type FirefoxHandle } from "../rdp/firefox.js";
-import { RdpWasmSession, verifyFirefoxLaunchToken } from "../rdp/session.js";
-import type { UnownedModuleDescriptor } from "./ownership.js";
+import type { Args, PlatformServerHandle } from "../../core/platform-session.js";
+import { startPlatformServer } from "../../core/platform-session.js";
+import { RdpDebuggee, type RdpDebuggeeRunControl } from "../../gdb/rdp-debuggee.js";
+import { noopLogger, type Logger } from "../../logging.js";
+import { focusFirefoxWindow, launchFirefox, type FirefoxHandle } from "../../rdp/firefox.js";
+import { RdpWasmSession, verifyFirefoxLaunchToken } from "../../rdp/session.js";
+import type { SourceDebuggerTarget, UnownedModuleDescriptor } from "../protocol/target.js";
 
 export interface FirefoxSourceDebuggerTargetOptions {
   args: Args;
@@ -34,7 +34,7 @@ export interface FirefoxGdbRspProjection {
 /** Browser-owned physical target. It exists before any language debugger,
  * provides normalized module metadata for catalog discovery, and lends each
  * selected component a filtered GDB RSP projection over the shared RDP stop. */
-export class FirefoxSourceDebuggerTarget {
+export class FirefoxSourceDebuggerTarget implements SourceDebuggerTarget {
   readonly session: RdpWasmSession;
   readonly #args: Args;
   readonly #logger: Logger;

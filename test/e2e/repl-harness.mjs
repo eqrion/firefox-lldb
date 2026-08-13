@@ -13,8 +13,8 @@ import { LLDBClient } from "lldb-wasm";
 import { parseCliArgs, startPlatformServer } from "../../src/core/platform-session.ts";
 import { freePort } from "../../src/platform/gdb-server-spawner.ts";
 import { runRepl } from "../../src/cli/repl.ts";
-import { LldbSourceDebuggerComponentInstance } from "../../src/source-debugger/lldb-component.ts";
-import { SourceDebuggerSession } from "../../src/source-debugger/session.ts";
+import { LldbSourceDebuggerComponent } from "../../src/source-debugger/components/lldb/component.ts";
+import { SourceDebuggerSession } from "../../src/source-debugger/session/session.ts";
 import {
   FIXTURES,
   startStaticServer,
@@ -83,11 +83,21 @@ export class ReplSession {
     });
     rs.#input = new PassThrough();
     rs.#sourceDebuggerSession = new SourceDebuggerSession({
-      components: [new LldbSourceDebuggerComponentInstance(client)],
-      getRdpSession: () => rs.session,
+      components: [new LldbSourceDebuggerComponent(client)],
+      target: {
+        modules: async () =>
+          Promise.all(
+            (await rs.session.wasmSources()).map(async ({ url }) => {
+              const debugInfo = await rs.session.wasmModuleDebugInfo(url);
+              return { id: url, url, ...(debugInfo ? { debugInfo } : {}) };
+            })
+          ),
+        close: () => {},
+      },
     });
     rs.#repl = runRepl({
       session: rs.#sourceDebuggerSession,
+      getRdpSession: () => rs.session,
       input: rs.#input,
       output,
       onTargetInterrupt: () => rs.#triggerInterrupt?.(),

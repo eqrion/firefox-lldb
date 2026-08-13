@@ -18,18 +18,21 @@ import type {
   SourceBreakpointRequest,
   SourceDebuggerComponentDescriptor,
   SourceFile,
+  SourceProperty,
   SourceScope,
   SourceValue,
   StopId,
   ThreadId,
-} from "./types.js";
+} from "../../protocol/types.js";
 import type {
   ModuleClaim,
   SourceDebuggerComponent,
+  SourceDebuggerComponentDefinition,
   SourceDebuggerComponentHost,
-  SourceDebuggerComponentInstance,
-} from "./component.js";
-import { noopLogger, type Logger } from "../logging.js";
+  SourceDebuggerRun,
+} from "../../protocol/component.js";
+import { noopLogger, type Logger } from "../../../logging.js";
+import { SequencedSourceDebuggerRun } from "../run.js";
 
 const LLDB_FAILED_STATUS = 6;
 
@@ -100,7 +103,7 @@ function breakpointId(result: CommandResult): string | undefined {
   return result.output.match(/\bBreakpoint\s+(\d+):/)?.[1];
 }
 
-export class LldbSourceDebuggerComponent implements SourceDebuggerComponent {
+export class LldbSourceDebuggerComponentDefinition implements SourceDebuggerComponentDefinition {
   readonly #client: LLDBClient;
   readonly #options: LldbSourceDebuggerComponentOptions;
 
@@ -117,14 +120,12 @@ export class LldbSourceDebuggerComponent implements SourceDebuggerComponent {
     return probeLldbSourceDebuggerModule(module);
   }
 
-  async instantiate(
-    _host: SourceDebuggerComponentHost
-  ): Promise<LldbSourceDebuggerComponentInstance> {
-    return new LldbSourceDebuggerComponentInstance(this.#client, this.#options);
+  async instantiate(_host: SourceDebuggerComponentHost): Promise<LldbSourceDebuggerComponent> {
+    return new LldbSourceDebuggerComponent(this.#client, this.#options);
   }
 }
 
-export class LldbSourceDebuggerComponentInstance implements SourceDebuggerComponentInstance {
+export class LldbSourceDebuggerComponent implements SourceDebuggerComponent {
   readonly id: ComponentId;
   readonly #client: LLDBClient;
   readonly #name: string;
@@ -168,6 +169,13 @@ export class LldbSourceDebuggerComponentInstance implements SourceDebuggerCompon
     // LLDB discovers compile units lazily. Source enumeration will move to a
     // richer SB API adapter; the session currently obtains module URLs from RDP.
     return [];
+  }
+
+  async sourceContent(_sourceId: string): Promise<string | null> {
+    // Source retrieval needs an SB API which can distinguish local files from
+    // debugger virtual sources. The descriptor remains usable for locations
+    // and breakpoints when contents are unavailable.
+    return null;
   }
 
   async state(stopId: StopId): Promise<SessionState> {
@@ -247,6 +255,12 @@ export class LldbSourceDebuggerComponentInstance implements SourceDebuggerCompon
     return parsed ?? { display: result.output.trim(), hasChildren: false };
   }
 
+  async valueChildren(_stopId: StopId, _valueId: string): Promise<SourceProperty[]> {
+    // Do not advertise expandable values until lldb-wasm exposes stable
+    // structured SBValue children on the session thread.
+    return [];
+  }
+
   async setBreakpoint(request: SourceBreakpointRequest): Promise<SourceBreakpoint> {
     let command: string;
     if (request.target.kind === "function") {
@@ -282,7 +296,24 @@ export class LldbSourceDebuggerComponentInstance implements SourceDebuggerCompon
     return [...this.#breakpoints.values()];
   }
 
-  async startRun(request: ComponentRunRequest): Promise<void> {
+  async beginRun(request: ComponentRunRequest): Promise<SourceDebuggerRun> {
+    await this.#startRun(request);
+    return new SequencedSourceDebuggerRun(request, {
+      waitForStop: () => this.#waitForStop(request.runId),
+      waitForResume: (afterSequence) => this.#waitForPhysicalResume(request.runId, afterSequence),
+      grantResume: (sequence) => this.#releasePhysicalResume(request.runId, sequence),
+      rearmObserver: () =>
+        this.#startRun({ ...request, role: "observer", action: { kind: "continue" } }),
+      terminate: (reason) => {
+        if (reason === "synchronize") return this.#synchronizeRun(request.runId);
+        if (reason === "preempt") return this.#abortRun(request.runId);
+        return this.#cancelRun(request.runId);
+      },
+      dispose: () => {},
+    });
+  }
+
+  async #startRun(request: ComponentRunRequest): Promise<void> {
     if (this.#runs.has(request.runId)) throw new Error(`run ${request.runId} already exists`);
     await this.#ensureAbortBreakpoint();
     let temporaryBreakpointId: string | undefined;
@@ -354,7 +385,7 @@ export class LldbSourceDebuggerComponentInstance implements SourceDebuggerCompon
     await Promise.race([ready, operation.then(() => undefined)]);
   }
 
-  async waitForStop(runId: RunId): Promise<ComponentStop> {
+  async #waitForStop(runId: RunId): Promise<ComponentStop> {
     const operation = this.#runs.get(runId);
     if (!operation) throw new Error(`unknown run ${runId}`);
     try {
@@ -364,29 +395,31 @@ export class LldbSourceDebuggerComponentInstance implements SourceDebuggerCompon
     }
   }
 
-  waitForPhysicalResume(runId: RunId, afterSequence: number): Promise<number | undefined> {
+  #waitForPhysicalResume(runId: RunId, afterSequence: number): Promise<number | undefined> {
     return (
       this.#runControl?.waitForPhysicalResume(runId, afterSequence) ?? Promise.resolve(undefined)
     );
   }
 
-  async releasePhysicalResume(runId: RunId, sequence: number): Promise<void> {
+  async #releasePhysicalResume(runId: RunId, sequence: number): Promise<void> {
     this.#runControl?.releasePhysicalResume(runId, sequence);
   }
 
-  async cancelRun(runId: RunId): Promise<void> {
+  async #cancelRun(runId: RunId): Promise<void> {
     if (!this.#runs.has(runId)) return;
     this.#logger.debug(`[${this.id}] cancelling ${runId}`);
     await this.#client.pause();
     this.#logger.debug(`[${this.id}] cancellation delivered for ${runId}`);
   }
 
-  async synchronizeRun(runId: RunId): Promise<void> {
-    this.#runControl?.synchronizeRun(runId);
+  async #synchronizeRun(runId: RunId): Promise<void> {
+    if (this.#runControl) this.#runControl.synchronizeRun(runId);
+    else await this.#cancelRun(runId);
   }
 
-  async abortRun(runId: RunId): Promise<void> {
-    this.#runControl?.abortRun(runId);
+  async #abortRun(runId: RunId): Promise<void> {
+    if (this.#runControl) this.#runControl.abortRun(runId);
+    else await this.#cancelRun(runId);
   }
 
   command(command: string): Promise<CommandResult> {
@@ -450,7 +483,7 @@ export function lldbSourceDebuggerDescriptor(
   options: LldbSourceDebuggerComponentOptions = {}
 ): SourceDebuggerComponentDescriptor {
   return {
-    protocolVersion: "0.1",
+    protocolVersion: "0.2",
     id: options.id ?? "lldb",
     name: options.name ?? "LLDB",
     capabilities: {
@@ -504,7 +537,7 @@ function parseExpressionResult(output: string): SourceValue | null {
   return {
     type: match[1],
     display: match[2],
-    hasChildren: /^(?:\{|\[)/.test(match[2]),
+    hasChildren: false,
   };
 }
 
@@ -527,7 +560,7 @@ function sourceScope(values: Array<[string, { type: string; display: string }]>)
         name,
         type,
         display,
-        hasChildren: /^(?:\{|\[)/.test(display),
+        hasChildren: false,
       },
     })),
   };
