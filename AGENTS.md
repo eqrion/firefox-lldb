@@ -16,8 +16,8 @@ src/sourcemap/     source-map -> DWARF converter (host glue + jco-generated comp
 src/source-debugger/protocol/ portable SourceDebuggerComponent/Session contracts
 src/source-debugger/session/  catalog, ownership, routing, mixed-debugger coordinator
 src/source-debugger/target/   host capabilities + Firefox target adapters
-src/source-debugger/transport/worker RPC, imported-resource RPC, RSP byte channels
-src/source-debugger/components/ LLDB and generated-WAT component implementations
+src/source-debugger/transport/worker RPC + imported-resource RPC
+src/source-debugger/components/ LLDB (including private RSP) + generated-WAT implementations
 src/core/          shared Firefox + per-tab launcher + platform server bring-up
 src/cli/           CLI entry points (firefox-lldb, firefox-lldb-server) + REPL
 src/mcp/           MCP server that drives the real REPL for coding agents

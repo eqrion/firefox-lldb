@@ -3,8 +3,8 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // Two genuinely different source debugger implementations share one Firefox
-// target: wasm LLDB consumes a filtered GDB RSP projection for DWARF, while the
-// generated-text component imports the direct Wasm debuggee capability.
+// target: wasm LLDB privately adapts the imported Wasm debuggee to GDB RSP for
+// DWARF, while the generated-text component consumes that capability directly.
 
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -16,7 +16,6 @@ import {
   LldbSourceDebuggerTarget,
 } from "../../src/source-debugger/components/lldb/loader.ts";
 import { SourceDebuggerSessionRuntime } from "../../src/source-debugger/session/runtime.ts";
-import { SourceDebuggerSessionHost } from "../../src/source-debugger/target/host.ts";
 import { WASM_SOURCE_DEBUGGER_ID } from "../../src/source-debugger/components/wasm-text/component.ts";
 import { WasmSourceDebuggerComponentLoader } from "../../src/source-debugger/components/wasm-text/loader.ts";
 import { startStaticServer } from "./harness.mjs";
@@ -42,8 +41,6 @@ test("LLDB and generated Wasm text coordinate one mixed source session", async (
     const route = { id: "lldb", urlSubstring: "*" };
     const lldbTarget = new LldbSourceDebuggerTarget({
       target,
-      routes: [route],
-      ownershipFilteredModules: true,
     });
     runtime = await SourceDebuggerSessionRuntime.load({
       loaders: [
@@ -54,11 +51,6 @@ test("LLDB and generated Wasm text coordinate one mixed source session", async (
         new WasmSourceDebuggerComponentLoader(),
       ],
       target,
-      host: new SourceDebuggerSessionHost({
-        rdpSession: target.session,
-        canAccessWasmModule: (componentId, moduleId) =>
-          target.moduleOwner(moduleId) === componentId,
-      }),
     });
 
     assert.deepEqual(

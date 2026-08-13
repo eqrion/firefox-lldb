@@ -17,7 +17,6 @@ import {
   LldbSourceDebuggerTarget,
 } from "../source-debugger/components/lldb/loader.js";
 import { SourceDebuggerSessionRuntime } from "../source-debugger/session/runtime.js";
-import { SourceDebuggerSessionHost } from "../source-debugger/target/host.js";
 import { WasmSourceDebuggerComponentLoader } from "../source-debugger/components/wasm-text/loader.js";
 import {
   createRoutedModuleOwnerResolver,
@@ -55,9 +54,6 @@ async function main(): Promise<void> {
   });
   const lldbTarget = new LldbSourceDebuggerTarget({
     target,
-    routes,
-    routedComponents,
-    ownershipFilteredModules: !routedComponents,
     logger,
     onOutput: print,
   });
@@ -72,15 +68,9 @@ async function main(): Promise<void> {
       })
   );
   const loaders = [...lldbLoaders, new WasmSourceDebuggerComponentLoader()];
-  const host = new SourceDebuggerSessionHost({
-    logger: sourceLogger,
-    rdpSession: target.session,
-    canAccessWasmModule: (componentId, moduleId) => target.moduleOwner(moduleId) === componentId,
-  });
   const runtime = await SourceDebuggerSessionRuntime.load({
     loaders,
     target,
-    host,
     ...(routedComponents
       ? {
           createModuleOwnerResolver: (

@@ -2,13 +2,14 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-import type { Args, PlatformServerHandle } from "../../core/platform-session.js";
-import { startPlatformServer } from "../../core/platform-session.js";
-import { RdpDebuggee, type RdpDebuggeeRunControl } from "../../gdb/rdp-debuggee.js";
+import type { Args } from "../../core/platform-session.js";
+import { RdpDebuggee } from "../../gdb/rdp-debuggee.js";
 import { noopLogger, type Logger } from "../../logging.js";
 import { focusFirefoxWindow, launchFirefox, type FirefoxHandle } from "../../rdp/firefox.js";
 import { RdpWasmSession, verifyFirefoxLaunchToken } from "../../rdp/session.js";
 import type { SourceDebuggerTarget, UnownedModuleDescriptor } from "../protocol/target.js";
+import type { WasmDebuggee } from "../protocol/wasm-debuggee.js";
+import { FirefoxWasmDebuggee } from "./wasm-debuggee.js";
 
 export interface FirefoxSourceDebuggerTargetOptions {
   args: Args;
@@ -18,22 +19,9 @@ export interface FirefoxSourceDebuggerTargetOptions {
   onFirefoxExit?: () => void;
 }
 
-export interface FirefoxGdbRspProjectionOptions {
-  componentId: string;
-  primary: boolean;
-  wrapConnectPort: (port: number) => Promise<number>;
-  runControl?: RdpDebuggeeRunControl;
-  moduleFilter?: (url: string, kind: "wasm" | "javascript") => boolean;
-}
-
-export interface FirefoxGdbRspProjection {
-  readonly port: number;
-  close(): Promise<void>;
-}
-
 /** Browser-owned physical target. It exists before any language debugger,
  * provides normalized module metadata for catalog discovery, and lends each
- * selected component a filtered GDB RSP projection over the shared RDP stop. */
+ * selected component a filtered WasmDebuggee view over the shared RDP stop. */
 export class FirefoxSourceDebuggerTarget implements SourceDebuggerTarget {
   readonly session: RdpWasmSession;
   readonly #args: Args;
@@ -43,9 +31,9 @@ export class FirefoxSourceDebuggerTarget implements SourceDebuggerTarget {
   readonly #onConsole: (message: string) => void;
   readonly #onFirefoxExit: () => void;
   readonly #detachListeners = new Set<() => void>();
-  readonly #projections = new Set<FirefoxGdbRspProjection>();
+  readonly #wasmDebuggees = new Set<FirefoxWasmDebuggee>();
   readonly #moduleOwnerByUrl = new Map<string, string>();
-  #interrupt: (() => void) | undefined;
+  #firstContinueFired = false;
   #closePromise: Promise<void> | undefined;
 
   private constructor(
@@ -136,34 +124,22 @@ export class FirefoxSourceDebuggerTarget implements SourceDebuggerTarget {
     return this.#moduleOwnerByUrl.get(moduleId);
   }
 
-  async createGdbRspProjection(
-    options: FirefoxGdbRspProjectionOptions
-  ): Promise<FirefoxGdbRspProjection> {
+  async openWasmDebuggee(componentId: string): Promise<WasmDebuggee> {
     if (this.#closePromise) throw new Error("FirefoxSourceDebuggerTarget is closed");
-    const handle = await startPlatformServer(
+    const debuggee = await FirefoxWasmDebuggee.create(
+      this.session,
+      (moduleId) => this.#moduleOwnerByUrl.get(moduleId) === componentId,
       {
-        ...this.#args,
-        connect: true,
-        port: options.primary ? this.#args.port : 0,
-        url: undefined,
-        fire: options.primary ? this.#args.fire : undefined,
-      },
-      {
-        wrapConnectPort: options.wrapConnectPort,
-        sharedRdpSession: this.session,
-        primeSharedSession: options.primary,
-        runControl: options.runControl,
-        moduleFilter: options.moduleFilter,
         logger: this.#logger,
-        onTab: (tab, pid) => this.#onOutput(`tab available: ${tab.url}\n  attach --pid ${pid}`),
-        onSession: (_session, interrupt) => {
-          if (options.primary) this.#interrupt = interrupt;
-        },
+        onFirstContinue: () => this.#onFirstContinue(),
       }
     );
-    const projection = this.#projection(handle, options.primary);
-    this.#projections.add(projection);
-    return projection;
+    if (this.#closePromise) {
+      await debuggee.dispose();
+      throw new Error("FirefoxSourceDebuggerTarget closed while opening a Wasm debuggee");
+    }
+    this.#wasmDebuggees.add(debuggee);
+    return debuggee;
   }
 
   onDetached(listener: () => void): () => void {
@@ -176,28 +152,11 @@ export class FirefoxSourceDebuggerTarget implements SourceDebuggerTarget {
   }
 
   interrupt(): void {
-    this.#interrupt?.();
+    for (const debuggee of this.#wasmDebuggees) debuggee.triggerInterrupt();
   }
 
   close(): Promise<void> {
     return (this.#closePromise ??= this.#close());
-  }
-
-  #projection(handle: PlatformServerHandle, primary: boolean): FirefoxGdbRspProjection {
-    let closePromise: Promise<void> | undefined;
-    const projection: FirefoxGdbRspProjection = {
-      port: handle.port,
-      close: () =>
-        (closePromise ??= (async () => {
-          this.#projections.delete(projection);
-          try {
-            await handle.shutdown();
-          } finally {
-            if (primary) this.#interrupt = undefined;
-          }
-        })()),
-    };
-    return projection;
   }
 
   #installSessionEvents(): void {
@@ -214,7 +173,6 @@ export class FirefoxSourceDebuggerTarget implements SourceDebuggerTarget {
     });
     this.session.on("detached", () => {
       this.#onOutput("the attached tab was closed; detaching.");
-      this.#interrupt = undefined;
       for (const listener of this.#detachListeners) listener();
     });
     void this.#firefox?.exited.then(() => {
@@ -222,17 +180,27 @@ export class FirefoxSourceDebuggerTarget implements SourceDebuggerTarget {
     });
   }
 
+  #onFirstContinue(): void {
+    if (this.#firstContinueFired) return;
+    this.#firstContinueFired = true;
+    const fire = this.#args.fire;
+    if (!fire) return;
+    const wrapped = `(function poll(){try{${fire}}catch(e){setTimeout(poll,20);}})()`;
+    void this.session
+      .evaluate(wrapped)
+      .catch((error) =>
+        this.#logger.debug(
+          `[rdp] --fire evaluation failed: ${error instanceof Error ? error.message : String(error)}`
+        )
+      );
+  }
+
   async #close(): Promise<void> {
     const errors: unknown[] = [];
-    for (const projection of [...this.#projections].reverse()) {
-      try {
-        await projection.close();
-      } catch (error) {
-        errors.push(error);
-      }
-    }
     this.#detachListeners.clear();
     this.#moduleOwnerByUrl.clear();
+    await Promise.allSettled([...this.#wasmDebuggees].map((debuggee) => debuggee.dispose()));
+    this.#wasmDebuggees.clear();
     this.session.close();
     try {
       await this.#firefox?.close();

@@ -3,17 +3,17 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 import type { MessagePort } from "node:worker_threads";
-import type {
-  GdbRspConnection,
-  GdbRspEndpoint,
-  SourceDebuggerComponentHost,
-} from "../protocol/component.js";
+import type { SourceDebuggerComponentHost } from "../protocol/component.js";
 import type { SourceDebuggerComponentHostBinding } from "../target/host.js";
-import type { WasmDebuggee, WasmDebuggeeResumeAction } from "../protocol/wasm-debuggee.js";
-import { connectRspByteChannel } from "./rsp-byte-channel.js";
+import type {
+  WasmDebuggee,
+  WasmDebuggeeEngineResumeAction,
+  WasmDebuggeeResourceCall,
+  WasmDebuggeeResumeAction,
+} from "../protocol/wasm-debuggee.js";
 import type { SourceDebuggerRpcEndpoint } from "./rpc.js";
 
-type HostMethod = "connect-gdb-rsp" | "open-wasm-debuggee" | "wasm-debuggee-call";
+type HostMethod = "open-wasm-debuggee" | "wasm-debuggee-call";
 type WasmDebuggeeMethod = keyof WasmDebuggee;
 
 interface HostRequest {
@@ -33,7 +33,6 @@ interface HostResponse {
   type: "source-debugger-host-response";
   id: number;
   result?: unknown;
-  port?: MessagePort;
   error?: SerializedError;
 }
 
@@ -63,17 +62,7 @@ export function serveSourceDebuggerComponentHost(
     void (async () => {
       try {
         let result: unknown;
-        let responsePort: MessagePort | undefined;
         switch (message.method) {
-          case "connect-gdb-rsp": {
-            const channel = await host.openGdbRspChannel(message.args[0] as GdbRspEndpoint);
-            if (closed) {
-              channel.close();
-              return;
-            }
-            responsePort = channel.componentPort;
-            break;
-          }
           case "open-wasm-debuggee": {
             const debuggee = await host.openWasmDebuggee();
             const resourceId = nextDebuggeeId++;
@@ -92,17 +81,13 @@ export function serveSourceDebuggerComponentHost(
             break;
           }
         }
-        if (closed) {
-          responsePort?.close();
-          return;
-        }
+        if (closed) return;
         const response = {
           type: "source-debugger-host-response",
           id: message.id,
           ...(result === undefined ? {} : { result }),
-          ...(responsePort ? { port: responsePort } : {}),
         } satisfies HostResponse;
-        port.postMessage(response, responsePort ? [responsePort] : []);
+        port.postMessage(response);
       } catch (error) {
         try {
           if (!closed) {
@@ -162,14 +147,10 @@ export function connectSourceDebuggerComponentHost(
   const onMessage = (message: unknown): void => {
     if (!isResponse(message)) return;
     const call = pending.get(message.id);
-    if (!call) {
-      message.port?.close();
-      return;
-    }
+    if (!call) return;
     pending.delete(message.id);
     if (call.timer) clearTimeout(call.timer);
     if (message.error) {
-      message.port?.close();
       call.reject(deserializeError(message.error));
     } else {
       call.resolve(message);
@@ -214,13 +195,6 @@ export function connectSourceDebuggerComponentHost(
   };
 
   return {
-    async connectGdbRsp(endpoint: GdbRspEndpoint): Promise<GdbRspConnection> {
-      const response = await call("connect-gdb-rsp", [endpoint]);
-      if (!response.port) {
-        throw new Error("SourceDebuggerComponent host returned no GDB RSP connection");
-      }
-      return connectRspByteChannel(response.port);
-    },
     async openWasmDebuggee(): Promise<WasmDebuggee> {
       const response = await call("open-wasm-debuggee", []);
       if (typeof response.result !== "number") {
@@ -259,6 +233,17 @@ function remoteWasmDebuggee(
     cancelWaitForStop: () => invoke("cancelWaitForStop"),
     resume: (action: WasmDebuggeeResumeAction) => invoke("resume", [action]),
     interrupt: () => invoke("interrupt"),
+    invokeResource: (request: WasmDebuggeeResourceCall) =>
+      invoke(
+        "invokeResource",
+        [request],
+        request.type === "EventFuture" && request.method === "finish"
+          ? { noDeadline: true }
+          : undefined
+      ),
+    grantResume: (token: string, action: WasmDebuggeeEngineResumeAction) =>
+      invoke("grantResume", [token, action]),
+    completeWaitAtCurrentStop: (completion) => invoke("completeWaitAtCurrentStop", [completion]),
     dispose: () => invoke("dispose"),
   };
 }
@@ -278,9 +263,7 @@ function isRequest(message: unknown): message is HostRequest {
   return (
     request.type === "source-debugger-host-request" &&
     typeof request.id === "number" &&
-    (request.method === "connect-gdb-rsp" ||
-      request.method === "open-wasm-debuggee" ||
-      request.method === "wasm-debuggee-call") &&
+    (request.method === "open-wasm-debuggee" || request.method === "wasm-debuggee-call") &&
     Array.isArray(request.args)
   );
 }

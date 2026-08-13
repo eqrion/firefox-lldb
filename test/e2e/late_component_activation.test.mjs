@@ -42,8 +42,6 @@ test("a late Wasm module activates a second isolated LLDB at the current stop", 
     trace("browser target ready");
     const lldbTarget = new LldbSourceDebuggerTarget({
       target,
-      routes,
-      routedComponents: true,
     });
     const loaders = routes.map(
       (route) =>

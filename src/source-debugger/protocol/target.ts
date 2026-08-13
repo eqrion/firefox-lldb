@@ -3,6 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 import type { ComponentId, ModuleDescriptor } from "./types.js";
+import type { WasmDebuggee } from "./wasm-debuggee.js";
 
 export type UnownedModuleDescriptor = Omit<ModuleDescriptor, "owner">;
 
@@ -14,5 +15,8 @@ export interface SourceDebuggerTarget {
   assignModuleOwner?(moduleId: string, componentId: ComponentId): void;
   removeModuleOwner?(moduleId: string): void;
   moduleOwner?(moduleId: string): ComponentId | undefined;
+  /** Open a component-scoped view of the physical Wasm machine. Target
+   * implementations enforce module ownership before returning the resource. */
+  openWasmDebuggee?(componentId: ComponentId): Promise<WasmDebuggee>;
   close(): void | Promise<void>;
 }

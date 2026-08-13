@@ -34,27 +34,11 @@ export interface ModuleClaim {
   reason?: string;
 }
 
-/** One connection to a host-owned GDB Remote Serial Protocol endpoint. This
- * intentionally exposes only an ordered byte stream: TCP, Firefox RDP, and the
- * gdbstub implementation remain outside the source debugger component. */
-export interface GdbRspConnection {
-  read(): Promise<Uint8Array | null>;
-  write(data: Uint8Array): Promise<void>;
-  close(): Promise<void>;
-}
-
-export interface GdbRspEndpoint {
-  id: string;
-  kind: "platform" | "process";
-}
-
-/** Capabilities imported by a SourceDebuggerComponent. The TypeScript
- * prototype uses opaque endpoint ids and byte-stream resources so this shape
- * can become WIT resources without standardizing TCP or Node APIs. */
+/** Capabilities imported by a SourceDebuggerComponent. The host exposes the
+ * physical Wasm machine, never a debugger-engine protocol such as GDB RSP.
+ * An LLDB-backed component is responsible for adapting this resource to the
+ * private protocol understood by its embedded LLDB. */
 export interface SourceDebuggerComponentHost {
-  connectGdbRsp(endpoint: GdbRspEndpoint): Promise<GdbRspConnection>;
-  /** Direct, asynchronous form of the low-level Wasm debuggee capability. A
-   * host which cannot provide it rejects the call. */
   openWasmDebuggee(): Promise<WasmDebuggee>;
 }
 

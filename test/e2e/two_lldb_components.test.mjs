@@ -9,14 +9,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { PassThrough, Writable } from "node:stream";
-import { parseCliArgs, startPlatformServer } from "../../src/core/platform-session.ts";
+import { parseCliArgs } from "../../src/core/platform-session.ts";
 import { runRepl } from "../../src/cli/repl.ts";
 import { IsolatedLldbComponentRuntime } from "../../src/source-debugger/components/lldb/isolate.ts";
 import { SourceDebuggerSessionHost } from "../../src/source-debugger/target/host.ts";
 import { SourceDebuggerSession } from "../../src/source-debugger/session/session.ts";
+import { FirefoxSourceDebuggerTarget } from "../../src/source-debugger/target/firefox.ts";
 import { freePort } from "../../src/platform/gdb-server-spawner.ts";
 import { consoleLogger } from "../../src/cli/logger.ts";
-import { startStaticServer, sleep } from "./harness.mjs";
+import { startStaticServer } from "./harness.mjs";
 
 const protocolLogger = {
   debug(message) {
@@ -98,34 +99,16 @@ test("two isolated LLDB components compose an interleaved stack over one Firefox
   const staticServer = await startStaticServer("test/fixtures/two-components");
   const url = `http://127.0.0.1:${staticServer.port}/index.html`;
   const rdpPort = await freePort();
-  const debuggeeHost = new SourceDebuggerSessionHost({ logger: protocolLogger });
-  const primary = await IsolatedLldbComponentRuntime.create({
-    host: debuggeeHost.forComponent("lldb-a"),
-    id: "lldb-a",
-    name: "LLDB A",
-    exclusiveModules: true,
-    observerResumesTarget: false,
-    logger: consoleLogger(Boolean(process.env.E2E_RUNTIME_VERBOSE)),
-    verbose: Boolean(process.env.E2E_RUNTIME_VERBOSE),
-  });
-  const secondary = await IsolatedLldbComponentRuntime.create({
-    host: debuggeeHost.forComponent("lldb-b"),
-    id: "lldb-b",
-    name: "LLDB B",
-    exclusiveModules: true,
-    observerResumesTarget: false,
-    logger: consoleLogger(Boolean(process.env.E2E_RUNTIME_VERBOSE)),
-    verbose: Boolean(process.env.E2E_RUNTIME_VERBOSE),
-  });
-  let primaryHandle;
-  let secondaryHandle;
+  let target;
+  let debuggeeHost;
+  let primary;
+  let secondary;
   let session;
-  let primaryRdpSession;
   let repl;
 
   try {
-    primaryHandle = await startPlatformServer(
-      parseCliArgs([
+    target = await FirefoxSourceDebuggerTarget.start({
+      args: parseCliArgs([
         "--launch",
         "--headless",
         ...(process.env.E2E_VERBOSE ? ["--verbose"] : []),
@@ -138,56 +121,42 @@ test("two isolated LLDB components compose an interleaved stack over one Firefox
         "--fire",
         "runA()",
       ]),
-      {
-        wrapConnectPort: primary.bridgeTcp,
-        onSession: (rdpSession) => {
-          primaryRdpSession = rdpSession;
-        },
-        runControl: primary.runControl,
-        moduleFilter: (moduleUrl) => moduleUrl.includes("component=a"),
-        logger: protocolLogger,
-      }
-    );
-    await primary.connectPlatform(primaryHandle.port);
-    await primary.attach(1);
+      logger: protocolLogger,
+    });
+    for (const module of await target.modules()) {
+      target.assignModuleOwner(module.id, module.url.includes("component=b") ? "lldb-b" : "lldb-a");
+    }
+    debuggeeHost = new SourceDebuggerSessionHost({
+      openWasmDebuggee: (componentId) => target.openWasmDebuggee(componentId),
+    });
+    primary = await IsolatedLldbComponentRuntime.create({
+      host: debuggeeHost.forComponent("lldb-a"),
+      id: "lldb-a",
+      name: "LLDB A",
+      exclusiveModules: true,
+      observerResumesTarget: false,
+      logger: consoleLogger(Boolean(process.env.E2E_RUNTIME_VERBOSE)),
+      verbose: Boolean(process.env.E2E_RUNTIME_VERBOSE),
+    });
+    secondary = await IsolatedLldbComponentRuntime.create({
+      host: debuggeeHost.forComponent("lldb-b"),
+      id: "lldb-b",
+      name: "LLDB B",
+      exclusiveModules: true,
+      observerResumesTarget: false,
+      logger: consoleLogger(Boolean(process.env.E2E_RUNTIME_VERBOSE)),
+      verbose: Boolean(process.env.E2E_RUNTIME_VERBOSE),
+    });
 
-    secondaryHandle = await startPlatformServer(
-      parseCliArgs([
-        "--connect",
-        ...(process.env.E2E_VERBOSE ? ["--verbose"] : []),
-        "--port",
-        "0",
-        "--rdp-port",
-        String(rdpPort),
-      ]),
-      {
-        wrapConnectPort: secondary.bridgeTcp,
-        sharedRdpSession: primaryRdpSession,
-        runControl: secondary.runControl,
-        moduleFilter: (moduleUrl) => moduleUrl.includes("component=b"),
-        logger: protocolLogger,
-      }
-    );
-    await secondary.connectPlatform(secondaryHandle.port);
-    // Give the second platform watcher a chance to assign the existing tab's
-    // stable pid before attach. attach() still retries the normal reload race.
-    await sleep(250);
+    await primary.startTarget();
+    await primary.attach(1);
+    await secondary.startTarget();
     await secondary.command("platform process list");
     await secondary.attach(1);
 
     session = new SourceDebuggerSession({
       components: [primary.component, secondary.component],
-      target: {
-        modules: async () =>
-          Promise.all(
-            (await primaryRdpSession.wasmSources()).map(async ({ url }) => ({
-              id: url,
-              url,
-              debugInfo: await primaryRdpSession.wasmModuleDebugInfo(url),
-            }))
-          ),
-        close: () => {},
-      },
+      target,
       resolveModuleOwner: async (module) =>
         module.url.includes("component=b") ? "lldb-b" : "lldb-a",
       debuggeeHost,
@@ -245,7 +214,7 @@ test("two isolated LLDB components compose an interleaved stack over one Firefox
     // Schedule rather than invoke synchronously: RDP console evaluation can
     // run page code while Firefox is paused, before the next all-stop listener
     // and physical resume have been armed.
-    await primaryRdpSession.evaluate("setTimeout(() => runInterleaved(), 100)");
+    await target.session.evaluate("setTimeout(() => runInterleaved(), 100)");
     const secondStopOutput = await repl.type("continue lldb-b");
     assert.match(secondStopOutput, /compute_factorial/);
     assert.equal(
@@ -305,13 +274,8 @@ test("two isolated LLDB components compose an interleaved stack over one Firefox
   } finally {
     repl?.close();
     await session?.close().catch(() => {});
-    debuggeeHost.close();
-    await Promise.allSettled([
-      primary.close(),
-      secondary.close(),
-      secondaryHandle?.shutdown(),
-      primaryHandle?.shutdown(),
-    ]);
+    debuggeeHost?.close();
+    await Promise.allSettled([primary?.close(), secondary?.close(), target?.close()]);
     staticServer.server.closeAllConnections();
     await new Promise((resolve) => staticServer.server.close(resolve));
   }

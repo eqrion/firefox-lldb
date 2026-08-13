@@ -78,9 +78,9 @@ export class SourceDebuggerSessionRuntime {
     const host =
       options.host ??
       new SourceDebuggerSessionHost({
-        logger: options.logger,
-        canAccessWasmModule: (componentId, moduleId) =>
-          options.target?.moduleOwner?.(moduleId) === componentId,
+        openWasmDebuggee: options.target?.openWasmDebuggee
+          ? (componentId) => options.target!.openWasmDebuggee!(componentId)
+          : undefined,
       });
     let catalog: SourceDebuggerComponentCatalog | undefined;
     const components: LoadedSourceDebuggerComponent[] = [];

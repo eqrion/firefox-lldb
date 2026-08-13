@@ -70,7 +70,6 @@ test("catalog discovery instantiates LLDB but not an unsupported installed ecosy
   const target = await FirefoxSourceDebuggerTarget.start({ args });
   const lldbTarget = new LldbSourceDebuggerTarget({
     target,
-    routes: [route],
   });
   const runtime = await SourceDebuggerSessionRuntime.load({
     target,

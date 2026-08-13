@@ -3,7 +3,6 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 import type { MessagePort } from "node:worker_threads";
-import type { RdpDebuggeeResumeAction } from "../../../gdb/rdp-debuggee.js";
 import type { SourceDebuggerComponentWorkerPorts } from "../../transport/isolate.js";
 import type { CommandResult } from "../../protocol/types.js";
 
@@ -18,12 +17,7 @@ export interface LldbIsolateWorkerData extends SourceDebuggerComponentWorkerPort
   };
 }
 
-export type LldbIsolateControlMethod =
-  | "bridge-rsp"
-  | "connect-platform"
-  | "attach"
-  | "command"
-  | "close";
+export type LldbIsolateControlMethod = "start-target" | "attach" | "command" | "close";
 
 export interface LldbIsolateControlRequest {
   type: "lldb-isolate-control-request";
@@ -54,42 +48,16 @@ export interface LldbIsolateLog {
   message: string;
 }
 
-export interface LldbIsolateResume {
-  type: "lldb-isolate-resume";
-  id: number;
-  action: RdpDebuggeeResumeAction;
-}
-
-export interface LldbIsolateRelease {
-  type: "lldb-isolate-release";
-  id: number;
-  action: RdpDebuggeeResumeAction;
-}
-
-export interface LldbIsolateSynchronizeStop {
-  type: "lldb-isolate-synchronize-stop";
-  tid?: number;
-}
-
-export interface LldbIsolateAbortStop {
-  type: "lldb-isolate-abort-stop";
-  tid?: number;
-}
-
 export type LldbIsolateHostMessage =
   | LldbIsolateControlResponse
   | LldbIsolateReady
   | LldbIsolateInitializationError
-  | LldbIsolateLog
-  | LldbIsolateRelease
-  | LldbIsolateSynchronizeStop
-  | LldbIsolateAbortStop;
+  | LldbIsolateLog;
 
-export type LldbIsolateWorkerMessage = LldbIsolateControlRequest | LldbIsolateResume;
+export type LldbIsolateWorkerMessage = LldbIsolateControlRequest;
 
 export interface LldbIsolateControlResults {
-  "bridge-rsp": number;
-  "connect-platform": void;
+  "start-target": void;
   attach: string;
   command: CommandResult;
   close: void;

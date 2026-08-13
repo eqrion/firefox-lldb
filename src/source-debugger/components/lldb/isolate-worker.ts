@@ -5,7 +5,6 @@
 import { readFile } from "node:fs/promises";
 import { workerData } from "node:worker_threads";
 import type { Logger } from "../../../logging.js";
-import type { GdbRspEndpoint } from "../../protocol/component.js";
 import { connectSourceDebuggerComponentHost } from "../../transport/host-rpc.js";
 import { serveSourceDebuggerComponentIsolate } from "../../transport/isolate.js";
 import { EmbeddedLldbComponentRuntime } from "./runtime.js";
@@ -50,20 +49,7 @@ void (async () => {
     runtime.definition,
     runtime.component
   );
-  runtime.runControl.installSynchronizeStop?.((tid) =>
-    post({ type: "lldb-isolate-synchronize-stop", ...(tid === undefined ? {} : { tid }) })
-  );
-  runtime.runControl.installAbortStop?.((tid) =>
-    post({ type: "lldb-isolate-abort-stop", ...(tid === undefined ? {} : { tid }) })
-  );
-
   const onMessage = (message: LldbIsolateWorkerMessage): void => {
-    if (message.type === "lldb-isolate-resume") {
-      runtime.runControl.resume(message.action, (action) =>
-        post({ type: "lldb-isolate-release", id: message.id, action })
-      );
-      return;
-    }
     if (message.type !== "lldb-isolate-control-request") return;
     void handleControlRequest(runtime, message).then(
       (result) => {
@@ -100,10 +86,8 @@ async function handleControlRequest(
   request: LldbIsolateControlRequest
 ): Promise<unknown> {
   switch (request.method) {
-    case "bridge-rsp":
-      return runtime.bridgeRspEndpoint(request.args[0] as GdbRspEndpoint);
-    case "connect-platform":
-      return runtime.connectPlatform(request.args[0] as GdbRspEndpoint);
+    case "start-target":
+      return runtime.startTarget();
     case "attach":
       return runtime.attach(request.args[0] as number, { attempts: request.args[1] as number });
     case "command":

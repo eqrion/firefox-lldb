@@ -31,7 +31,7 @@ It has four surfaces:
 | Surface                             | Responsibility                                                                                                                                                  |
 | ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `SourceDebuggerComponentDefinition` | Describe an installed ecosystem and probe normalized module metadata without starting its debugger engine.                                                      |
-| `SourceDebuggerComponentHost`       | Import component-scoped target resources. Today these are an ordered GDB RSP byte stream and a direct low-level Wasm debuggee.                                  |
+| `SourceDebuggerComponentHost`       | Import a component-scoped, low-level `WasmDebuggee`. Debugger-engine protocols such as GDB RSP are private component implementation details.                    |
 | `SourceDebuggerComponent`           | Accept/revoke owned modules; enumerate sources; inspect stop-scoped state, frames, scopes, and values; manage breakpoints; and begin source run operations.     |
 | `SourceDebuggerRun`                 | Represent one armed driver or observer operation, including stop observation, opaque physical-resume permissions, observer rearming, termination, and disposal. |
 
@@ -75,11 +75,11 @@ The implementation under `src/source-debugger/` mirrors those boundaries:
   `host.ts` scopes imported capabilities; `wasm-debuggee.ts` implements the
   portable raw-Wasm resource without exposing RDP actors to components.
 - `transport/` binds the portable interfaces to workers and `MessagePort`.
-  Component RPC, imported resource RPC, and RSP byte channels stay here and are
-  not part of the portable session API.
-- `components/lldb/` contains the LLDB adapter, worker, loader, and target
-  bootstrap. LLDB imports GDB RSP because that is its supported Wasm debuggee
-  interface.
+  Component RPC and imported-resource RPC stay here.
+- `components/lldb/` contains the LLDB adapter, worker, loader, private
+  platform/RSP/gdbstub stack, and target bootstrap. It adapts its imported
+  `WasmDebuggee` to GDB RSP because that is LLDB's supported Wasm interface;
+  neither the session nor component host exposes RSP.
 - `components/wasm-text/` contains an independent generated-WAT debugger,
   source generator, worker, and loader. It imports the direct `WasmDebuggee`
   resource and never uses LLDB or RSP.
@@ -123,7 +123,7 @@ The generated-WAT component provides the first route-free discovery proof
 between distinct production ecosystems. LLDB claims `dwarf` and `source-map`
 artifacts at higher confidence; `wasm-text` claims modules without source
 metadata. The browser target records the selected owner before activation, so
-LLDB's filtered RSP projection never silently consumes the WAT-owned image.
+LLDB's filtered `WasmDebuggee` view never silently consumes the WAT-owned image.
 The metadata available to probes is currently the module ID, URL, and
 host-inspected `dwarf`/`source-map` hints. Raw browser-owned module bytes do not
 fan out to candidates. Ecosystems that need to validate custom-section payloads
@@ -140,8 +140,8 @@ component-scoped debuggee host proxy. `SourceDebuggerSessionRuntime` owns the
 catalog, selected instances, broker, browser target, serialized late
 activations, and dependency-ordered teardown. LLDB's catalog definition is pure
 TypeScript; its wasm worker is not created until instantiation. Its loader
-privately handles platform connection, attach, shared RDP projections, native
-setup commands, and physical run-control wiring. A Dart, .NET, or other
+privately handles its platform server, attach shim, gdbstub, RSP connections,
+native setup commands, and physical run-control wiring. A Dart, .NET, or other
 debugger therefore does not need to implement an LLDB-shaped bootstrap,
 discovery, or host protocol.
 
@@ -149,10 +149,11 @@ The production CLI now creates one browser-owned
 `FirefoxSourceDebuggerTarget`, then passes its catalog and selected loaders to
 the generic session runtime. It no longer creates platform servers, registers
 RSP bridges, calls LLDB attach commands, handles LLDB run-control objects, or
-tracks per-component teardown. The Firefox target can re-prime the first shared
-projection if navigation races discovery; later projections snapshot that same
-stop. LLDB-specific details remain in its loader and are exercised through the
-same generic activation path as a future ecosystem integration.
+tracks per-component teardown. The Firefox target establishes one physical
+stop before discovery; component-scoped `WasmDebuggee` resources snapshot that
+same stop when opened. LLDB-specific details remain in its loader and are
+exercised through the same generic activation path as a future ecosystem
+integration.
 
 The `firefox-lldb` CLI now presents a language-generic `(sdb)` prompt. Its core
 commands call only `SourceDebuggerSession`:
@@ -184,10 +185,11 @@ route: `break lldb-b::compute_factorial`, `continue lldb-b`, and
 Existing LLDB commands continue to work during the migration. `lldb <command>`
 makes the debugger-specific escape hatch explicit.
 
-The first e2e proves the generic API against a real Firefox, gdbstub, RSP
-transport, and embedded LLDB. A second proof now creates two independent LLDB
-wasm workers and filtered RSP/gdbstub projections over one shared physical RDP
-debuggee session. Two query-distinguished Wasm modules are assigned to LLDB-A
+The first e2e proves the generic API against a real Firefox and embedded LLDB,
+including the LLDB component's private gdbstub/RSP stack. A second proof creates
+two independent LLDB wasm workers which import filtered `WasmDebuggee`
+resources over one shared physical RDP session. Two query-distinguished Wasm
+modules are assigned to LLDB-A
 and LLDB-B; both resolve independent breakpoint 1, observers arm before the
 driver releases the shared run lease, stops fan out to both LLDBs, and each
 source backtrace excludes opaque foreign activations.
@@ -254,24 +256,24 @@ failure; a later command can inspect or continue with the remaining components.
 Modules keep their original owner rather than being silently reassigned to a
 debugger that may interpret their debug information incorrectly.
 
-The imported debuggee side now has a concrete TypeScript seam as well.
-`SourceDebuggerComponentHost.connectGdbRsp()` returns an ordered, pull-based
-`GdbRspConnection` resource. In the production prototype the outer host opens
-localhost platform/per-process sockets, transfers a `MessagePort`, and the
-worker adapts it to that resource before handing it to LLDB. Thus LLDB still
-gets its required GDB RSP protocol while the isolated component never imports
-TCP, Firefox RDP, or Node socket APIs. Platform and process connections are
-registered as opaque, one-shot endpoints in `SourceDebuggerSessionHost`; the
-worker resolves them by calling its scoped `SourceDebuggerComponentHost`
-proxy. Endpoint IDs, live TCP bridges, sibling isolation, and teardown are all
-owned at session scope. The LLDB definition is created through the component
-factory's `instantiate(host)` call. This is the TypeScript shape to translate
-into Component Model resource imports later.
+The imported debuggee side has one concrete TypeScript seam:
+`SourceDebuggerComponentHost.openWasmDebuggee()`. It exposes modules and bytes,
+breakpointable byte offsets, physical frames, raw frame variables, stop
+observation, broker-controlled resume, and a resource-call projection of the
+complete Wasm machine model without leaking Firefox actors. A resume-producing
+resource call returns a deferred token. The LLDB component can arm gdbstub's
+event future immediately, but only `SourceDebuggerSession` can cause the
+component to grant the physical resume.
 
-`SourceDebuggerComponentHost.openWasmDebuggee()` is the second concrete import.
-It exposes modules and bytes, breakpointable byte offsets, physical frames,
-raw frame variables, stop observation, and broker-controlled resume without
-leaking Firefox actors. `WasmSourceDebuggerComponent` uses it directly to
+The LLDB isolate owns its platform server, attach shim, gdbstub worker, TCP
+sockets, RSP streams, and in-process LLDB channels. Its private
+`LldbWasmDebuggeeAdapter` forwards gdbstub's imported resource calls through
+`WasmDebuggee` and synthesizes the LLDB-only abort module/frame locally. The
+host and Firefox target therefore have no RSP endpoint API and no knowledge of
+LLDB's abort sentinel. A Dart, .NET, or generated-WAT component can use the
+same imported debuggee without implementing or observing GDB RSP.
+
+`WasmSourceDebuggerComponent` uses `WasmDebuggee` directly to
 generate a virtual `wasm-text://…/module.wat`, annotate only the sparse
 instruction positions Firefox actually accepts, and export generic frames,
 source/function breakpoints, `$localN` values, continue, and instruction
@@ -295,13 +297,12 @@ adapter.
    structured thread, source, breakpoint-location, scope, and lazy `SBValue`
    operations. Remove presentation parsing from `components/lldb/component.ts`.
 2. **Move raw debuggee ownership into the session (TypeScript prototype complete).** The
-   platform can now lend one physical `RdpWasmSession` to multiple filtered
-   gdbstub projections without transferring its lifetime. TCP stays in the
-   outer host and each LLDB isolate imports only a `GdbRspConnection`. A
-   first-class `SourceDebuggerSessionHost` creates component-scoped endpoints,
-   owns their live byte channels, rejects sibling use, and revokes everything
-   with the logical session. Translating that resource boundary to the
-   Component Model remains.
+   browser can now lend one physical `RdpWasmSession` through multiple filtered
+   `WasmDebuggee` resources without transferring its lifetime. Each LLDB
+   isolate privately creates its own gdbstub and RSP stack from that import. A
+   first-class `SourceDebuggerSessionHost` scopes resources to the selected
+   component and revokes them with the logical session. Translating that
+   resource boundary to a language-neutral IDL remains.
 3. **Make module assignment explicit (definition-first startup complete).**
    Components are probed asynchronously; a unique best claim gets sticky
    ownership, while ties and unsupported modules fail closed. Firefox and its
@@ -314,7 +315,7 @@ adapter.
    otherwise-identical LLDBs eager for compatibility. Route-free LLDB/WAT
    discovery is complete; richer ecosystem metadata remains.
 4. **Instantiate two LLDB components (prototype complete).** Each gets a separate LLDB worker,
-   gdbstub, RSP endpoint, pthread pool, and disjoint module set. Both observe
+   private gdbstub/RSP stack, pthread pool, and disjoint module set. Both observe
    the same physical Firefox process.
 5. **Synchronize stops and continues (handoff prototype complete).** Arm every observer,
    let one component hold the physical run-control lease, fan out stops, and

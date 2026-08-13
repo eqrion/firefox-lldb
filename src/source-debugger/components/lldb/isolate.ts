@@ -3,7 +3,6 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 import { MessageChannel, type MessagePort, Worker } from "node:worker_threads";
-import type { RdpDebuggeeResumeAction, RdpDebuggeeRunControl } from "../../../gdb/rdp-debuggee.js";
 import { noopLogger, type Logger } from "../../../logging.js";
 import type { ModuleClaim, SourceDebuggerComponent } from "../../protocol/component.js";
 import type { SourceDebuggerComponentHostBinding } from "../../target/host.js";
@@ -36,78 +35,13 @@ export interface IsolatedLldbComponentRuntimeOptions {
   requestTimeoutMs?: number;
 }
 
-class IsolatedLldbRunControl implements RdpDebuggeeRunControl {
-  readonly usesAbortSentinel: boolean;
-  readonly #resumeCallbacks = new Map<number, (action: RdpDebuggeeResumeAction) => void>();
-  #nextResumeId = 1;
-  #synchronizeStop: ((tid?: number) => void) | undefined;
-  #abortStop: ((tid?: number) => void) | undefined;
-
-  constructor(
-    private readonly send: (message: {
-      type: "lldb-isolate-resume";
-      id: number;
-      action: RdpDebuggeeResumeAction;
-    }) => void,
-    usesAbortSentinel: boolean
-  ) {
-    this.usesAbortSentinel = usesAbortSentinel;
-  }
-
-  resume(
-    action: RdpDebuggeeResumeAction,
-    resumePhysicalTarget: (action: RdpDebuggeeResumeAction) => void
-  ): void {
-    const id = this.#nextResumeId++;
-    this.#resumeCallbacks.set(id, resumePhysicalTarget);
-    this.send({ type: "lldb-isolate-resume", id, action });
-  }
-
-  installSynchronizeStop(synchronize: (tid?: number) => void): void {
-    this.#synchronizeStop = synchronize;
-  }
-
-  installAbortStop(abort: (tid?: number) => void): void {
-    this.#abortStop = abort;
-  }
-
-  release(id: number, action: RdpDebuggeeResumeAction): void {
-    const resume = this.#resumeCallbacks.get(id);
-    if (!resume) return;
-    this.#resumeCallbacks.delete(id);
-    resume(action);
-  }
-
-  synchronizeStop(tid?: number): void {
-    this.#synchronizeStop?.(tid);
-  }
-
-  abortStop(tid?: number): void {
-    this.#abortStop?.(tid);
-  }
-
-  close(): void {
-    // Dropping an unreleased lease is deliberately fail-closed: Firefox stays
-    // paused while the component/session error propagates to the frontend.
-    this.#resumeCallbacks.clear();
-  }
-}
-
 export class IsolatedLldbComponentRuntime implements SourceDebuggerComponentProbe {
-  readonly runControl: RdpDebuggeeRunControl;
-  readonly #host: SourceDebuggerComponentHostBinding;
   readonly #isolate: SourceDebuggerComponentIsolate;
   readonly #channel: LldbIsolateChannel;
   #closePromise: Promise<void> | undefined;
 
-  private constructor(
-    host: SourceDebuggerComponentHostBinding,
-    isolate: SourceDebuggerComponentIsolate,
-    channel: LldbIsolateChannel
-  ) {
-    this.#host = host;
+  private constructor(isolate: SourceDebuggerComponentIsolate, channel: LldbIsolateChannel) {
     this.#isolate = isolate;
-    this.runControl = channel.runControl;
     this.#channel = channel;
   }
 
@@ -142,7 +76,7 @@ export class IsolatedLldbComponentRuntime implements SourceDebuggerComponentProb
       options: {
         id: options.id,
         name: options.name,
-        observerResumesTarget: options.observerResumesTarget ?? true,
+        observerResumesTarget: options.observerResumesTarget ?? false,
         exclusiveModules: options.exclusiveModules ?? false,
         verbose: options.verbose ?? false,
       },
@@ -155,15 +89,10 @@ export class IsolatedLldbComponentRuntime implements SourceDebuggerComponentProb
         workerData,
         transferList: [...isolate.transferList, controlChannel.port2],
       });
-      channel = new LldbIsolateChannel(
-        worker,
-        controlChannel.port1,
-        logger,
-        options.exclusiveModules ?? false
-      );
+      channel = new LldbIsolateChannel(worker, controlChannel.port1, logger);
       await channel.ready;
       await isolate.connect();
-      return new IsolatedLldbComponentRuntime(options.host, isolate, channel);
+      return new IsolatedLldbComponentRuntime(isolate, channel);
     } catch (error) {
       isolate.close();
       if (channel) await channel.close().catch(() => {});
@@ -175,25 +104,8 @@ export class IsolatedLldbComponentRuntime implements SourceDebuggerComponentProb
     }
   }
 
-  readonly bridgeTcp = async (port: number): Promise<number> => {
-    if (this.#closePromise) throw new Error(`LLDB component ${this.component.id} is closed`);
-    const endpoint = this.#host.registerGdbRspEndpoint(port, "process");
-    try {
-      return await this.#channel.call("bridge-rsp", endpoint);
-    } catch (error) {
-      this.#host.discardGdbRspEndpoint(endpoint);
-      throw error;
-    }
-  };
-
-  async connectPlatform(port: number): Promise<void> {
-    const endpoint = this.#host.registerGdbRspEndpoint(port, "platform");
-    try {
-      await this.#channel.call("connect-platform", endpoint);
-    } catch (error) {
-      this.#host.discardGdbRspEndpoint(endpoint);
-      throw error;
-    }
+  async startTarget(): Promise<void> {
+    await this.#channel.call("start-target");
   }
 
   probeModule(module: Omit<ModuleDescriptor, "owner">): Promise<ModuleClaim> {
@@ -244,7 +156,6 @@ export class IsolatedLldbComponentRuntime implements SourceDebuggerComponentProb
 
 class LldbIsolateChannel {
   readonly ready: Promise<void>;
-  readonly runControl: IsolatedLldbRunControl;
   readonly #pending = new Map<number, PendingControl>();
   #nextId = 1;
   #closed = false;
@@ -254,17 +165,12 @@ class LldbIsolateChannel {
   constructor(
     private readonly worker: Worker,
     private readonly port: MessagePort,
-    private readonly logger: Logger,
-    usesAbortSentinel: boolean
+    private readonly logger: Logger
   ) {
     this.ready = new Promise<void>((resolve, reject) => {
       this.#resolveReady = resolve;
       this.#rejectReady = reject;
     });
-    this.runControl = new IsolatedLldbRunControl(
-      (message) => this.port.postMessage(message),
-      usesAbortSentinel
-    );
     port.on("message", this.#onMessage);
     port.on("close", this.#onPortClose);
     port.start();
@@ -336,15 +242,6 @@ class LldbIsolateChannel {
       case "lldb-isolate-log":
         this.logger[message.level](message.message);
         return;
-      case "lldb-isolate-release":
-        this.runControl.release(message.id, message.action);
-        return;
-      case "lldb-isolate-synchronize-stop":
-        this.runControl.synchronizeStop(message.tid);
-        return;
-      case "lldb-isolate-abort-stop":
-        this.runControl.abortStop(message.tid);
-        return;
     }
   };
 
@@ -366,7 +263,6 @@ class LldbIsolateChannel {
     this.#rejectReady(error);
     for (const pending of this.#pending.values()) pending.reject(error);
     this.#pending.clear();
-    this.runControl.close();
     this.port.off("message", this.#onMessage);
     this.port.off("close", this.#onPortClose);
     this.port.close();

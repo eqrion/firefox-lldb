@@ -46,10 +46,12 @@ test("generic isolate transport wires definition, instance, and scoped host impo
     );
     assert.equal((await isolate.component.describe()).name, "Fake fake");
 
-    const sibling = sessionHost.forComponent("sibling");
-    const siblingEndpoint = sibling.registerGdbRspEndpoint(65_534, "process");
-    await assert.rejects(importedHost.connectGdbRsp(siblingEndpoint), /unknown process.*rsp-/);
-    sibling.discardGdbRspEndpoint(siblingEndpoint);
+    assert.deepEqual(
+      Object.keys(importedHost).sort(),
+      ["close", "openWasmDebuggee"],
+      "the portable host must not expose debugger-engine transports"
+    );
+    await assert.rejects(importedHost.openWasmDebuggee(), /no Wasm debuggee target/);
   } finally {
     isolate.close();
     workerEndpoint.close();

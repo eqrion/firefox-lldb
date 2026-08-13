@@ -4,10 +4,19 @@
 
 import type { FrameForm, RdpWasmSession, StoppedEvent } from "../../rdp/session.js";
 import { grip } from "../../rdp/session.js";
+import {
+  RdpDebuggee,
+  type RdpDebuggeeResumeAction,
+  type RdpDebuggeeRunControl,
+  type RpcRequest,
+} from "../../gdb/rdp-debuggee.js";
+import { noopLogger, type Logger } from "../../logging.js";
 import type { SessionStopReason } from "../protocol/types.js";
 import type {
   WasmDebuggee,
+  WasmDebuggeeEngineResumeAction,
   WasmDebuggeeFrame,
+  WasmDebuggeeInvocationResult,
   WasmDebuggeeModule,
   WasmDebuggeeResumeAction,
   WasmDebuggeeStop,
@@ -15,17 +24,89 @@ import type {
   WasmDebuggeeVariable,
 } from "../protocol/wasm-debuggee.js";
 
+class DeferredResumeGate implements RdpDebuggeeRunControl {
+  readonly #pending = new Map<string, (action: RdpDebuggeeResumeAction) => void>();
+  #nextToken = 1;
+  #captured: { token: string; action: RdpDebuggeeResumeAction } | undefined;
+
+  beginInvocation(): void {
+    this.#captured = undefined;
+  }
+
+  resume(
+    action: RdpDebuggeeResumeAction,
+    resumePhysicalTarget: (action: RdpDebuggeeResumeAction) => void
+  ): void {
+    // At most one physical resume can be outstanding for one debuggee. A new
+    // proposal makes an older, ungranted observer token stale and fail-closed.
+    this.#pending.clear();
+    const token = `resume-${this.#nextToken++}`;
+    this.#pending.set(token, resumePhysicalTarget);
+    this.#captured = { token, action };
+  }
+
+  finishInvocation(): { token: string; action: RdpDebuggeeResumeAction } | undefined {
+    const captured = this.#captured;
+    this.#captured = undefined;
+    return captured;
+  }
+
+  grant(token: string, action: RdpDebuggeeResumeAction): void {
+    const resume = this.#pending.get(token);
+    if (!resume) return;
+    this.#pending.delete(token);
+    resume(action);
+  }
+
+  close(): void {
+    this.#pending.clear();
+    this.#captured = undefined;
+  }
+}
+
 /** Firefox/RDP implementation of the direct Wasm debuggee capability. One
  * instance is scoped to a SourceDebuggerComponent, but it borrows rather than
  * owns the shared physical RDP session. */
 export class FirefoxWasmDebuggee implements WasmDebuggee {
   readonly #pendingStops = new Set<() => void>();
+  readonly #resumeGate = new DeferredResumeGate();
+  readonly #resourceDebuggee: RdpDebuggee;
   #disposed = false;
 
   constructor(
     private readonly session: RdpWasmSession,
-    private readonly acceptModule: (moduleId: string) => boolean = () => true
-  ) {}
+    private readonly acceptModule: (moduleId: string) => boolean = () => true,
+    options: { logger?: Logger; onFirstContinue?: () => void } = {}
+  ) {
+    this.#resourceDebuggee = new RdpDebuggee(session, {
+      logger: options.logger ?? noopLogger,
+      runControl: this.#resumeGate,
+      // Every source file, including JavaScript, must have exactly one owner.
+      // This Wasm target currently discovers/assigns only Wasm modules, so JS
+      // frames remain opaque until a JavaScript component is installed rather
+      // than being duplicated through every LLDB projection.
+      moduleFilter: (url) => this.acceptModule(url),
+      ...(options.onFirstContinue ? { onFirstContinue: options.onFirstContinue } : {}),
+    });
+  }
+
+  static async create(
+    session: RdpWasmSession,
+    acceptModule: (moduleId: string) => boolean = () => true,
+    options: { logger?: Logger; onFirstContinue?: () => void } = {}
+  ): Promise<FirefoxWasmDebuggee> {
+    const debuggee = new FirefoxWasmDebuggee(session, acceptModule, options);
+    try {
+      if (session.hasThreads()) {
+        if (session.paused()) await debuggee.#resourceDebuggee.snapshotCurrentStop();
+        else await debuggee.#resourceDebuggee.primeStop();
+      }
+      return debuggee;
+    } catch (error) {
+      await debuggee.dispose();
+      throw error;
+    }
+  }
 
   async modules(): Promise<WasmDebuggeeModule[]> {
     this.#requireOpen();
@@ -155,9 +236,49 @@ export class FirefoxWasmDebuggee implements WasmDebuggee {
     if (tid !== undefined) this.session.interrupt(tid);
   }
 
+  async invokeResource(call: RpcRequest): Promise<WasmDebuggeeInvocationResult> {
+    this.#requireOpen();
+    this.#resumeGate.beginInvocation();
+    try {
+      const value = await this.#resourceDebuggee.dispatch(call);
+      const resume = this.#resumeGate.finishInvocation();
+      return {
+        value,
+        ...(resume ? { resume } : {}),
+      };
+    } catch (error) {
+      this.#resumeGate.finishInvocation();
+      throw error;
+    }
+  }
+
+  async grantResume(token: string, action: WasmDebuggeeEngineResumeAction): Promise<void> {
+    this.#requireOpen();
+    this.#resumeGate.grant(token, action);
+  }
+
+  async completeWaitAtCurrentStop(completion: {
+    reason: "synchronized" | "breakpoint";
+    threadId?: string;
+  }): Promise<void> {
+    this.#requireOpen();
+    const tid = completion.threadId === undefined ? undefined : parseThreadId(completion.threadId);
+    if (completion.reason === "breakpoint") this.#resourceDebuggee.breakpointStop(tid);
+    else this.#resourceDebuggee.synchronizeStop(tid);
+  }
+
+  /** Host-side user interrupt. Unlike Debuggee.interrupt, this originates
+   * outside a debugger engine and must be translated into a reportable stop. */
+  triggerInterrupt(): void {
+    this.#requireOpen();
+    this.#resourceDebuggee.triggerInterrupt();
+  }
+
   async dispose(): Promise<void> {
     if (this.#disposed) return;
     this.#disposed = true;
+    this.#resumeGate.close();
+    this.#resourceDebuggee.dispose();
     for (const cancel of [...this.#pendingStops]) cancel();
     this.#pendingStops.clear();
   }

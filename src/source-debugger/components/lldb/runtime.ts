@@ -4,16 +4,18 @@
 
 import { LLDBClient, type FileProvider } from "lldb-wasm";
 import { noopLogger, type Logger } from "../../../logging.js";
-import {
-  SOURCE_DEBUGGER_ABORT_FUNCTION,
-  type RdpDebuggeeResumeAction,
-  type RdpDebuggeeRunControl,
-} from "../../../gdb/rdp-debuggee.js";
+import { RspServer } from "../../../protocol/rsp-server.js";
+import { startAttachShim } from "../../../protocol/attach-shim.js";
+import { PlatformServer } from "../../../platform/platform-server.js";
+import { GdbServerSpawner } from "../../../platform/gdb-server-spawner.js";
+// @ts-expect-error - .mjs host has no type declarations
+import { startGdbServer } from "../../../gdb/worker/host.mjs";
+import type { SourceDebuggerComponentHost } from "../../protocol/component.js";
 import type {
-  GdbRspConnection,
-  GdbRspEndpoint,
-  SourceDebuggerComponentHost,
-} from "../../protocol/component.js";
+  WasmDebuggee,
+  WasmDebuggeeDeferredResume,
+  WasmDebuggeeEngineResumeAction,
+} from "../../protocol/wasm-debuggee.js";
 import type { ComponentRunRequest, RunId } from "../../protocol/types.js";
 import {
   LldbSourceDebuggerComponent,
@@ -21,8 +23,11 @@ import {
   type LldbComponentRunControl,
   type LldbSourceDebuggerComponentOptions,
 } from "./component.js";
+import { LldbWasmDebuggeeAdapter, SOURCE_DEBUGGER_ABORT_FUNCTION } from "./debuggee-adapter.js";
+import { connectLldbRsp, type LldbRspConnection } from "./rsp-connection.js";
 
 const LLDB_FAILED_STATUS = 6;
+const MAX_TRACE_CHARS = 4096;
 
 interface PendingRun {
   request: ComponentRunRequest;
@@ -38,11 +43,14 @@ interface PendingRun {
   }>;
 }
 
-class LldbRuntimeRunControl implements LldbComponentRunControl, RdpDebuggeeRunControl {
+/** Coordinates source-level LLDB operations with the generic session. It sees
+ * physical resume proposals from the private gdbstub adapter and turns them
+ * into SourceDebuggerRun resume tokens. */
+class LldbRuntimeRunControl implements LldbComponentRunControl {
   readonly usesAbortSentinel: boolean;
   #pending: PendingRun | undefined;
-  #synchronizeStop: ((tid?: number) => void) | undefined;
-  #abortStop: ((tid?: number) => void) | undefined;
+  #synchronizeStop: ((tid?: number) => void | Promise<void>) | undefined;
+  #abortStop: ((tid?: number) => void | Promise<void>) | undefined;
 
   constructor(
     private readonly id: string,
@@ -70,15 +78,15 @@ class LldbRuntimeRunControl implements LldbComponentRunControl, RdpDebuggeeRunCo
     });
   }
 
-  resume(
-    action: RdpDebuggeeResumeAction,
-    resumePhysicalTarget: (action: RdpDebuggeeResumeAction) => void
+  proposeResume(
+    proposed: WasmDebuggeeDeferredResume,
+    grantPhysicalResume: (action: WasmDebuggeeEngineResumeAction) => void
   ): void {
     const pending = this.#pending;
     if (!pending) {
       // Native LLDB commands issued outside SourceDebuggerSession retain their
-      // normal behavior during the migration.
-      resumePhysicalTarget(action);
+      // ordinary behavior.
+      grantPhysicalResume(proposed.action);
       return;
     }
     this.logger.debug(`[${this.id}] armed ${pending.request.runId} as ${pending.request.role}`);
@@ -88,29 +96,27 @@ class LldbRuntimeRunControl implements LldbComponentRunControl, RdpDebuggeeRunCo
       if (sequence > waiter.afterSequence) waiter.resolve(sequence);
       else pending.resumeWaiters.push(waiter);
     }
-    const releasedAction = this.#adjustResumeAction(action);
+    const releasedAction = this.#adjustResumeAction(proposed.action);
     if (releasedAction.kind === "step") pending.activeTid = releasedAction.tid;
     if (pending.request.role === "driver") {
-      pending.resumeCallbacks.set(sequence, () => resumePhysicalTarget(releasedAction));
+      pending.resumeCallbacks.set(sequence, () => grantPhysicalResume(releasedAction));
       if (this.observerResumesTarget) this.releasePhysicalResume(pending.request.runId, sequence);
     } else if (this.observerResumesTarget) {
       this.logger.debug(
         `[${this.id}] released ${pending.request.role} pause lease for ${pending.request.runId}`
       );
-      resumePhysicalTarget(releasedAction);
+      grantPhysicalResume(releasedAction);
     }
-    // A stop can reach the driver while this LLDB is between an internal
-    // step-off and its following semantic continue. Keep synchronization
-    // latched so every later local wait in this run observes the already-
-    // paused shared target instead of sleeping forever.
+    // A sibling stop can arrive while LLDB is between an internal step-off and
+    // its semantic continue. Keep the request latched across every proposal.
     if (pending.abortRequested) {
-      this.#abortStop?.(pending.activeTid);
+      void this.#abortStop?.(pending.activeTid);
     } else if (pending.synchronizeRequested) {
-      this.#synchronizeStop?.(pending.activeTid);
+      void this.#synchronizeStop?.(pending.activeTid);
     }
   }
 
-  #adjustResumeAction(action: RdpDebuggeeResumeAction): RdpDebuggeeResumeAction {
+  #adjustResumeAction(action: WasmDebuggeeEngineResumeAction): WasmDebuggeeEngineResumeAction {
     const request = this.#pending?.request;
     return action.kind === "step" &&
       this.crossComponentStepping &&
@@ -122,11 +128,10 @@ class LldbRuntimeRunControl implements LldbComponentRunControl, RdpDebuggeeRunCo
   }
 
   endRun(runId: RunId): void {
-    if (this.#pending?.request.runId === runId) {
-      this.logger.debug(`[${this.id}] completed ${runId}`);
-      for (const waiter of this.#pending.resumeWaiters) waiter.resolve(undefined);
-      this.#pending = undefined;
-    }
+    if (this.#pending?.request.runId !== runId) return;
+    this.logger.debug(`[${this.id}] completed ${runId}`);
+    for (const waiter of this.#pending.resumeWaiters) waiter.resolve(undefined);
+    this.#pending = undefined;
   }
 
   waitForPhysicalResume(runId: RunId, afterSequence: number): Promise<number | undefined> {
@@ -146,11 +151,11 @@ class LldbRuntimeRunControl implements LldbComponentRunControl, RdpDebuggeeRunCo
     resume();
   }
 
-  installSynchronizeStop(synchronize: (tid?: number) => void): void {
+  installSynchronizeStop(synchronize: (tid?: number) => void | Promise<void>): void {
     this.#synchronizeStop = synchronize;
   }
 
-  installAbortStop(abort: (tid?: number) => void): void {
+  installAbortStop(abort: (tid?: number) => void | Promise<void>): void {
     this.#abortStop = abort;
   }
 
@@ -158,7 +163,7 @@ class LldbRuntimeRunControl implements LldbComponentRunControl, RdpDebuggeeRunCo
     if (this.#pending?.request.runId !== runId) return;
     this.logger.debug(`[${this.id}] synchronizing ${runId}`);
     this.#pending.synchronizeRequested = true;
-    this.#synchronizeStop?.(this.#pending.activeTid);
+    void this.#synchronizeStop?.(this.#pending.activeTid);
   }
 
   isSynchronizing(runId: RunId): boolean {
@@ -169,7 +174,7 @@ class LldbRuntimeRunControl implements LldbComponentRunControl, RdpDebuggeeRunCo
     if (this.#pending?.request.runId !== runId) return;
     this.logger.debug(`[${this.id}] aborting ${runId} at shared stop`);
     this.#pending.abortRequested = true;
-    this.#abortStop?.(this.#pending.activeTid);
+    void this.#abortStop?.(this.#pending.activeTid);
   }
 }
 
@@ -177,25 +182,32 @@ export interface EmbeddedLldbComponentRuntimeOptions extends LldbSourceDebuggerC
   host: SourceDebuggerComponentHost;
   logger?: Logger;
   fileProvider?: FileProvider;
-  /** Whether an observer releases its own RDP pause lease after arming. Set
-   * this false when runtimes share one physical RDP debuggee session. */
+  /** Compatibility mode for a component driven without SourceDebuggerSession.
+   * Session-backed components leave observer resumes gated. */
   observerResumesTarget?: boolean;
+  verbose?: boolean;
 }
 
-// Owns one complete embedded LLDB isolation domain: its wasm worker, pthreads,
-// and in-process channels. TCP/RDP resources stay in the component host; this
-// runtime imports only transferred GDB RSP byte streams.
+/** One complete LLDB SourceDebuggerComponent isolation domain. Embedded LLDB,
+ * its platform server, attach shim, gdbstub component, and every RSP byte
+ * stream live here. Its only target import is WasmDebuggee. */
 export class EmbeddedLldbComponentRuntime {
   readonly definition: LldbSourceDebuggerComponentDefinition;
   readonly component: LldbSourceDebuggerComponent;
-  readonly runControl: RdpDebuggeeRunControl;
   readonly #client: LLDBClient;
   readonly #host: SourceDebuggerComponentHost;
   readonly #logger: Logger;
+  readonly #verbose: boolean;
+  readonly #runControl: LldbRuntimeRunControl;
   readonly #rspChannels = new Map<
     number,
-    { connection: GdbRspConnection; close: (notifyHost: boolean) => Promise<void> }
+    { connection: LldbRspConnection; close: () => Promise<void> }
   >();
+  #debuggee: WasmDebuggee | undefined;
+  #adapter: LldbWasmDebuggeeAdapter | undefined;
+  #platformRsp: RspServer | undefined;
+  #spawner: GdbServerSpawner | undefined;
+  #targetPromise: Promise<void> | undefined;
   #closePromise: Promise<void> | undefined;
 
   private constructor(
@@ -209,7 +221,8 @@ export class EmbeddedLldbComponentRuntime {
     this.definition = definition;
     this.#host = options.host;
     this.#logger = options.logger ?? noopLogger;
-    this.runControl = runtimeRunControl;
+    this.#verbose = options.verbose ?? false;
+    this.#runControl = runtimeRunControl;
     this.component = component;
   }
 
@@ -223,7 +236,7 @@ export class EmbeddedLldbComponentRuntime {
       const runtimeRunControl = new LldbRuntimeRunControl(
         options.id ?? "lldb",
         logger,
-        options.observerResumesTarget ?? true,
+        options.observerResumesTarget ?? false,
         options.exclusiveModules ?? false
       );
       let runtime: EmbeddedLldbComponentRuntime | undefined;
@@ -238,7 +251,7 @@ export class EmbeddedLldbComponentRuntime {
           : undefined,
         logger,
       });
-      const component: LldbSourceDebuggerComponent = await definition.instantiate(options.host);
+      const component = await definition.instantiate(options.host);
       runtime = new EmbeddedLldbComponentRuntime(
         client,
         options,
@@ -253,64 +266,78 @@ export class EmbeddedLldbComponentRuntime {
     }
   }
 
-  /** Import an already-connected GDB RSP byte stream from the component host.
-   * The isolated LLDB never sees the host's TCP socket or the browser-specific
-   * server which produced it. */
-  async bridgeRsp(connection: GdbRspConnection): Promise<number> {
-    if (this.#closePromise) throw new Error(`LLDB component ${this.component.id} is closed`);
-    const channelId = await this.#client.createChannel();
-    let closed = false;
-    const close = async (notifyHost: boolean): Promise<void> => {
-      if (closed) return;
-      closed = true;
-      this.#rspChannels.delete(channelId);
-      if (notifyHost) {
-        await connection.close().catch(() => {});
-      }
-      await this.#client.unbridgeChannel(channelId).catch(() => {});
-      await this.#client.destroyChannel(channelId).catch(() => {});
-    };
-
-    try {
-      this.#rspChannels.set(channelId, { connection, close });
-      await this.#client.bridgeChannel(channelId, (data) => {
-        if (!closed) {
-          void connection.write(data).catch((error) => {
-            this.#logger.error(
-              `[${this.component.id}] LLDB-to-host RSP bridge failed: ${errorMessage(error)}`
-            );
-            void close(true);
-          });
-        }
-      });
-      void (async () => {
-        for (;;) {
-          const data = await connection.read();
-          if (data === null) {
-            await close(false);
-            return;
-          }
-          await this.#client.channelServerWrite(channelId, data);
-        }
-      })().catch((error) => {
-        this.#logger.error(
-          `[${this.component.id}] host-to-LLDB RSP bridge failed: ${errorMessage(error)}`
-        );
-        void close(true);
-      });
-      return channelId;
-    } catch (error) {
-      await close(true);
-      throw error;
+  /** Build and connect the private LLDB transport stack. Idempotent. */
+  startTarget(): Promise<void> {
+    if (this.#closePromise) {
+      return Promise.reject(new Error(`LLDB component ${this.component.id} is closed`));
     }
+    return (this.#targetPromise ??= this.#startTarget());
   }
 
-  async bridgeRspEndpoint(endpoint: GdbRspEndpoint): Promise<number> {
-    return this.bridgeRsp(await this.#host.connectGdbRsp(endpoint));
-  }
+  async #startTarget(): Promise<void> {
+    const debuggee = await this.#host.openWasmDebuggee();
+    this.#debuggee = debuggee;
+    const adapter = new LldbWasmDebuggeeAdapter(
+      debuggee,
+      (resume) =>
+        this.#runControl.proposeResume(resume, (action) => {
+          void debuggee.grantResume(resume.token, action).catch((error) => {
+            this.#logger.error(
+              `[${this.component.id}] physical resume failed: ${errorMessage(error)}`
+            );
+          });
+        }),
+      this.#runControl.usesAbortSentinel
+    );
+    this.#adapter = adapter;
+    this.#runControl.installSynchronizeStop((tid) => adapter.synchronizeStop(tid));
+    this.#runControl.installAbortStop((tid) => adapter.abortStop(tid));
 
-  async connectPlatform(endpoint: GdbRspEndpoint): Promise<void> {
-    const channelId = await this.bridgeRspEndpoint(endpoint);
+    const spawner = new GdbServerSpawner(async ({ port }) => {
+      const gdbServer = startGdbServer({
+        dispatch: adapter.dispatch,
+        port: 0,
+        onInfo: (message: string) => this.#logger.debug(`[component] ${message}`),
+        onTrace: (message: string) => this.#logger.debug(`[gdbstub] ${boundedTrace(message)}`),
+        onError: (message: string) => this.#logger.error(message),
+        verbose: this.#verbose,
+      });
+      await gdbServer.ready;
+      const shim = await startAttachShim({
+        listenPort: port,
+        componentPort: gdbServer.port,
+        isValidPid: (pid) => pid === 1,
+        trace: this.#verbose ? (message) => this.#logger.debug(`[shim] ${message}`) : undefined,
+      });
+      let stopPromise: Promise<void> | undefined;
+      return {
+        port: shim.port,
+        stop: () =>
+          (stopPromise ??= (async () => {
+            const results = await Promise.allSettled([shim.close(), gdbServer.stop()]);
+            const errors = results.flatMap((result) =>
+              result.status === "rejected" ? [result.reason] : []
+            );
+            if (errors.length) throw new AggregateError(errors, "failed to stop LLDB gdbstub");
+          })()),
+      };
+    });
+    this.#spawner = spawner;
+    const platform = new PlatformServer({
+      spawner,
+      listTabs: async () => [
+        { actor: "wasm-debuggee", url: "wasm-debuggee", title: "Wasm debuggee" },
+      ],
+      wrapConnectPort: (port) => this.#bridgeTcp(port),
+    });
+    platform.tabPid("wasm-debuggee");
+    const platformRsp = new RspServer(platform, {
+      logger: this.#logger,
+      singleConnection: true,
+    });
+    this.#platformRsp = platformRsp;
+    const platformPort = await platformRsp.listen(0);
+    const channelId = await this.#bridgeTcp(platformPort);
     await this.#checkedCommand("platform select remote-gdb-server");
     await this.#checkedCommand(`platform connect inprocess://${channelId}`);
   }
@@ -319,6 +346,7 @@ export class EmbeddedLldbComponentRuntime {
     pid: number,
     options: { attempts?: number; onRetry?: (attempt: number) => void } = {}
   ): Promise<string> {
+    await this.startTarget();
     const attempts = options.attempts ?? 4;
     let lastError = "unknown attach failure";
     for (let attempt = 1; attempt <= attempts; attempt++) {
@@ -346,10 +374,69 @@ export class EmbeddedLldbComponentRuntime {
 
   close(): Promise<void> {
     return (this.#closePromise ??= (async () => {
-      await Promise.allSettled([...this.#rspChannels.values()].map(({ close }) => close(true)));
+      await this.#targetPromise?.catch(() => {});
+      const errors: unknown[] = [];
+      const clean = async (work: Promise<unknown>) => {
+        try {
+          await work;
+        } catch (error) {
+          errors.push(error);
+        }
+      };
+      await clean(this.#platformRsp?.close() ?? Promise.resolve());
+      await clean(this.#spawner?.killAll() ?? Promise.resolve());
+      await Promise.allSettled([...this.#rspChannels.values()].map(({ close }) => close()));
       this.#rspChannels.clear();
-      await this.#client.destroy();
+      await clean(this.#adapter?.dispose() ?? this.#debuggee?.dispose() ?? Promise.resolve());
+      await clean(Promise.resolve(this.#client.destroy()));
+      if (errors.length) {
+        throw new AggregateError(errors, `failed to close LLDB component ${this.component.id}`);
+      }
     })());
+  }
+
+  async #bridgeTcp(port: number): Promise<number> {
+    const connection = await connectLldbRsp(port);
+    const channelId = await this.#client.createChannel();
+    let closed = false;
+    const close = async (): Promise<void> => {
+      if (closed) return;
+      closed = true;
+      this.#rspChannels.delete(channelId);
+      await connection.close().catch(() => {});
+      await this.#client.unbridgeChannel(channelId).catch(() => {});
+      await this.#client.destroyChannel(channelId).catch(() => {});
+    };
+    try {
+      this.#rspChannels.set(channelId, { connection, close });
+      await this.#client.bridgeChannel(channelId, (data) => {
+        if (!closed) {
+          void connection.write(data).catch((error) => {
+            this.#logger.error(
+              `[${this.component.id}] LLDB RSP write failed: ${errorMessage(error)}`
+            );
+            void close();
+          });
+        }
+      });
+      void (async () => {
+        for (;;) {
+          const data = await connection.read();
+          if (data === null) {
+            await close();
+            return;
+          }
+          await this.#client.channelServerWrite(channelId, data);
+        }
+      })().catch((error) => {
+        this.#logger.error(`[${this.component.id}] LLDB RSP read failed: ${errorMessage(error)}`);
+        void close();
+      });
+      return channelId;
+    } catch (error) {
+      await close();
+      throw error;
+    }
   }
 
   async #checkedCommand(command: string): Promise<void> {
@@ -358,6 +445,11 @@ export class EmbeddedLldbComponentRuntime {
       throw new Error(result.error || result.output || `${command} failed`);
     }
   }
+}
+
+function boundedTrace(message: string): string {
+  if (message.length <= MAX_TRACE_CHARS) return message;
+  return `${message.slice(0, MAX_TRACE_CHARS)}… [${message.length - MAX_TRACE_CHARS} chars omitted]`;
 }
 
 function errorMessage(error: unknown): string {
