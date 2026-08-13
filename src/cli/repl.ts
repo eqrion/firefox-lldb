@@ -41,6 +41,8 @@ const GENERIC_HELP = `\
 Source debugger commands:
   components                 list loaded SourceDebuggerComponents
   modules                    list Wasm modules and their owners
+  sources                    list sources exported by the components
+  list                       show source around the selected frame
   threads                    list threads
   bt                         show the composed source backtrace
   frame <N>                  select and display a source frame
@@ -267,6 +269,16 @@ export function runRepl(deps: ReplDeps): Repl {
         }
         return true;
       }
+      case "sources": {
+        const sources = await deps.session.sources(arg || undefined);
+        if (!sources.length) write("no sources");
+        for (const source of sources) {
+          write(
+            `${source.id}${source.moduleId ? `\t[${source.moduleId}]` : ""}${source.language ? `\t${source.language}` : ""}`
+          );
+        }
+        return true;
+      }
       case "threads": {
         const threads = await deps.session.threads();
         if (!threads.length) write("no threads");
@@ -293,6 +305,24 @@ export function runRepl(deps: ReplDeps): Repl {
         if (!frame) throw new Error(`no frame ${words[0] ?? "0"}`);
         selectedFrameId = frame.id;
         write(formatSourceFrame(index, frame));
+        return true;
+      }
+      case "list": {
+        const frameId = await selectedFrame();
+        const frame = (await deps.session.frames()).find(({ id }) => id === frameId);
+        if (!frame?.location) throw new Error("the selected frame has no source location");
+        const source = await deps.session.source(frame.location.sourceId);
+        if (!source?.content) {
+          throw new Error(`source text is unavailable for ${frame.location.sourceId}`);
+        }
+        const lines = source.content.split("\n");
+        const first = Math.max(1, frame.location.line - 5);
+        const last = Math.min(lines.length, frame.location.line + 5);
+        for (let line = first; line <= last; line++) {
+          write(
+            `${line === frame.location.line ? "=>" : "  "} ${String(line).padStart(5)} ${lines[line - 1]}`
+          );
+        }
         return true;
       }
       case "locals": {

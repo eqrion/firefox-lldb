@@ -21,6 +21,9 @@ import { SourceDebuggerSession } from "./session.js";
 
 export interface SourceDebuggerDiscoveryTarget {
   modules(): Promise<UnownedModuleDescriptor[]>;
+  assignModuleOwner?(moduleId: string, componentId: string): void;
+  removeModuleOwner?(moduleId: string): void;
+  moduleOwner?(moduleId: string): string | undefined;
   close(): void | Promise<void>;
 }
 
@@ -71,6 +74,9 @@ export class SourceDebuggerSessionRuntime {
       getRdpSession: options.getRdpSession,
       resolveModuleOwner,
       ensureComponent: async (id) => (await this.#ensureComponent(id)).component,
+      assignModuleOwner: (moduleId, componentId) =>
+        options.target?.assignModuleOwner?.(moduleId, componentId),
+      removeModuleOwner: (moduleId) => options.target?.removeModuleOwner?.(moduleId),
       logger: options.logger,
     });
   }
@@ -82,7 +88,14 @@ export class SourceDebuggerSessionRuntime {
   static async load(
     options: SourceDebuggerSessionRuntimeOptions
   ): Promise<SourceDebuggerSessionRuntime> {
-    const host = options.host ?? new SourceDebuggerSessionHost({ logger: options.logger });
+    const host =
+      options.host ??
+      new SourceDebuggerSessionHost({
+        logger: options.logger,
+        rdpSession: options.getRdpSession?.(),
+        canAccessWasmModule: (componentId, moduleId) =>
+          options.target?.moduleOwner?.(moduleId) === componentId,
+      });
     let catalog: SourceDebuggerComponentCatalog | undefined;
     const components: LoadedSourceDebuggerComponent[] = [];
     try {
@@ -95,7 +108,11 @@ export class SourceDebuggerSessionRuntime {
       if (modules.length === 0) {
         for (const id of options.fallbackComponentIds ?? []) selectedIds.add(id);
       } else {
-        for (const module of modules) selectedIds.add(await resolveModuleOwner(module));
+        for (const module of modules) {
+          const owner = await resolveModuleOwner(module);
+          selectedIds.add(owner);
+          options.target?.assignModuleOwner?.(module.id, owner);
+        }
       }
       if (selectedIds.size === 0) {
         throw new Error(

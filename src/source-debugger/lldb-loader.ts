@@ -28,6 +28,10 @@ export interface LldbSourceDebuggerTargetOptions {
   target: FirefoxSourceDebuggerTarget;
   routes: readonly SourceDebuggerComponentRoute[];
   routedComponents?: boolean;
+  /** Filter Wasm images from the target's session ownership registry instead
+   * of exposing every module to LLDB. JavaScript remains visible so LLDB can
+   * still contribute JS frames to a mixed stack. */
+  ownershipFilteredModules?: boolean;
   logger?: Logger;
   /** Status and lifecycle text for the frontend. */
   onOutput?: (message: string) => void;
@@ -44,6 +48,7 @@ export class LldbSourceDebuggerTarget {
   readonly #target: FirefoxSourceDebuggerTarget;
   readonly #routes: readonly SourceDebuggerComponentRoute[];
   readonly #routedComponents: boolean;
+  readonly #ownershipFilteredModules: boolean;
   readonly #logger: Logger;
   readonly #onOutput: (message: string) => void;
   readonly #activeRuntimes = new Map<string, IsolatedLldbComponentRuntime>();
@@ -53,6 +58,7 @@ export class LldbSourceDebuggerTarget {
     this.#target = options.target;
     this.#routes = options.routes;
     this.#routedComponents = options.routedComponents ?? false;
+    this.#ownershipFilteredModules = options.ownershipFilteredModules ?? false;
     this.#logger = options.logger ?? noopLogger;
     this.#onOutput = options.onOutput ?? (() => {});
     this.#target.onDetached(() => {
@@ -91,7 +97,12 @@ export class LldbSourceDebuggerTarget {
               moduleFilter: (url: string, kind: "wasm" | "javascript") =>
                 kind === "wasm" && componentForModuleUrl(this.#routes, url).id === route.id,
             }
-          : {}),
+          : this.#ownershipFilteredModules
+            ? {
+                moduleFilter: (url: string, kind: "wasm" | "javascript") =>
+                  kind === "javascript" || this.#target.moduleOwner(url) === runtime.id,
+              }
+            : {}),
       });
       if (primary) this.#primaryId = runtime.id;
 

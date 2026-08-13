@@ -60,6 +60,13 @@ custom-section names once and sends only normalized `dwarf`/`source-map` hints
 in the module descriptor. LLDB gives those artifacts stronger claims while
 remaining a low-confidence fallback for unrecognized Wasm.
 
+The installed `wasm-text` definition outclaims that LLDB fallback when a
+module has neither DWARF nor a source map. Its instance imports a direct async
+Wasm debuggee resource from `SourceDebuggerSessionHost`, generates annotated
+virtual WAT, and implements generic frames, breakpoints, raw locals, continue,
+and instruction step-in without gdbstub/RSP or an abort sentinel. The target's
+owner registry filters that image out of LLDB's projection before attach.
+
 With multiple Firefox threads, an observer may be locally stepping a stale
 breakpoint on a worker when a sibling stops the main thread. The debuggee WIT
 interface carries an internal `synchronized(tid)` event for this case. The

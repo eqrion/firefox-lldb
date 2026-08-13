@@ -34,7 +34,11 @@ The first implementation lives under `src/source-debugger/`:
 - `../wasm/metadata.ts` scans custom-section names in the host and normalizes
   them into small, payload-free debug-info hints.
 - `host.ts` owns one session's imported debuggee capabilities and issues
-  component-scoped, one-shot RSP endpoints.
+  component-scoped direct-Wasm resources and one-shot RSP endpoints.
+- `wasm-debuggee.ts` defines the direct, asynchronous low-level Wasm debuggee
+  capability and adapts it to the shared Firefox RDP session.
+- `wasm-source-component.ts` is an independent generated-WAT source debugger;
+  `wasm-text.ts` correlates printed instructions with Firefox byte offsets.
 - `host-rpc.ts` projects those imported capabilities into an isolate without
   exposing TCP, RDP, or Node APIs.
 - `rsp-byte-channel.ts` adapts host-owned TCP endpoints to transferable RSP
@@ -97,7 +101,11 @@ e2e installs an unsupported fake ecosystem alongside LLDB and proves that both
 definitions are probed while only LLDB's worker is created. A second e2e loads
 a new routed artifact after startup, observes the runtime create a second
 isolated LLDB, and stops at that debugger's breakpoint on the next run.
-Route-free discovery between distinct production ecosystems remains.
+The generated-WAT component provides the first route-free discovery proof
+between distinct production ecosystems. LLDB claims `dwarf` and `source-map`
+artifacts at higher confidence; `wasm-text` claims modules without source
+metadata. The browser target records the selected owner before activation, so
+LLDB's filtered RSP projection never silently consumes the WAT-owned image.
 The metadata available to probes is currently the module ID, URL, and
 host-inspected `dwarf`/`source-map` hints. Raw browser-owned module bytes do not
 fan out to candidates. Ecosystems that need to validate custom-section payloads
@@ -134,6 +142,8 @@ commands call only `SourceDebuggerSession`:
 ```text
 components
 modules
+sources
+list
 threads
 bt
 frame 0
@@ -240,6 +250,18 @@ owned at session scope. The LLDB definition is created through the component
 factory's `instantiate(host)` call. This is the TypeScript shape to translate
 into Component Model resource imports later.
 
+`SourceDebuggerComponentHost.openWasmDebuggee()` is the second concrete import.
+It exposes modules and bytes, breakpointable byte offsets, physical frames,
+raw frame variables, stop observation, and broker-controlled resume without
+leaking Firefox actors. `WasmSourceDebuggerComponent` uses it directly to
+generate a virtual `wasm-text://…/module.wat`, annotate only the sparse
+instruction positions Firefox actually accepts, and export generic frames,
+source/function breakpoints, `$localN` values, continue, and instruction
+step-in. It shares the physical stop with LLDB but has no private debugger
+thread plan, so sibling synchronization and abort are no-ops rather than an
+abort-sentinel implementation. Step-over/out and Component Model isolation for
+this component remain follow-up work.
+
 LLDB scopes currently select and materialize frames through the public command
 interpreter. The bulk SB wrapper runs on a different wasm pthread, cannot
 materialize non-top `DW_OP_WASM_location`, and can leave the next run-control
@@ -270,8 +292,8 @@ adapter.
    now instantiates and attaches a newly selected owner before the next run;
    the real-Firefox proof dynamically adds a second routed Wasm module and
    stops in its newly-created LLDB. Explicit CLI URL routes keep
-   otherwise-identical LLDBs eager for compatibility. Route-free discovery
-   between distinct production ecosystems and richer metadata remain.
+   otherwise-identical LLDBs eager for compatibility. Route-free LLDB/WAT
+   discovery is complete; richer ecosystem metadata remains.
 4. **Instantiate two LLDB components (prototype complete).** Each gets a separate LLDB worker,
    gdbstub, RSP endpoint, pthread pool, and disjoint module set. Both observe
    the same physical Firefox process.
@@ -338,3 +360,9 @@ one `(sdb)` session that can:
 - step in, over, and out across ownership boundaries;
 - surface a breakpoint from one component during the other's active step; and
 - repeat that sequence with multiple Firefox threads without deadlock.
+
+The independent-component proof adds one DWARF module owned by real wasm LLDB
+and one metadata-free module owned by `wasm-text`. With no URL routes, the real
+CLI hits a generated-WAT breakpoint while LLDB drives, composes the WAT callee
+over the LLDB caller, lists annotated virtual source and raw locals, then
+reverses the roles so an LLDB breakpoint preempts a direct-Wasm-driven run.

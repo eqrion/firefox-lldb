@@ -10,6 +10,8 @@ import {
   type HostRspByteChannel,
 } from "./rsp-byte-channel.js";
 import type { ComponentId } from "./types.js";
+import { FirefoxWasmDebuggee, type WasmDebuggee } from "./wasm-debuggee.js";
+import type { RdpWasmSession } from "../rdp/session.js";
 
 interface RegisteredRspEndpoint {
   componentId: ComponentId;
@@ -33,14 +35,27 @@ export interface SourceDebuggerComponentHostBinding extends SourceDebuggerCompon
  * TCP bridges so session shutdown can revoke them centrally. */
 export class SourceDebuggerSessionHost {
   readonly #logger: Logger;
+  readonly #rdpSession: RdpWasmSession | undefined;
+  readonly #canAccessWasmModule:
+    | ((componentId: ComponentId, moduleId: string) => boolean)
+    | undefined;
   readonly #bindings = new Map<ComponentId, SourceDebuggerComponentHostBinding>();
   readonly #endpoints = new Map<string, RegisteredRspEndpoint>();
   readonly #channels = new Set<HostRspByteChannel>();
+  readonly #wasmDebuggees = new Set<WasmDebuggee>();
   #nextEndpointId = 1;
   #closed = false;
 
-  constructor(options: { logger?: Logger } = {}) {
+  constructor(
+    options: {
+      logger?: Logger;
+      rdpSession?: RdpWasmSession;
+      canAccessWasmModule?: (componentId: ComponentId, moduleId: string) => boolean;
+    } = {}
+  ) {
     this.#logger = options.logger ?? noopLogger;
+    this.#rdpSession = options.rdpSession;
+    this.#canAccessWasmModule = options.canAccessWasmModule;
   }
 
   forComponent(componentId: ComponentId): SourceDebuggerComponentHostBinding {
@@ -59,6 +74,20 @@ export class SourceDebuggerSessionHost {
         const channel = await this.#openGdbRspChannel(componentId, endpoint);
         return connectRspByteChannel(channel.componentPort);
       },
+      openWasmDebuggee: async (): Promise<WasmDebuggee> => {
+        if (this.#closed) throw new Error("SourceDebuggerSessionHost is closed");
+        if (!this.#rdpSession) {
+          throw new Error("SourceDebuggerSessionHost has no direct Wasm debuggee target");
+        }
+        const debuggee = new FirefoxWasmDebuggee(
+          this.#rdpSession,
+          this.#canAccessWasmModule
+            ? (moduleId) => this.#canAccessWasmModule!(componentId, moduleId)
+            : undefined
+        );
+        this.#wasmDebuggees.add(debuggee);
+        return debuggee;
+      },
     };
     this.#bindings.set(componentId, binding);
     return binding;
@@ -69,6 +98,8 @@ export class SourceDebuggerSessionHost {
     this.#closed = true;
     this.#endpoints.clear();
     this.#bindings.clear();
+    for (const debuggee of this.#wasmDebuggees) debuggee.dispose();
+    this.#wasmDebuggees.clear();
     for (const channel of this.#channels) channel.close();
     this.#channels.clear();
   }

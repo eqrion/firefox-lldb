@@ -28,6 +28,7 @@ import type {
   StopId,
   ThreadId,
   SourceDebuggerComponentDescriptor,
+  SourceFile,
 } from "./types.js";
 
 export interface SourceDebuggerSessionOptions {
@@ -37,6 +38,8 @@ export interface SourceDebuggerSessionOptions {
   /** Lazily create and attach an installed component selected for a module
    * which appeared after initial discovery. Called only while stopped. */
   ensureComponent?: (componentId: ComponentId) => Promise<SourceDebuggerComponentInstance>;
+  assignModuleOwner?: (moduleId: string, componentId: ComponentId) => void;
+  removeModuleOwner?: (moduleId: string) => void;
   /** Imported debuggee capabilities owned and revoked with this session. */
   debuggeeHost?: SourceDebuggerSessionHost;
   logger?: Logger;
@@ -68,6 +71,8 @@ export class SourceDebuggerSession {
     | ((componentId: ComponentId) => Promise<SourceDebuggerComponentInstance>)
     | undefined;
   readonly #debuggeeHost: SourceDebuggerSessionHost | undefined;
+  readonly #assignModuleOwner: ((moduleId: string, componentId: ComponentId) => void) | undefined;
+  readonly #removeModuleOwner: ((moduleId: string) => void) | undefined;
   readonly #logger: Logger;
   readonly #frames = new Map<LogicalFrameId, LogicalFrame>();
   readonly #breakpointRoutes = new Map<BreakpointId, BreakpointRoute>();
@@ -94,6 +99,8 @@ export class SourceDebuggerSession {
     this.#resolveModuleOwner = options.resolveModuleOwner ?? (async () => this.#components[0].id);
     this.#ensureComponent = options.ensureComponent;
     this.#debuggeeHost = options.debuggeeHost;
+    this.#assignModuleOwner = options.assignModuleOwner;
+    this.#removeModuleOwner = options.removeModuleOwner;
     this.#logger = options.logger ?? noopLogger;
     this.#stateComponentId = this.#components[0].id;
   }
@@ -148,6 +155,21 @@ export class SourceDebuggerSession {
     return (this.#moduleSync ??= this.#refreshModules().finally(() => {
       this.#moduleSync = undefined;
     }));
+  }
+
+  async sources(moduleId?: string): Promise<SourceFile[]> {
+    await this.modules();
+    if (moduleId) {
+      const module = this.#moduleById.get(moduleId);
+      if (!module) throw new Error(`unknown Wasm module ${moduleId}`);
+      const component = this.#component(module.owner);
+      return this.#invoke(component, "sources", () => component.sources(moduleId));
+    }
+    return (await this.#collectAvailable("sources", (component) => component.sources())).flat();
+  }
+
+  async source(sourceId: string): Promise<SourceFile | undefined> {
+    return (await this.sources()).find(({ id }) => id === sourceId);
   }
 
   async state(): Promise<SessionState> {
@@ -398,6 +420,7 @@ export class SourceDebuggerSession {
       // discovery on every refresh could silently move it between debuggers if
       // a component is installed, removed, or changes its probe result.
       const owner = await this.#resolveModuleOwner(module);
+      this.#assignModuleOwner?.(module.id, owner);
       if (!this.#componentById.has(owner)) {
         if (!this.#ensureComponent) {
           throw new Error(`unknown SourceDebuggerComponent ${owner}`);
@@ -415,6 +438,10 @@ export class SourceDebuggerSession {
       }
       this.#knownComponent(owner);
       next.set(module.id, { ...module, owner });
+    }
+
+    for (const id of this.#moduleById.keys()) {
+      if (!next.has(id)) this.#removeModuleOwner?.(id);
     }
 
     for (const component of this.#activeComponents()) {

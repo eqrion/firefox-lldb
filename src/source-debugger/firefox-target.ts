@@ -44,6 +44,7 @@ export class FirefoxSourceDebuggerTarget {
   readonly #onFirefoxExit: () => void;
   readonly #detachListeners = new Set<() => void>();
   readonly #projections = new Set<FirefoxGdbRspProjection>();
+  readonly #moduleOwnerByUrl = new Map<string, string>();
   #interrupt: (() => void) | undefined;
   #closePromise: Promise<void> | undefined;
 
@@ -121,6 +122,18 @@ export class FirefoxSourceDebuggerTarget {
         };
       })
     );
+  }
+
+  assignModuleOwner(moduleId: string, componentId: string): void {
+    this.#moduleOwnerByUrl.set(moduleId, componentId);
+  }
+
+  removeModuleOwner(moduleId: string): void {
+    this.#moduleOwnerByUrl.delete(moduleId);
+  }
+
+  moduleOwner(moduleId: string): string | undefined {
+    return this.#moduleOwnerByUrl.get(moduleId);
   }
 
   async createGdbRspProjection(
@@ -219,6 +232,7 @@ export class FirefoxSourceDebuggerTarget {
       }
     }
     this.#detachListeners.clear();
+    this.#moduleOwnerByUrl.clear();
     this.session.close();
     try {
       await this.#firefox?.close();

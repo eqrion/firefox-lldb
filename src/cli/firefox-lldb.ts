@@ -17,6 +17,7 @@ import {
   LldbSourceDebuggerTarget,
 } from "../source-debugger/lldb-loader.js";
 import { SourceDebuggerSessionRuntime } from "../source-debugger/runtime.js";
+import { WasmSourceDebuggerComponentLoader } from "../source-debugger/wasm-source-component.js";
 import {
   createRoutedModuleOwnerResolver,
   parseComponentRoutes,
@@ -55,25 +56,32 @@ async function main(): Promise<void> {
     target,
     routes,
     routedComponents,
+    ownershipFilteredModules: !routedComponents,
     logger,
     onOutput: print,
   });
-  const loaders = routes.map(
+  const lldbLoaders = routes.map(
     (route) =>
       new LldbSourceDebuggerComponentLoader(lldbTarget, route, {
         name: routes.length === 1 && route.id === "lldb" ? "LLDB" : `LLDB (${route.id})`,
         logger: sourceLogger,
-        observerResumesTarget: routes.length === 1,
-        exclusiveModules: routedComponents,
+        observerResumesTarget: false,
+        exclusiveModules: true,
         verbose: verbose || sourceTrace,
       })
   );
+  const loaders = [...lldbLoaders, new WasmSourceDebuggerComponentLoader()];
   const runtime = await SourceDebuggerSessionRuntime.load({
     loaders,
     target,
     getRdpSession: () => target.session,
-    createModuleOwnerResolver: (definitions) =>
-      createRoutedModuleOwnerResolver(routes, definitions),
+    ...(routedComponents
+      ? {
+          createModuleOwnerResolver: (
+            definitions: Parameters<typeof createRoutedModuleOwnerResolver>[1]
+          ) => createRoutedModuleOwnerResolver(routes, definitions),
+        }
+      : {}),
     eagerComponentIds: routedComponents ? routes.map(({ id }) => id) : [],
     fallbackComponentIds: routes.map(({ id }) => id),
     logger: sourceLogger,

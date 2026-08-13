@@ -60,6 +60,9 @@ export interface SourceFile {
   moduleId?: ModuleId;
   url: string;
   language?: string;
+  /** Virtual sources such as generated WebAssembly text can carry their
+   * contents directly instead of requiring a filesystem or URL fetch. */
+  content?: string;
 }
 
 export interface SourceLocation {

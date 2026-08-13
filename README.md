@@ -89,6 +89,11 @@ real asynchronous `probeModule()` still has to accept it. Future Dart/.NET/etc.
 components can instead be selected directly by unique artifact-driven probe
 confidence, without URL routes.
 
+That route-free path is now exercised by the built-in `wasm-text` fallback.
+LLDB claims DWARF and source-map modules; a module with neither is assigned to
+an independent direct-Wasm debugger which generates a virtual `module.wat`.
+It does not use LLDB, gdbstub, RSP, or the LLDB abort sentinel.
+
 Each installed ecosystem enters through a generic
 `SourceDebuggerComponentLoader`. A shared `SourceDebuggerSessionHost` gives the
 resulting isolate a component-scoped debuggee interface and owns its RSP
@@ -114,6 +119,9 @@ At the `(sdb)` prompt, qualify ambiguous commands with the component ID:
 
 Frame-relative commands such as `locals`, `p`, `step`, `next`, and `finish`
 route through the selected frame's component automatically.
+`sources` lists virtual and conventional component sources, and `list` shows
+source around the selected frame. Generated WAT annotates each Firefox-
+breakable instruction with its module byte offset.
 `step` can hand off through opaque JavaScript into a Wasm frame owned by a
 different component; `finish` can return through the same mixed stack. `next`
 suppresses foreign activations, but a real breakpoint owned by the foreign
@@ -125,7 +133,7 @@ siblings; the `components` command shows its failure state.
 
 ### Preparing your wasm
 
-Your module needs debug info for source-level debugging to work:
+Rich source-level debugging still needs debug information:
 
 - **Emscripten / C / C++:** compile with `-g` (e.g. `emcc app.cpp -g -O0 -o app.js`).
 - **Rust / wasm-pack:** debug builds embed DWARF by default.
@@ -134,6 +142,10 @@ Your module needs debug info for source-level debugging to work:
   debug info from the source map automatically at attach time. Breakpoints and
   source listing should work, but you won't get variable printing or
   evaluation.
+- **No source metadata:** the `wasm-text` fallback exposes generated canonical
+  WAT, breakpoints on Firefox-breakable instructions, function breakpoints when
+  names or exports are present, raw `$localN` values, and instruction step-in.
+  The original source formatting and identifiers cannot be recovered.
 
 Unoptimized builds (`-O0`) give the most faithful stepping and variable
 inspection. Optimized builds may inline or drop variables.

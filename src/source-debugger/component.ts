@@ -21,6 +21,7 @@ import type {
   StopId,
   ThreadId,
 } from "./types.js";
+import type { WasmDebuggee } from "./wasm-debuggee.js";
 
 export interface ModuleClaim {
   supported: boolean;
@@ -49,6 +50,10 @@ export interface GdbRspEndpoint {
  * can become WIT resources without standardizing TCP or Node APIs. */
 export interface SourceDebuggerComponentHost {
   connectGdbRsp(endpoint: GdbRspEndpoint): Promise<GdbRspConnection>;
+  /** Direct, asynchronous form of the low-level Wasm debuggee capability.
+   * It is optional during the TypeScript migration because existing isolated
+   * LLDB components import only GDB RSP. */
+  openWasmDebuggee?(): Promise<WasmDebuggee>;
 }
 
 export interface SourceDebuggerComponentDefinition {

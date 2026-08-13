@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>LLDB and Wasm Text Components</title>
+</head>
+<body>
+  <script src="math.js"></script>
+  <script>
+    let interleavedA;
+    let factorialA;
+    let factorialWat;
+
+    const watModule = WebAssembly.instantiateStreaming(fetch("plain.wasm?component=wat"))
+      .then(({ instance }) => {
+        factorialWat = instance.exports.wat_factorial;
+        globalThis.factorialBForDebugger = factorialWat;
+      });
+
+    const dwarfModule = MathModule({ locateFile: path => `${path}?component=dwarf` })
+      .then(module => {
+        factorialA = module.cwrap('compute_factorial', 'number', ['number']);
+        interleavedA = module.cwrap('call_other_factorial', 'number', ['number']);
+      });
+
+    globalThis.debuggersReady = Promise.all([watModule, dwarfModule]);
+
+    function runDwarf() {
+      return factorialA(8);
+    }
+
+    function runWat() {
+      return factorialWat(7);
+    }
+
+    function runMixed() {
+      return interleavedA(7);
+    }
+  </script>
+</body>
+</html>
