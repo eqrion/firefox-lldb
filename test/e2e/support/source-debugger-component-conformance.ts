@@ -10,12 +10,14 @@ import {
   validateSourceValue,
 } from "../../../src/source-debugger/protocol/validation.js";
 import type { ModuleDescriptor } from "../../../src/source-debugger/protocol/types.js";
-import type { LoadedSourceDebuggerComponent } from "../../../src/source-debugger/session/loader.js";
+import type { SourceDebuggerComponentDefinition } from "../../../src/source-debugger/protocol/component.js";
+import type { SourceDebuggerComponentInstance } from "../../../src/source-debugger/session/loader.js";
 import type { SourceDebuggerSession } from "../../../src/source-debugger/session/session.js";
 
 export interface SourceDebuggerComponentConformanceFixture {
   session: SourceDebuggerSession;
-  component(id: string): LoadedSourceDebuggerComponent;
+  component(id: string): SourceDebuggerComponentInstance;
+  definition(id: string): SourceDebuggerComponentDefinition;
 }
 
 export interface SourceDebuggerComponentConformanceContract {
@@ -45,12 +47,13 @@ export async function runSourceDebuggerComponentConformance(
   contract: SourceDebuggerComponentConformanceContract
 ): Promise<void> {
   const loaded = fixture.component(contract.componentId);
+  const definition = fixture.definition(contract.componentId);
   const component = loaded.component;
   let ownedModule: ModuleDescriptor | undefined;
 
   await test.test("definition, descriptor, and ownership probe", async () => {
     const definitionDescriptor = validateComponentDescriptor(
-      await loaded.definition.describe(),
+      await definition.describe(),
       contract.componentId
     );
     const componentDescriptor = validateComponentDescriptor(
@@ -67,12 +70,10 @@ export async function runSourceDebuggerComponentConformance(
     const { owner: _owner, ...unowned } = ownedModule;
     const definitionClaim = validateModuleClaim(
       contract.componentId,
-      await loaded.definition.probeModule(unowned)
+      await definition.probeModule(unowned)
     );
-    const claim = validateModuleClaim(contract.componentId, await loaded.probeModule(unowned));
-    assert.deepEqual(claim, definitionClaim);
-    assert.equal(claim.supported, true, claim.reason);
-    assert.ok(claim.confidence > 0);
+    assert.equal(definitionClaim.supported, true, definitionClaim.reason);
+    assert.ok(definitionClaim.confidence > 0);
 
     await assert.rejects(
       component.addModules(

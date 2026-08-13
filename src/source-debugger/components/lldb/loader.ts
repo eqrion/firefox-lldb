@@ -4,24 +4,21 @@
 
 import { noopLogger, type Logger } from "../../../logging.js";
 import type {
-  ModuleClaim,
   SourceDebuggerComponentDefinition,
   SourceDebuggerComponent,
   SourceDebuggerComponentHost,
 } from "../../protocol/component.js";
-import type { SourceDebuggerComponentRoute } from "../../config.js";
+import type { ComponentId } from "../../protocol/types.js";
 import { lldbSourceDebuggerDescriptor, probeLldbSourceDebuggerModule } from "./component.js";
 import {
   IsolatedLldbComponentRuntime,
   type IsolatedLldbComponentRuntimeOptions,
 } from "./isolate.js";
 import type {
-  LoadedSourceDebuggerComponent,
+  SourceDebuggerComponentInstance,
   SourceDebuggerComponentActivation,
   SourceDebuggerComponentLoader,
-  LoadedSourceDebuggerComponentDefinition,
 } from "../../session/loader.js";
-import type { ModuleDescriptor } from "../../protocol/types.js";
 
 export interface LldbComponentActivatorOptions {
   automaticAttach: boolean;
@@ -60,10 +57,7 @@ export class LldbComponentActivator {
     });
   }
 
-  async activate(
-    runtime: IsolatedLldbComponentRuntime,
-    route: SourceDebuggerComponentRoute
-  ): Promise<LldbTargetActivation> {
+  async activate(runtime: IsolatedLldbComponentRuntime): Promise<LldbTargetActivation> {
     if (this.#activeRuntimes.has(runtime.id)) {
       throw new Error(`SourceDebuggerComponent ${runtime.id} is already active`);
     }
@@ -73,7 +67,7 @@ export class LldbComponentActivator {
     // detach handler resets it and the next attach attempt starts cleanly.
     this.#activeRuntimes.set(runtime.id, runtime);
     try {
-      if (!primary) this.#onOutput(`attaching ${route.id}...`);
+      if (!primary) this.#onOutput(`attaching ${runtime.id}...`);
       await runtime.startTarget();
       if (primary) this.#primaryId = runtime.id;
 
@@ -92,7 +86,7 @@ export class LldbComponentActivator {
             this.#onOutput(
               primary
                 ? `automatic attach attempt ${attempt} was interrupted; retrying...`
-                : `${route.id} attach attempt ${attempt} was interrupted; retrying...`
+                : `${runtime.id} attach attempt ${attempt} was interrupted; retrying...`
             ),
         });
         if (primary) readyMessage = attached;
@@ -138,76 +132,50 @@ export type LldbSourceDebuggerComponentLoaderOptions = Omit<
 
 /** Installed LLDB ecosystem entry for the generic component catalog. */
 export class LldbSourceDebuggerComponentLoader implements SourceDebuggerComponentLoader {
-  readonly id: string;
+  readonly definition: SourceDebuggerComponentDefinition;
+  readonly #id: ComponentId;
 
   constructor(
     private readonly activator: LldbComponentActivator,
-    private readonly route: SourceDebuggerComponentRoute,
+    id: ComponentId,
     private readonly options: LldbSourceDebuggerComponentLoaderOptions = {}
   ) {
-    this.id = route.id;
-  }
-
-  async loadDefinition(): Promise<LoadedSourceDebuggerComponentDefinition> {
-    const definition: SourceDebuggerComponentDefinition = {
-      describe: async () => lldbSourceDebuggerDescriptor({ id: this.id, name: this.options.name }),
+    this.#id = id;
+    this.definition = {
+      describe: async () => lldbSourceDebuggerDescriptor({ id: this.#id, name: this.options.name }),
       probeModule: probeLldbSourceDebuggerModule,
     };
-    return {
-      id: this.id,
-      definition,
-      probeModule: definition.probeModule,
-      close: () => {},
-    };
   }
 
-  async instantiate(host: SourceDebuggerComponentHost): Promise<LoadedSourceDebuggerComponent> {
+  async instantiate(host: SourceDebuggerComponentHost): Promise<SourceDebuggerComponentInstance> {
     const runtime = await IsolatedLldbComponentRuntime.create({
       ...this.options,
-      id: this.id,
+      id: this.#id,
       host,
     });
-    return new LoadedLldbSourceDebuggerComponent(runtime, this.activator, this.route);
+    return new LoadedLldbSourceDebuggerComponent(runtime, this.activator);
   }
 }
 
-class LoadedLldbSourceDebuggerComponent implements LoadedSourceDebuggerComponent {
+class LoadedLldbSourceDebuggerComponent implements SourceDebuggerComponentInstance {
   readonly #runtime: IsolatedLldbComponentRuntime;
   readonly #activator: LldbComponentActivator;
-  readonly #route: SourceDebuggerComponentRoute;
   #activation: LldbTargetActivation | undefined;
   #activationPromise: Promise<SourceDebuggerComponentActivation> | undefined;
   #closePromise: Promise<void> | undefined;
 
-  constructor(
-    runtime: IsolatedLldbComponentRuntime,
-    activator: LldbComponentActivator,
-    route: SourceDebuggerComponentRoute
-  ) {
+  constructor(runtime: IsolatedLldbComponentRuntime, activator: LldbComponentActivator) {
     this.#runtime = runtime;
     this.#activator = activator;
-    this.#route = route;
-  }
-
-  get id(): string {
-    return this.#runtime.id;
-  }
-
-  get definition(): SourceDebuggerComponentDefinition {
-    return this.#runtime.definition;
   }
 
   get component(): SourceDebuggerComponent {
     return this.#runtime.component;
   }
 
-  probeModule(module: Omit<ModuleDescriptor, "owner">): Promise<ModuleClaim> {
-    return this.#runtime.probeModule(module);
-  }
-
   activate(): Promise<SourceDebuggerComponentActivation> {
     if (this.#closePromise) {
-      return Promise.reject(new Error(`SourceDebuggerComponent ${this.id} is closed`));
+      return Promise.reject(new Error(`SourceDebuggerComponent ${this.component.id} is closed`));
     }
     return (this.#activationPromise ??= this.#activate());
   }
@@ -217,7 +185,7 @@ class LoadedLldbSourceDebuggerComponent implements LoadedSourceDebuggerComponent
   }
 
   async #activate(): Promise<SourceDebuggerComponentActivation> {
-    this.#activation = await this.#activator.activate(this.#runtime, this.#route);
+    this.#activation = await this.#activator.activate(this.#runtime);
     return this.#activation.readyMessage === undefined
       ? {}
       : { readyMessage: this.#activation.readyMessage };
@@ -237,7 +205,10 @@ class LoadedLldbSourceDebuggerComponent implements LoadedSourceDebuggerComponent
       errors.push(error);
     }
     if (errors.length) {
-      throw new AggregateError(errors, `failed to close SourceDebuggerComponent ${this.id}`);
+      throw new AggregateError(
+        errors,
+        `failed to close SourceDebuggerComponent ${this.component.id}`
+      );
     }
   }
 }

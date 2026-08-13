@@ -49,8 +49,8 @@ asynchronously. Installed component definitions are probed concurrently and a
 unique highest-confidence supported claim wins; ambiguity, no support, or a
 probe failure aborts assignment. Ownership remains pinned until unload. The
 CLI's explicit URL routes currently narrow this process for multiple identical
-LLDB definitions, but the selected definition's probe still runs across the
-outer isolation boundary. Raw Wasm remains in the Firefox target adapter: it
+LLDB definitions, but the selected definition's probe still runs in the
+host-side catalog. Raw Wasm remains in the Firefox target adapter: it
 scans custom-section names once and sends only normalized `dwarf`/`source-map` hints
 in the module descriptor. LLDB gives those artifacts stronger claims while
 remaining a low-confidence fallback for unrecognized Wasm.
@@ -99,21 +99,21 @@ Set `SOURCE_DEBUGGER_TRACE=1` to log only session/runtime barrier transitions
 when diagnosing these handoffs, without enabling the full RDP/RSP wire trace.
 
 The CLI presents those adapters to `SourceDebuggerSession` through
-`src/source-debugger/transport/rpc.ts`, a concurrent request/response transport over
-`MessagePort`. Separate definition and instance ports keep discovery
-(`describe`/`probeModule`) independent from target-specific operations; the
-third generic port carries the component's imported
-`SourceDebuggerComponentHost`. Installed ecosystems enter through
-`SourceDebuggerComponentLoader` in two phases. `loadDefinition()` contributes
-only discovery exports to `SourceDebuggerComponentCatalog`;
-`instantiate(host)` receives a component-scoped binding only after that
-definition wins a module. `SourceDebuggerSessionRuntime` constructs the broker
-from selected instances, activates their target connections in catalog order,
-and tears down the broker, target handles, definitions, and isolates in
-dependency order. A stopped module refresh can select a definition which was
-not needed at startup. The runtime serializes its instantiation and target
-attach with run control, adds its modules, and only then lets the new component
-join subsequent observer barriers. The production CLI does not directly create an
+`src/source-debugger/transport/rpc.ts`, a concurrent request/response transport
+over `MessagePort`. One port exports the live component instance and one
+imports its component-scoped `SourceDebuggerComponentHost`. Lightweight
+definitions stay in the host-side catalog; discovery cannot disappear merely
+because a debugger worker crashes. Installed ecosystems enter through
+`SourceDebuggerComponentLoader`: its `definition` contributes
+`describe()`/`probeModule()` without creating an engine, and
+`instantiate(host)` receives a scoped binding only after that definition wins
+a module. `SourceDebuggerSessionRuntime` constructs the broker from selected
+instances, activates their target connections in catalog order, and tears down
+the broker, host capabilities, isolates, and target in dependency order. A
+stopped module refresh can select a definition which was not needed at startup.
+The runtime serializes its instantiation and target attach with run control,
+adds its modules, and only then lets the new component join subsequent observer
+barriers. The production CLI does not directly create an
 LLDB platform server, bridge RSP ports, attach an LLDB process, or retain LLDB
 run-control objects. Those operations live in `components/lldb/loader.ts`, behind the same
 lifecycle another installed ecosystem would implement. The LLDB control
@@ -142,7 +142,10 @@ its reason.
 The `firefox-wasm-debugger` command does not spawn a native lldb. Each selected LLDB
 component runs its own private platform server and drives LLDB compiled to WebAssembly (the `lldb-wasm`
 package, built from `../llvm-project/lldb/tools/lldb-wasm`) as an installed
-`LldbSourceDebuggerComponentLoader`. Before LLDB exists,
+`LldbSourceDebuggerComponentLoader`. `src/app/firefox-debugger.ts` is the
+single product composition root shared by the CLI and its primary e2e fixture;
+it installs LLDB and Wasm-text without coupling either to the generic session.
+Before LLDB exists,
 `FirefoxSourceDebuggerTarget` launches/connects Firefox, applies Wasm
 observation before navigation, waits briefly for initial modules, inspects
 their normalized debug metadata, and establishes the shared physical stop.

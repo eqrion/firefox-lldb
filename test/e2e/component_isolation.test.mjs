@@ -7,7 +7,7 @@ import test from "node:test";
 import { parseCliArgs } from "../../src/cli/options.ts";
 import { freePort } from "../../src/net/free-port.ts";
 import { FirefoxSourceDebuggerTarget } from "../../src/source-debugger/target/firefox/target.ts";
-import { SourceDebuggerSessionHost } from "../../src/source-debugger/target/host.ts";
+import { SourceDebuggerSessionHost } from "../../src/source-debugger/session/host.ts";
 import { IsolatedLldbComponentRuntime } from "../../src/source-debugger/components/lldb/isolate.ts";
 import {
   LldbSourceDebuggerComponentLoader,
@@ -24,33 +24,24 @@ test("catalog discovery instantiates LLDB but not an unsupported installed ecosy
   let unsupportedProbes = 0;
   let unsupportedInstantiations = 0;
   const unsupportedLoader = {
-    id: "unsupported",
-    async loadDefinition() {
-      const definition = {
-        describe: async () => ({
-          protocolVersion: "0.2",
-          id: "unsupported",
-          name: "Unsupported test ecosystem",
-          capabilities: {
-            breakpoints: false,
-            conditionalBreakpoints: false,
-            evaluate: false,
-            stepInto: false,
-            stepOver: false,
-            stepOut: false,
-          },
-        }),
-        probeModule: async () => {
-          unsupportedProbes++;
-          return { supported: false, confidence: 0, reason: "different artifact format" };
-        },
-      };
-      return {
+    definition: {
+      describe: async () => ({
+        protocolVersion: "0.2",
         id: "unsupported",
-        definition,
-        probeModule: definition.probeModule,
-        close: () => {},
-      };
+        name: "Unsupported test ecosystem",
+        capabilities: {
+          breakpoints: false,
+          conditionalBreakpoints: false,
+          evaluate: false,
+          stepInto: false,
+          stepOver: false,
+          stepOut: false,
+        },
+      }),
+      probeModule: async () => {
+        unsupportedProbes++;
+        return { supported: false, confidence: 0, reason: "different artifact format" };
+      },
     },
     async instantiate() {
       unsupportedInstantiations++;
@@ -72,20 +63,20 @@ test("catalog discovery instantiates LLDB but not an unsupported installed ecosy
   });
   const runtime = await SourceDebuggerSessionRuntime.load({
     target,
-    loaders: [unsupportedLoader, new LldbSourceDebuggerComponentLoader(lldbActivator, route)],
+    loaders: [unsupportedLoader, new LldbSourceDebuggerComponentLoader(lldbActivator, route.id)],
   });
   try {
     assert.equal(runtime.catalog.entries.length, 2);
     assert.equal(unsupportedProbes, 1);
     assert.equal(unsupportedInstantiations, 0);
     assert.deepEqual(
-      runtime.components.map(({ id }) => id),
+      runtime.components.map(({ component }) => component.id),
       ["lldb"]
     );
     const activation = await runtime.activate();
     assert.match(activation.readyMessage, /Process 1 stopped/);
     assert.deepEqual(
-      await runtime.components[0].probeModule({
+      await runtime.catalog.entry("lldb").definition.probeModule({
         id: "fixture",
         url: "https://example.test/fixture.wasm",
         debugInfo: ["dwarf"],
@@ -116,10 +107,13 @@ test("an exited LLDB isolate is quarantined without losing its sibling", async (
   });
   const session = new SourceDebuggerSession({
     components: [runtime.component, sibling.component],
-    debuggeeHost: host,
   });
   try {
-    const resolveOwner = createProbeModuleOwnerResolver([runtime, sibling]);
+    const lldbProbe = async () => ({ supported: true, confidence: 90 });
+    const resolveOwner = createProbeModuleOwnerResolver([
+      { id: runtime.id, probeModule: lldbProbe },
+      { id: sibling.id, probeModule: lldbProbe },
+    ]);
     await assert.rejects(
       resolveOwner({ id: "fixture", url: "https://example.test/fixture.wasm" }),
       /ambiguous SourceDebuggerComponent claims.*isolated-lldb.*surviving-lldb/
@@ -131,8 +125,6 @@ test("an exited LLDB isolate is quarantined without losing its sibling", async (
 
     await runtime.terminate();
     await assert.rejects(runtime.component.describe(), /SourceDebuggerComponent RPC.*closed/);
-    await assert.rejects(runtime.definition.describe(), /SourceDebuggerComponent RPC.*closed/);
-
     const statuses = await session.componentStatuses();
     assert.equal(statuses[0].status, "quarantined");
     assert.match(statuses[0].message, /SourceDebuggerComponent RPC.*closed/);

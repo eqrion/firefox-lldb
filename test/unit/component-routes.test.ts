@@ -8,9 +8,9 @@ import {
   componentForModuleUrl,
   createRoutedModuleOwnerResolver,
   parseComponentRoutes,
-} from "../../src/source-debugger/config.js";
+} from "../../src/app/component-routes.js";
 
-test("component routes default to one catch-all LLDB", () => {
+test("application component routes default to one catch-all LLDB", () => {
   assert.deepEqual(parseComponentRoutes([]), [{ id: "lldb", urlSubstring: "*" }]);
 });
 

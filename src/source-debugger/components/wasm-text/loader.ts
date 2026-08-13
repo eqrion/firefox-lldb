@@ -2,51 +2,38 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-import type { SourceDebuggerComponentHost } from "../../protocol/component.js";
 import type {
-  LoadedSourceDebuggerComponent,
-  LoadedSourceDebuggerComponentDefinition,
+  SourceDebuggerComponentDefinition,
+  SourceDebuggerComponentHost,
+} from "../../protocol/component.js";
+import type {
+  SourceDebuggerComponentInstance,
   SourceDebuggerComponentLoader,
 } from "../../session/loader.js";
-import {
-  WASM_SOURCE_DEBUGGER_ID,
-  probeWasmSourceDebuggerModule,
-  wasmSourceDebuggerDefinition,
-} from "./component.js";
+import { WASM_SOURCE_DEBUGGER_ID, wasmSourceDebuggerDefinition } from "./component.js";
 import { IsolatedWasmTextComponentRuntime } from "./isolate.js";
 
 export class WasmSourceDebuggerComponentLoader implements SourceDebuggerComponentLoader {
-  readonly id: string;
+  readonly definition: SourceDebuggerComponentDefinition;
+  readonly #id: string;
 
   constructor(
     id = WASM_SOURCE_DEBUGGER_ID,
     private readonly name = "WebAssembly Text"
   ) {
-    this.id = id;
+    this.#id = id;
+    this.definition = wasmSourceDebuggerDefinition(this.#id, this.name);
   }
 
-  async loadDefinition(): Promise<LoadedSourceDebuggerComponentDefinition> {
-    const definition = wasmSourceDebuggerDefinition(this.id, this.name);
-    return {
-      id: this.id,
-      definition,
-      probeModule: definition.probeModule,
-      close: () => {},
-    };
-  }
-
-  async instantiate(host: SourceDebuggerComponentHost): Promise<LoadedSourceDebuggerComponent> {
+  async instantiate(host: SourceDebuggerComponentHost): Promise<SourceDebuggerComponentInstance> {
     const runtime = await IsolatedWasmTextComponentRuntime.create({
       host,
-      id: this.id,
+      id: this.#id,
       name: this.name,
     });
     let closed = false;
     return {
-      id: this.id,
-      definition: runtime.definition,
       component: runtime.component,
-      probeModule: probeWasmSourceDebuggerModule,
       activate: async () => ({}),
       close: async () => {
         if (closed) return;

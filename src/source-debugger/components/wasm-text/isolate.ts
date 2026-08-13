@@ -4,12 +4,9 @@
 
 import { Worker } from "node:worker_threads";
 import type {
-  ModuleClaim,
   SourceDebuggerComponent,
   SourceDebuggerComponentHost,
 } from "../../protocol/component.js";
-import type { ModuleDescriptor } from "../../protocol/types.js";
-import type { SourceDebuggerComponentProbe } from "../../session/ownership.js";
 import { SourceDebuggerComponentIsolate } from "../../transport/isolate.js";
 import type { WasmTextIsolateMessage, WasmTextIsolateWorkerData } from "./isolate-protocol.js";
 
@@ -22,7 +19,7 @@ export interface IsolatedWasmTextComponentRuntimeOptions {
 
 /** Isolated runtime for the direct Wasm-text ecosystem. Its only target access
  * is the WasmDebuggee resource imported over the generic host transport. */
-export class IsolatedWasmTextComponentRuntime implements SourceDebuggerComponentProbe {
+export class IsolatedWasmTextComponentRuntime {
   readonly #isolate: SourceDebuggerComponentIsolate;
   readonly #worker: Worker;
   #closePromise: Promise<void> | undefined;
@@ -36,7 +33,7 @@ export class IsolatedWasmTextComponentRuntime implements SourceDebuggerComponent
     options: IsolatedWasmTextComponentRuntimeOptions
   ): Promise<IsolatedWasmTextComponentRuntime> {
     let worker: Worker | undefined;
-    const isolate = new SourceDebuggerComponentIsolate(options.id, options.host, {
+    const isolate = new SourceDebuggerComponentIsolate(options.host, {
       requestTimeoutMs: options.requestTimeoutMs ?? 30_000,
       onTransportFailure: () => void worker?.terminate(),
     });
@@ -66,16 +63,8 @@ export class IsolatedWasmTextComponentRuntime implements SourceDebuggerComponent
     return this.#isolate.id;
   }
 
-  get definition(): SourceDebuggerComponentIsolate["definition"] {
-    return this.#isolate.definition;
-  }
-
   get component(): SourceDebuggerComponent {
     return this.#isolate.component;
-  }
-
-  probeModule(module: Omit<ModuleDescriptor, "owner">): Promise<ModuleClaim> {
-    return this.#isolate.probeModule(module);
   }
 
   close(): Promise<void> {

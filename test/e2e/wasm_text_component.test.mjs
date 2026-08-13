@@ -43,7 +43,7 @@ test("LLDB and generated Wasm text coordinate one mixed source session", async (
     });
     runtime = await SourceDebuggerSessionRuntime.load({
       loaders: [
-        new LldbSourceDebuggerComponentLoader(lldbActivator, route, {
+        new LldbSourceDebuggerComponentLoader(lldbActivator, route.id, {
           observerResumesTarget: false,
           exclusiveModules: true,
         }),
@@ -53,7 +53,7 @@ test("LLDB and generated Wasm text coordinate one mixed source session", async (
     });
 
     assert.deepEqual(
-      runtime.components.map(({ id }) => id),
+      runtime.components.map(({ component }) => component.id),
       ["lldb", WASM_SOURCE_DEBUGGER_ID]
     );
     await runtime.activate();

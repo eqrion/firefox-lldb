@@ -93,7 +93,8 @@ It runs in a separate worker and imports its direct Wasm debuggee through the
 same generic component-host resource transport used for LLDB's RSP import.
 
 Each installed ecosystem enters through a generic
-`SourceDebuggerComponentLoader`. A shared `SourceDebuggerSessionHost` gives the
+`SourceDebuggerComponentLoader`. Its lightweight definition is probed before
+the debugger engine exists. A shared `SourceDebuggerSessionHost` gives the
 resulting isolate a component-scoped `WasmDebuggee`; debugger-engine transports
 never cross that host interface. LLDB privately owns its RSP, platform server,
 attach shim, and gdbstub stack. The CLI activates and closes all loaders through
@@ -104,6 +105,8 @@ verifies that an unsupported installed ecosystem is never instantiated. If a
 later stopped module refresh selects another definition, the runtime creates
 and attaches that component at the current physical stop before allowing the
 next run. The new debugger then joins the normal observer barrier.
+The CLI and primary e2e fixture share the same product composition root, so
+their installed components and routing policy cannot drift.
 
 At the `(sdb)` prompt, qualify ambiguous commands with the component ID:
 

@@ -5,11 +5,11 @@
 import { parentPort, workerData } from "node:worker_threads";
 import { connectSourceDebuggerComponentHost } from "../../transport/host-rpc.js";
 import { serveSourceDebuggerComponentIsolate } from "../../transport/isolate.js";
-import { WasmSourceDebuggerComponent, wasmSourceDebuggerDefinition } from "./component.js";
+import { WasmSourceDebuggerComponent } from "./component.js";
 import type { WasmTextIsolateMessage, WasmTextIsolateWorkerData } from "./isolate-protocol.js";
 
 const data = workerData as WasmTextIsolateWorkerData;
-const { definitionPort, componentPort, hostPort, options } = data;
+const { componentPort, hostPort, options } = data;
 const parent = parentPort;
 if (!parent) throw new Error("Wasm text isolate has no parent port");
 
@@ -20,16 +20,11 @@ parent.on("close", () => host.close());
 void (async () => {
   const debuggee = await host.openWasmDebuggee();
   const component = new WasmSourceDebuggerComponent(debuggee, options.id, options.name);
-  serveSourceDebuggerComponentIsolate(
-    { definitionPort, componentPort },
-    wasmSourceDebuggerDefinition(options.id, options.name),
-    component
-  );
+  serveSourceDebuggerComponentIsolate({ componentPort }, component);
   post({ type: "wasm-text-isolate-ready" });
 })().catch((error) => {
   host.close();
   post({ type: "wasm-text-isolate-initialization-error", error: serializeError(error) });
-  definitionPort.close();
   componentPort.close();
   parent.close();
 });

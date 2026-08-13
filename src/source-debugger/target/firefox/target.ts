@@ -132,10 +132,6 @@ export class FirefoxSourceDebuggerTarget implements SourceDebuggerTarget {
     this.#moduleOwnerByUrl.delete(moduleId);
   }
 
-  moduleOwner(moduleId: string): string | undefined {
-    return this.#moduleOwnerByUrl.get(moduleId);
-  }
-
   async openWasmDebuggee(componentId: string): Promise<WasmDebuggee> {
     if (this.#closePromise) throw new Error("FirefoxSourceDebuggerTarget is closed");
     const debuggee = await FirefoxWasmDebuggee.create(

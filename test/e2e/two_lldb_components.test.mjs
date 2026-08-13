@@ -12,7 +12,7 @@ import { PassThrough, Writable } from "node:stream";
 import { parseCliArgs } from "../../src/cli/options.ts";
 import { runRepl } from "../../src/cli/repl.ts";
 import { IsolatedLldbComponentRuntime } from "../../src/source-debugger/components/lldb/isolate.ts";
-import { SourceDebuggerSessionHost } from "../../src/source-debugger/target/host.ts";
+import { SourceDebuggerSessionHost } from "../../src/source-debugger/session/host.ts";
 import { SourceDebuggerSession } from "../../src/source-debugger/session/session.ts";
 import { FirefoxSourceDebuggerTarget } from "../../src/source-debugger/target/firefox/target.ts";
 import { freePort } from "../../src/net/free-port.ts";
@@ -157,7 +157,6 @@ test("two isolated LLDB components compose an interleaved stack over one Firefox
       target,
       resolveModuleOwner: async (module) =>
         module.url.includes("component=b") ? "lldb-b" : "lldb-a",
-      debuggeeHost,
     });
     repl = startRepl(session);
 

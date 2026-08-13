@@ -11,17 +11,9 @@ import { parseCliArgs } from "./options.js";
 import { quietLogger } from "./logger.js";
 import { runRepl } from "./repl.js";
 import { debugEnvEnabled, sourceDebuggerTraceEnabled } from "../config.js";
+import { loadFirefoxWasmDebuggerRuntime } from "../app/firefox-debugger.js";
 import { FirefoxSourceDebuggerTarget } from "../source-debugger/target/firefox/target.js";
-import {
-  LldbSourceDebuggerComponentLoader,
-  LldbComponentActivator,
-} from "../source-debugger/components/lldb/loader.js";
-import { SourceDebuggerSessionRuntime } from "../source-debugger/session/runtime.js";
-import { WasmSourceDebuggerComponentLoader } from "../source-debugger/components/wasm-text/loader.js";
-import {
-  createRoutedModuleOwnerResolver,
-  parseComponentRoutes,
-} from "../source-debugger/config.js";
+import { parseComponentRoutes } from "../app/component-routes.js";
 
 async function main(): Promise<void> {
   const args = parseCliArgs(process.argv.slice(2));
@@ -52,36 +44,13 @@ async function main(): Promise<void> {
       void cleanup(0);
     },
   });
-  const lldbActivator = new LldbComponentActivator({
-    automaticAttach: target.automaticAttach,
-    onDetached: (listener) => void target.onDetached(listener),
-    logger,
-    onOutput: print,
-  });
-  const lldbLoaders = routes.map(
-    (route) =>
-      new LldbSourceDebuggerComponentLoader(lldbActivator, route, {
-        name: routes.length === 1 && route.id === "lldb" ? "LLDB" : `LLDB (${route.id})`,
-        logger: sourceLogger,
-        observerResumesTarget: false,
-        exclusiveModules: true,
-        verbose: verbose || sourceTrace,
-      })
-  );
-  const loaders = [...lldbLoaders, new WasmSourceDebuggerComponentLoader()];
-  const runtime = await SourceDebuggerSessionRuntime.load({
-    loaders,
+  const runtime = await loadFirefoxWasmDebuggerRuntime({
     target,
-    ...(routedComponents
-      ? {
-          createModuleOwnerResolver: (
-            definitions: Parameters<typeof createRoutedModuleOwnerResolver>[1]
-          ) => createRoutedModuleOwnerResolver(routes, definitions),
-        }
-      : {}),
-    eagerComponentIds: routedComponents ? routes.map(({ id }) => id) : [],
-    fallbackComponentIds: routes.map(({ id }) => id),
+    routes,
+    routedComponents,
     logger: sourceLogger,
+    onOutput: print,
+    verbose: verbose || sourceTrace,
   });
 
   let exiting = false;

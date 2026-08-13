@@ -16,7 +16,7 @@ import type {
 } from "./isolate-protocol.js";
 
 const data = workerData as LldbIsolateWorkerData;
-const { definitionPort, componentPort, hostPort, controlPort, options } = data;
+const { componentPort, hostPort, controlPort, options } = data;
 
 function post(message: LldbIsolateHostMessage): void {
   controlPort.postMessage(message);
@@ -44,11 +44,7 @@ void (async () => {
     observerResumesTarget: options.observerResumesTarget,
     exclusiveModules: options.exclusiveModules,
   });
-  const isolateEndpoint = serveSourceDebuggerComponentIsolate(
-    { definitionPort, componentPort },
-    runtime.definition,
-    runtime.component
-  );
+  const isolateEndpoint = serveSourceDebuggerComponentIsolate({ componentPort }, runtime.component);
   const onMessage = (message: LldbIsolateWorkerMessage): void => {
     if (message.type !== "lldb-isolate-control-request") return;
     void handleControlRequest(runtime, message).then(
@@ -76,7 +72,6 @@ void (async () => {
 })().catch((error) => {
   host.close();
   post({ type: "lldb-isolate-initialization-error", error: serializeError(error) });
-  definitionPort.close();
   componentPort.close();
   controlPort.close();
 });

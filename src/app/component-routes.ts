@@ -2,13 +2,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-import type { ComponentId } from "./protocol/types.js";
+import type { ComponentId } from "../source-debugger/protocol/types.js";
 import {
   probeModuleClaims,
   type ModuleOwnerResolver,
   type ModuleProbeOptions,
   type SourceDebuggerComponentProbe,
-} from "./session/ownership.js";
+} from "../source-debugger/session/ownership.js";
 
 export interface SourceDebuggerComponentRoute {
   id: ComponentId;
@@ -54,7 +54,7 @@ export function componentForModuleUrl(
 
 /** Compatibility resolver for the prototype's explicit URL routes. Routing
  * narrows discovery to one component, but that component must still positively
- * claim the module through the standard factory-side probe. */
+ * claim the module through its catalog definition. */
 export function createRoutedModuleOwnerResolver(
   routes: readonly SourceDebuggerComponentRoute[],
   probes: readonly SourceDebuggerComponentProbe[],

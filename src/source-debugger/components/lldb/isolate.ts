@@ -5,7 +5,6 @@
 import { MessageChannel, type MessagePort, Worker } from "node:worker_threads";
 import { noopLogger, type Logger } from "../../../logging.js";
 import type {
-  ModuleClaim,
   SourceDebuggerComponent,
   SourceDebuggerComponentHost,
 } from "../../protocol/component.js";
@@ -17,8 +16,7 @@ import type {
   LldbIsolateHostMessage,
   LldbIsolateWorkerData,
 } from "./isolate-protocol.js";
-import type { SourceDebuggerComponentProbe } from "../../session/ownership.js";
-import type { CommandResult, ModuleDescriptor } from "../../protocol/types.js";
+import type { CommandResult } from "../../protocol/types.js";
 
 interface PendingControl {
   resolve: (value: unknown) => void;
@@ -38,7 +36,7 @@ export interface IsolatedLldbComponentRuntimeOptions {
   requestTimeoutMs?: number;
 }
 
-export class IsolatedLldbComponentRuntime implements SourceDebuggerComponentProbe {
+export class IsolatedLldbComponentRuntime {
   readonly #isolate: SourceDebuggerComponentIsolate;
   readonly #channel: LldbIsolateChannel;
   #closePromise: Promise<void> | undefined;
@@ -52,10 +50,6 @@ export class IsolatedLldbComponentRuntime implements SourceDebuggerComponentProb
     return this.#isolate.id;
   }
 
-  get definition(): SourceDebuggerComponentIsolate["definition"] {
-    return this.#isolate.definition;
-  }
-
   get component(): SourceDebuggerComponent {
     return this.#isolate.component;
   }
@@ -67,7 +61,7 @@ export class IsolatedLldbComponentRuntime implements SourceDebuggerComponentProb
     const logger = options.logger ?? noopLogger;
     let channel: LldbIsolateChannel | undefined;
     const componentId = options.id ?? "lldb";
-    const isolate = new SourceDebuggerComponentIsolate(componentId, options.host, {
+    const isolate = new SourceDebuggerComponentIsolate(options.host, {
       requestTimeoutMs: options.requestTimeoutMs ?? 30_000,
       onTransportFailure: (error) => {
         logger.error(`[${componentId}] ${error.message}; terminating isolate`);
@@ -110,10 +104,6 @@ export class IsolatedLldbComponentRuntime implements SourceDebuggerComponentProb
 
   async startTarget(): Promise<void> {
     await this.#channel.call("start-target");
-  }
-
-  probeModule(module: Omit<ModuleDescriptor, "owner">): Promise<ModuleClaim> {
-    return this.#isolate.probeModule(module);
   }
 
   async attach(

@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { parseCliArgs } from "../../src/cli/options.ts";
 import { freePort } from "../../src/net/free-port.ts";
-import { createRoutedModuleOwnerResolver } from "../../src/source-debugger/config.ts";
+import { createRoutedModuleOwnerResolver } from "../../src/app/component-routes.ts";
 import { FirefoxSourceDebuggerTarget } from "../../src/source-debugger/target/firefox/target.ts";
 import {
   LldbSourceDebuggerComponentLoader,
@@ -44,7 +44,7 @@ test("a late Wasm module activates a second isolated LLDB at the current stop", 
     });
     const loaders = routes.map(
       (route) =>
-        new LldbSourceDebuggerComponentLoader(lldbActivator, route, {
+        new LldbSourceDebuggerComponentLoader(lldbActivator, route.id, {
           name: `LLDB (${route.id})`,
           observerResumesTarget: false,
           exclusiveModules: true,
@@ -59,7 +59,7 @@ test("a late Wasm module activates a second isolated LLDB at the current stop", 
     trace("initial component selected");
 
     assert.deepEqual(
-      runtime.components.map(({ id }) => id),
+      runtime.components.map(({ component }) => component.id),
       ["lldb-a"],
       "the second LLDB was instantiated before its module existed"
     );
@@ -87,7 +87,7 @@ test("a late Wasm module activates a second isolated LLDB at the current stop", 
       ["lldb-a", "lldb-b"]
     );
     assert.deepEqual(
-      runtime.components.map(({ id }) => id),
+      runtime.components.map(({ component }) => component.id),
       ["lldb-a", "lldb-b"],
       "the late module did not instantiate and attach its selected owner"
     );

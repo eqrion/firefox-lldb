@@ -42,6 +42,11 @@ test("portable protocol and session layers do not import engine or Firefox inter
     "utf8"
   );
   assert.doesNotMatch(lldbLoader, /target\/firefox|RdpWasmSession/, "LLDB loader target coupling");
+  assert.doesNotMatch(
+    lldbLoader,
+    /component-routes|SourceDebuggerComponentRoute/,
+    "LLDB loader application routing coupling"
+  );
 });
 
 test("production-path e2e harnesses cannot fall back to the legacy LLDB bootstrap", () => {
@@ -54,6 +59,21 @@ test("production-path e2e harnesses cannot fall back to the legacy LLDB bootstra
     assert.doesNotMatch(
       source,
       /lldb-wasm|lldb-platform-session|startLldbTestPlatform|LldbSourceDebuggerComponent\b/,
+      relativePath
+    );
+  }
+});
+
+test("the CLI and primary e2e fixture share one product composition root", () => {
+  for (const relativePath of [
+    "src/cli/firefox-wasm-debugger.ts",
+    "test/e2e/support/source-debugger-session.ts",
+  ]) {
+    const source = readFileSync(resolve(ROOT, relativePath), "utf8");
+    assert.match(source, /loadFirefoxWasmDebuggerRuntime/, relativePath);
+    assert.doesNotMatch(
+      source,
+      /new (?:LldbSourceDebuggerComponentLoader|WasmSourceDebuggerComponentLoader|LldbComponentActivator)/,
       relativePath
     );
   }

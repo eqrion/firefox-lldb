@@ -4,12 +4,7 @@
 
 import type { MessagePort } from "node:worker_threads";
 import { SourceDebuggerError, isSourceDebuggerError } from "../protocol/error.js";
-import type {
-  ModuleClaim,
-  SourceDebuggerComponentDefinition,
-  SourceDebuggerComponent,
-  SourceDebuggerRun,
-} from "../protocol/component.js";
+import type { SourceDebuggerComponent, SourceDebuggerRun } from "../protocol/component.js";
 import type {
   CommandResult,
   ComponentFrame,
@@ -32,7 +27,6 @@ import type {
 } from "../protocol/types.js";
 
 type RpcMethod = Exclude<keyof SourceDebuggerComponent, "id">;
-type DefinitionRpcMethod = keyof SourceDebuggerComponentDefinition;
 type RunRpcMethod =
   | "$run-wait-for-stop"
   | "$run-wait-for-resume"
@@ -40,25 +34,7 @@ type RunRpcMethod =
   | "$run-rearm-observer"
   | "$run-terminate"
   | "$run-dispose";
-type RpcCallMethod = RpcMethod | DefinitionRpcMethod | RunRpcMethod | "$hello";
-
-export type SourceDebuggerRpcTransportFailure = "closed" | "peer-closed" | "timeout";
-
-export class SourceDebuggerRpcTransportError extends Error {
-  constructor(
-    readonly failure: SourceDebuggerRpcTransportFailure,
-    message: string
-  ) {
-    super(message);
-    this.name = "SourceDebuggerRpcTransportError";
-  }
-}
-
-export function isSourceDebuggerRpcTransportError(
-  error: unknown
-): error is SourceDebuggerRpcTransportError {
-  return error instanceof SourceDebuggerRpcTransportError;
-}
+type RpcCallMethod = RpcMethod | RunRpcMethod | "$hello";
 
 interface RpcRequest {
   type: "source-debugger-request";
@@ -68,7 +44,6 @@ interface RpcRequest {
 }
 
 type ComponentRpcRequest = RpcRequest & { method: RpcMethod | RunRpcMethod | "$hello" };
-type DefinitionRpcRequest = RpcRequest & { method: DefinitionRpcMethod };
 
 interface SerializedError {
   name: string;
@@ -134,7 +109,6 @@ const RUN_RPC_METHODS: RunRpcMethod[] = [
   "$run-dispose",
 ];
 const RPC_METHOD_SET = new Set<string>([...RPC_METHODS, ...RUN_RPC_METHODS]);
-const DEFINITION_RPC_METHOD_SET = new Set<string>(["describe", "probeModule"]);
 
 const REQUIRED_METHODS: RpcMethod[] = RPC_METHODS.filter((method) => method !== "command");
 
@@ -145,7 +119,7 @@ export interface SourceDebuggerRpcOptions {
   requestTimeoutMs?: number;
   /** Called after a timeout or peer closure makes the entire RPC client
    * unusable. An isolation host can terminate the containing worker here. */
-  onTransportFailure?: (error: SourceDebuggerRpcTransportError) => void;
+  onTransportFailure?: (error: SourceDebuggerError) => void;
 }
 
 export interface SourceDebuggerRpcEndpoint {
@@ -213,59 +187,6 @@ export function serveSourceDebuggerComponent(
   };
 }
 
-/** Serve the target-independent discovery exports of a component definition.
- * Instantiation stays inside the isolate where the imported host resources
- * live; the host only needs describe/probeModule for catalog selection. */
-export function serveSourceDebuggerComponentDefinition(
-  port: MessagePort,
-  definition: SourceDebuggerComponentDefinition
-): SourceDebuggerRpcEndpoint {
-  let closed = false;
-  const onMessage = (message: unknown): void => {
-    if (!isDefinitionRequest(message)) return;
-    void (async () => {
-      try {
-        const result = await definitionMethod(definition, message.method)(...message.args);
-        if (!closed) {
-          port.postMessage({ type: "source-debugger-response", id: message.id, result });
-        }
-      } catch (error) {
-        try {
-          if (!closed) {
-            port.postMessage({
-              type: "source-debugger-response",
-              id: message.id,
-              error: serializeError(error),
-            });
-          }
-        } catch {
-          // The peer closed while the definition call was settling.
-        }
-      }
-    })();
-  };
-
-  port.on("message", onMessage);
-  port.start();
-  return closeRpcEndpoint(port, onMessage, () => (closed = true));
-}
-
-export function connectSourceDebuggerComponentDefinition(
-  port: MessagePort,
-  options: SourceDebuggerRpcOptions = {}
-): SourceDebuggerComponentDefinition & SourceDebuggerRpcEndpoint {
-  const client = new SourceDebuggerRpcClient(
-    port,
-    options.requestTimeoutMs,
-    options.onTransportFailure
-  );
-  return {
-    describe: () => client.call("describe"),
-    probeModule: (module) => client.call<ModuleClaim>("probeModule", module),
-    close: () => client.close(),
-  };
-}
-
 export async function connectSourceDebuggerComponent(
   port: MessagePort,
   options: SourceDebuggerRpcOptions = {}
@@ -298,7 +219,7 @@ class SourceDebuggerRpcClient {
   constructor(
     private readonly port: MessagePort,
     requestTimeoutMs?: number,
-    private readonly onTransportFailure?: (error: SourceDebuggerRpcTransportError) => void
+    private readonly onTransportFailure?: (error: SourceDebuggerError) => void
   ) {
     if (
       requestTimeoutMs !== undefined &&
@@ -314,9 +235,7 @@ class SourceDebuggerRpcClient {
 
   call<T>(method: RpcCallMethod, ...args: unknown[]): Promise<T> {
     if (this.#closed) {
-      return Promise.reject(
-        new SourceDebuggerRpcTransportError("closed", "SourceDebuggerComponent RPC is closed")
-      );
+      return Promise.reject(connectionError("SourceDebuggerComponent RPC is closed"));
     }
     const id = this.#nextId++;
     return new Promise<T>((resolve, reject) => {
@@ -329,8 +248,7 @@ class SourceDebuggerRpcClient {
         pending.timer = setTimeout(() => {
           if (!this.#pending.has(id)) return;
           this.#failTransport(
-            new SourceDebuggerRpcTransportError(
-              "timeout",
+            connectionError(
               `SourceDebuggerComponent RPC ${String(method)} timed out after ${this.#timeoutMs}ms`
             )
           );
@@ -358,9 +276,7 @@ class SourceDebuggerRpcClient {
     this.port.off("message", this.#onMessage);
     this.port.off("close", this.#onClose);
     this.port.close();
-    this.#rejectPending(
-      new SourceDebuggerRpcTransportError("closed", "SourceDebuggerComponent RPC closed")
-    );
+    this.#rejectPending(connectionError("SourceDebuggerComponent RPC closed"));
   }
 
   #onMessage = (message: unknown): void => {
@@ -374,12 +290,10 @@ class SourceDebuggerRpcClient {
   };
 
   #onClose = (): void => {
-    this.#failTransport(
-      new SourceDebuggerRpcTransportError("peer-closed", "SourceDebuggerComponent RPC peer closed")
-    );
+    this.#failTransport(connectionError("SourceDebuggerComponent RPC peer closed"));
   };
 
-  #failTransport(error: SourceDebuggerRpcTransportError): void {
+  #failTransport(error: SourceDebuggerError): void {
     if (this.#closed) return;
     this.#closed = true;
     this.port.off("message", this.#onMessage);
@@ -593,13 +507,6 @@ function hasComponentMethod(component: SourceDebuggerComponent, method: RpcMetho
   return typeof (component as unknown as Record<RpcMethod, unknown>)[method] === "function";
 }
 
-function definitionMethod(
-  definition: SourceDebuggerComponentDefinition,
-  method: DefinitionRpcMethod
-): (...args: unknown[]) => unknown {
-  return definition[method].bind(definition) as (...args: unknown[]) => unknown;
-}
-
 function isRequest(message: unknown): message is ComponentRpcRequest {
   if (!message || typeof message !== "object") return false;
   const request = message as Partial<RpcRequest>;
@@ -608,18 +515,6 @@ function isRequest(message: unknown): message is ComponentRpcRequest {
     typeof request.id === "number" &&
     (request.method === "$hello" ||
       (typeof request.method === "string" && RPC_METHOD_SET.has(request.method))) &&
-    Array.isArray(request.args)
-  );
-}
-
-function isDefinitionRequest(message: unknown): message is DefinitionRpcRequest {
-  if (!message || typeof message !== "object") return false;
-  const request = message as Partial<RpcRequest>;
-  return (
-    request.type === "source-debugger-request" &&
-    typeof request.id === "number" &&
-    typeof request.method === "string" &&
-    DEFINITION_RPC_METHOD_SET.has(request.method) &&
     Array.isArray(request.args)
   );
 }
@@ -664,16 +559,6 @@ function deserializeError(error: SerializedError): Error {
   return result;
 }
 
-function closeRpcEndpoint(
-  port: MessagePort,
-  onMessage: (message: unknown) => void,
-  markClosed: () => void
-): SourceDebuggerRpcEndpoint {
-  return {
-    close(): void {
-      markClosed();
-      port.off("message", onMessage);
-      port.close();
-    },
-  };
+function connectionError(message: string): SourceDebuggerError {
+  return new SourceDebuggerError("component-unavailable", message);
 }

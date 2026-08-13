@@ -8,9 +8,9 @@ import type {
   SourceDebuggerComponentDefinition,
   SourceDebuggerComponent,
 } from "../../src/source-debugger/protocol/component.js";
-import { SourceDebuggerSessionHost } from "../../src/source-debugger/target/host.js";
+import { SourceDebuggerSessionHost } from "../../src/source-debugger/session/host.js";
 import type {
-  LoadedSourceDebuggerComponent,
+  SourceDebuggerComponentInstance,
   SourceDebuggerComponentLoader,
 } from "../../src/source-debugger/session/loader.js";
 import { SourceDebuggerSessionRuntime } from "../../src/source-debugger/session/runtime.js";
@@ -75,6 +75,34 @@ test("activation failure closes the broker, target activations, and isolates", a
   assert.throws(() => host.forComponent("late"), /SourceDebuggerSessionHost is closed/);
 });
 
+test("catalog identity comes from definitions and must be unique", async () => {
+  const events: string[] = [];
+  await assert.rejects(
+    SourceDebuggerSessionRuntime.load({
+      loaders: [fakeLoader("duplicate", events), fakeLoader("duplicate", events)],
+      eagerComponentIds: ["duplicate"],
+    }),
+    /definition ids must be unique/
+  );
+});
+
+test("a loaded component must match its catalog definition", async () => {
+  const events: string[] = [];
+  await assert.rejects(
+    SourceDebuggerSessionRuntime.load({
+      loaders: [
+        {
+          definition: definition("catalog", events),
+          instantiate: async () => fakeLoadedComponent("instance", events),
+        },
+      ],
+      eagerComponentIds: ["catalog"],
+    }),
+    /catalog id catalog does not match instance id instance/
+  );
+  assert.ok(events.includes("close:instance"));
+});
+
 test("catalog discovery probes every definition and instantiates only module owners", async () => {
   const events: string[] = [];
   const target = {
@@ -99,7 +127,7 @@ test("catalog discovery probes every definition and instantiates only module own
     "instantiate:selected:selected",
   ]);
   assert.deepEqual(
-    runtime.components.map(({ id }) => id),
+    runtime.components.map(({ component }) => component.id),
     ["selected"]
   );
   await runtime.close();
@@ -124,7 +152,7 @@ test("a module loaded after startup activates its owner before the next run", as
   });
 
   assert.deepEqual(
-    runtime.components.map(({ id }) => id),
+    runtime.components.map(({ component }) => component.id),
     ["component-a"]
   );
   await runtime.activate();
@@ -137,7 +165,7 @@ test("a module loaded after startup activates its owner before the next run", as
     ["component-a", "component-b"]
   );
   assert.deepEqual(
-    runtime.components.map(({ id }) => id),
+    runtime.components.map(({ component }) => component.id),
     ["component-a", "component-b"]
   );
   assert.deepEqual(
@@ -160,20 +188,7 @@ function fakeLoader(
   failActivation = false
 ): SourceDebuggerComponentLoader {
   return {
-    id,
-    async loadDefinition() {
-      events.push(`definition:${id}`);
-      const definition: SourceDebuggerComponentDefinition = {
-        describe: async () => descriptor(id),
-        probeModule: async () => ({ supported: true, confidence: 1 }),
-      };
-      return {
-        id,
-        definition,
-        probeModule: definition.probeModule,
-        close: () => {},
-      };
-    },
+    definition: definition(id, events),
     async instantiate() {
       events.push(`instantiate:${id}:${id}`);
       return fakeLoadedComponent(id, events, readyMessage, failActivation);
@@ -186,16 +201,9 @@ function fakeLoadedComponent(
   events: string[],
   readyMessage?: string,
   failActivation = false
-): LoadedSourceDebuggerComponent {
-  const definition: SourceDebuggerComponentDefinition = {
-    describe: async () => descriptor(id),
-    probeModule: async () => ({ supported: true, confidence: 1 }),
-  };
+): SourceDebuggerComponentInstance {
   return {
-    id,
-    definition,
     component: fakeComponent(id, events),
-    probeModule: definition.probeModule,
     async activate() {
       events.push(`activate:${id}`);
       if (failActivation) throw new Error(`activation failed: ${id}`);
@@ -213,10 +221,9 @@ function discoveryLoader(
   events: string[]
 ): SourceDebuggerComponentLoader {
   return {
-    id,
-    async loadDefinition() {
+    definition: (() => {
       events.push(`definition:${id}`);
-      const definition: SourceDebuggerComponentDefinition = {
+      return {
         describe: async () => descriptor(id),
         probeModule: async (module) => {
           events.push(`probe:${id}:${module.id}`);
@@ -227,13 +234,7 @@ function discoveryLoader(
           };
         },
       };
-      return {
-        id,
-        definition,
-        probeModule: definition.probeModule,
-        close: () => {},
-      };
-    },
+    })(),
     async instantiate() {
       events.push(`instantiate:${id}:${id}`);
       return fakeLoadedComponent(id, events);
@@ -243,10 +244,9 @@ function discoveryLoader(
 
 function routedDiscoveryLoader(id: string, events: string[]): SourceDebuggerComponentLoader {
   return {
-    id,
-    async loadDefinition() {
+    definition: (() => {
       events.push(`definition:${id}`);
-      const definition: SourceDebuggerComponentDefinition = {
+      return {
         describe: async () => descriptor(id),
         probeModule: async (module) => {
           events.push(`probe:${id}:${module.id}`);
@@ -254,17 +254,19 @@ function routedDiscoveryLoader(id: string, events: string[]): SourceDebuggerComp
           return { supported, confidence: supported ? 100 : 0 };
         },
       };
-      return {
-        id,
-        definition,
-        probeModule: definition.probeModule,
-        close: () => {},
-      };
-    },
+    })(),
     async instantiate() {
       events.push(`instantiate:${id}:${id}`);
       return fakeLoadedComponent(id, events);
     },
+  };
+}
+
+function definition(id: string, events: string[]): SourceDebuggerComponentDefinition {
+  events.push(`definition:${id}`);
+  return {
+    describe: async () => descriptor(id),
+    probeModule: async () => ({ supported: true, confidence: 1 }),
   };
 }
 

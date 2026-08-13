@@ -3,10 +3,11 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 import type { Logger } from "../../logging.js";
-import { SourceDebuggerComponentCatalog } from "./catalog.js";
-import { SourceDebuggerSessionHost } from "../target/host.js";
+import { SourceDebuggerComponentCatalog, type SourceDebuggerCatalogEntry } from "./catalog.js";
+import { SourceDebuggerSessionHost } from "./host.js";
+import type { SourceDebuggerComponentHost } from "../protocol/component.js";
 import type {
-  LoadedSourceDebuggerComponent,
+  SourceDebuggerComponentInstance,
   SourceDebuggerComponentActivation,
   SourceDebuggerComponentLoader,
 } from "./loader.js";
@@ -17,6 +18,7 @@ import {
 } from "./ownership.js";
 import { SourceDebuggerSession } from "./session.js";
 import type { SourceDebuggerTarget } from "../protocol/target.js";
+import { validateComponentDescriptor } from "../protocol/validation.js";
 
 export interface SourceDebuggerSessionRuntimeOptions {
   loaders: readonly SourceDebuggerComponentLoader[];
@@ -42,15 +44,15 @@ export class SourceDebuggerSessionRuntime {
   readonly catalog: SourceDebuggerComponentCatalog;
   readonly #host: SourceDebuggerSessionHost;
   readonly #target: SourceDebuggerTarget | undefined;
-  readonly #components: LoadedSourceDebuggerComponent[];
-  readonly #lateActivations = new Map<string, Promise<LoadedSourceDebuggerComponent>>();
+  readonly #components: SourceDebuggerComponentInstance[];
+  readonly #lateActivations = new Map<string, Promise<SourceDebuggerComponentInstance>>();
   #activationPromise: Promise<SourceDebuggerComponentActivation> | undefined;
   #closePromise: Promise<void> | undefined;
 
   private constructor(
     host: SourceDebuggerSessionHost,
     catalog: SourceDebuggerComponentCatalog,
-    components: LoadedSourceDebuggerComponent[],
+    components: SourceDebuggerComponentInstance[],
     resolveModuleOwner: ModuleOwnerResolver,
     options: SourceDebuggerSessionRuntimeOptions
   ) {
@@ -60,7 +62,6 @@ export class SourceDebuggerSessionRuntime {
     this.#components = components;
     this.session = new SourceDebuggerSession({
       components: components.map(({ component }) => component),
-      debuggeeHost: host,
       target: options.target,
       resolveModuleOwner,
       ensureComponent: async (id) => (await this.#ensureComponent(id)).component,
@@ -68,7 +69,7 @@ export class SourceDebuggerSessionRuntime {
     });
   }
 
-  get components(): readonly LoadedSourceDebuggerComponent[] {
+  get components(): readonly SourceDebuggerComponentInstance[] {
     return this.#components;
   }
 
@@ -82,10 +83,9 @@ export class SourceDebuggerSessionRuntime {
           ? (componentId) => options.target!.openWasmDebuggee!(componentId)
           : undefined,
       });
-    let catalog: SourceDebuggerComponentCatalog | undefined;
-    const components: LoadedSourceDebuggerComponent[] = [];
+    const components: SourceDebuggerComponentInstance[] = [];
     try {
-      catalog = await SourceDebuggerComponentCatalog.load(options.loaders);
+      const catalog = await SourceDebuggerComponentCatalog.load(options.loaders);
       const resolveModuleOwner =
         options.createModuleOwnerResolver?.(catalog.probes()) ??
         createProbeModuleOwnerResolver(catalog.probes());
@@ -109,14 +109,7 @@ export class SourceDebuggerSessionRuntime {
 
       for (const entry of catalog.entries) {
         if (!selectedIds.has(entry.id)) continue;
-        const loaded = await entry.loader.instantiate(host.forComponent(entry.id));
-        if (loaded.id !== entry.id) {
-          await loaded.close();
-          throw new Error(
-            `SourceDebuggerComponent loader id ${entry.id} does not match loaded component id ${loaded.id}`
-          );
-        }
-        components.push(loaded);
+        components.push(await instantiateComponent(entry, host.forComponent(entry.id)));
       }
       return new SourceDebuggerSessionRuntime(
         host,
@@ -128,7 +121,6 @@ export class SourceDebuggerSessionRuntime {
     } catch (error) {
       await closeComponents(components);
       host.close();
-      await catalog?.close();
       await Promise.resolve(options.target?.close()).catch(() => {});
       throw error;
     }
@@ -166,19 +158,14 @@ export class SourceDebuggerSessionRuntime {
       await this.session.close();
     } catch (error) {
       errors.push(error);
-      this.#host.close();
     }
+    this.#host.close();
     for (const component of [...this.components].reverse()) {
       try {
         await component.close();
       } catch (error) {
         errors.push(error);
       }
-    }
-    try {
-      await this.catalog.close();
-    } catch (error) {
-      errors.push(error);
     }
     try {
       await this.#target?.close();
@@ -188,8 +175,8 @@ export class SourceDebuggerSessionRuntime {
     if (errors.length) throw new AggregateError(errors, "source debugger runtime cleanup failed");
   }
 
-  #ensureComponent(id: string): Promise<LoadedSourceDebuggerComponent> {
-    const existing = this.#components.find((component) => component.id === id);
+  #ensureComponent(id: string): Promise<SourceDebuggerComponentInstance> {
+    const existing = this.#components.find((instance) => instance.component.id === id);
     if (existing) return Promise.resolve(existing);
     if (this.#closePromise) {
       return Promise.reject(new Error("SourceDebuggerSessionRuntime is closed"));
@@ -211,20 +198,14 @@ export class SourceDebuggerSessionRuntime {
     return activation;
   }
 
-  async #activateLateComponent(id: string): Promise<LoadedSourceDebuggerComponent> {
+  async #activateLateComponent(id: string): Promise<SourceDebuggerComponentInstance> {
     await this.#activationPromise;
-    const existing = this.#components.find((component) => component.id === id);
+    const existing = this.#components.find((instance) => instance.component.id === id);
     if (existing) return existing;
     if (this.#closePromise) throw new Error("SourceDebuggerSessionRuntime is closed");
 
     const entry = this.catalog.entry(id);
-    const loaded = await entry.loader.instantiate(this.#host.forComponent(id));
-    if (loaded.id !== id) {
-      await loaded.close();
-      throw new Error(
-        `SourceDebuggerComponent loader id ${id} does not match loaded component id ${loaded.id}`
-      );
-    }
+    const loaded = await instantiateComponent(entry, this.#host.forComponent(id));
     try {
       await loaded.activate();
       if (this.#closePromise) {
@@ -239,8 +220,27 @@ export class SourceDebuggerSessionRuntime {
   }
 }
 
+async function instantiateComponent(
+  entry: SourceDebuggerCatalogEntry,
+  host: SourceDebuggerComponentHost
+): Promise<SourceDebuggerComponentInstance> {
+  const instance = await entry.loader.instantiate(host);
+  try {
+    if (instance.component.id !== entry.id) {
+      throw new Error(
+        `SourceDebuggerComponent catalog id ${entry.id} does not match instance id ${instance.component.id}`
+      );
+    }
+    validateComponentDescriptor(await instance.component.describe(), entry.id);
+    return instance;
+  } catch (error) {
+    await Promise.resolve(instance.close()).catch(() => {});
+    throw error;
+  }
+}
+
 async function closeComponents(
-  components: readonly LoadedSourceDebuggerComponent[]
+  components: readonly SourceDebuggerComponentInstance[]
 ): Promise<void> {
   for (const component of [...components].reverse()) {
     await Promise.resolve(component.close()).catch(() => {});

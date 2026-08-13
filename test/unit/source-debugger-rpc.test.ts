@@ -5,16 +5,10 @@
 import { MessageChannel } from "node:worker_threads";
 import assert from "node:assert/strict";
 import test from "node:test";
-import type {
-  SourceDebuggerComponentDefinition,
-  SourceDebuggerComponent,
-} from "../../src/source-debugger/protocol/component.js";
+import type { SourceDebuggerComponent } from "../../src/source-debugger/protocol/component.js";
 import {
   connectSourceDebuggerComponent,
-  connectSourceDebuggerComponentDefinition,
-  SourceDebuggerRpcTransportError,
   serveSourceDebuggerComponent,
-  serveSourceDebuggerComponentDefinition,
 } from "../../src/source-debugger/transport/rpc.js";
 import type { ComponentStop } from "../../src/source-debugger/protocol/types.js";
 import { testSourceDebuggerRun } from "../helpers/source-debugger-run.js";
@@ -59,51 +53,6 @@ function fakeComponent(overrides: Partial<SourceDebuggerComponent> = {}): Source
     ...overrides,
   };
 }
-
-test("component definition RPC exposes discovery without an instance", async () => {
-  let probed: unknown;
-  const definition: SourceDebuggerComponentDefinition = {
-    describe: async () => await fakeComponent().describe(),
-    probeModule: async (module) => {
-      probed = module;
-      return { supported: true, confidence: 87, reason: "fixture metadata" };
-    },
-  };
-  const { port1, port2 } = new MessageChannel();
-  const endpoint = serveSourceDebuggerComponentDefinition(port1, definition);
-  const remote = connectSourceDebuggerComponentDefinition(port2, { requestTimeoutMs: 100 });
-
-  assert.equal((await remote.describe()).id, "fake");
-  const module = { id: "fixture", url: "fixture.wasm", debugInfo: ["fixture"] };
-  assert.deepEqual(await remote.probeModule(module), {
-    supported: true,
-    confidence: 87,
-    reason: "fixture metadata",
-  });
-  assert.deepEqual(probed, module);
-  assert.notEqual(probed, module);
-
-  remote.close();
-  endpoint.close();
-});
-
-test("component definition RPC bounds a hung discovery call", async () => {
-  const definition: SourceDebuggerComponentDefinition = {
-    describe: async () => await fakeComponent().describe(),
-    probeModule: async () => new Promise(() => {}),
-  };
-  const { port1, port2 } = new MessageChannel();
-  const endpoint = serveSourceDebuggerComponentDefinition(port1, definition);
-  const remote = connectSourceDebuggerComponentDefinition(port2, { requestTimeoutMs: 10 });
-
-  await assert.rejects(
-    remote.probeModule({ id: "fixture", url: "fixture.wasm" }),
-    /probeModule timed out after 10ms/
-  );
-  await assert.rejects(remote.describe(), /RPC is closed/);
-
-  endpoint.close();
-});
 
 test("component RPC structured-clones results and preserves optional exports", async () => {
   const scope = {
@@ -220,8 +169,8 @@ test("component RPC rejects a call which exceeds its configured deadline", async
   const remote = await connectSourceDebuggerComponent(port2, { requestTimeoutMs: 50 });
 
   await assert.rejects(remote.state("stop-1"), (error: unknown) => {
-    assert.ok(error instanceof SourceDebuggerRpcTransportError);
-    assert.equal(error.failure, "timeout");
+    assert.ok(error instanceof SourceDebuggerError);
+    assert.equal(error.code, "component-unavailable");
     assert.match(error.message, /state timed out after 50ms/);
     return true;
   });

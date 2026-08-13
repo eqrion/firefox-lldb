@@ -4,11 +4,8 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type {
-  SourceDebuggerComponentDefinition,
-  SourceDebuggerComponent,
-} from "../../src/source-debugger/protocol/component.js";
-import { SourceDebuggerSessionHost } from "../../src/source-debugger/target/host.js";
+import type { SourceDebuggerComponent } from "../../src/source-debugger/protocol/component.js";
+import { SourceDebuggerSessionHost } from "../../src/source-debugger/session/host.js";
 import { connectSourceDebuggerComponentHost } from "../../src/source-debugger/transport/host-rpc.js";
 import {
   serveSourceDebuggerComponentIsolate,
@@ -16,36 +13,23 @@ import {
 } from "../../src/source-debugger/transport/isolate.js";
 import { testSourceDebuggerRun } from "../helpers/source-debugger-run.js";
 
-test("generic isolate transport wires definition, instance, and scoped host imports", async () => {
+test("generic isolate transport wires a component and scoped host imports", async () => {
   const sessionHost = new SourceDebuggerSessionHost();
   const binding = sessionHost.forComponent("fake");
-  const isolate = new SourceDebuggerComponentIsolate("fake", binding, {
+  const isolate = new SourceDebuggerComponentIsolate(binding, {
     requestTimeoutMs: 100,
   });
   const importedHost = connectSourceDebuggerComponentHost(isolate.workerPorts.hostPort, {
     requestTimeoutMs: 100,
   });
-  const definition: SourceDebuggerComponentDefinition = {
-    describe: async () => descriptor("fake"),
-    probeModule: async (module) => ({
-      supported: module.debugInfo?.includes("fake") ?? false,
-      confidence: 95,
-      reason: "fake metadata",
-    }),
-  };
   const workerEndpoint = serveSourceDebuggerComponentIsolate(
     isolate.workerPorts,
-    definition,
     fakeComponent("fake")
   );
 
   try {
     await isolate.connect();
     assert.equal(isolate.id, "fake");
-    assert.deepEqual(
-      await isolate.probeModule({ id: "module", url: "module.wasm", debugInfo: ["fake"] }),
-      { supported: true, confidence: 95, reason: "fake metadata" }
-    );
     assert.equal((await isolate.component.describe()).name, "Fake fake");
 
     assert.deepEqual(
@@ -62,22 +46,15 @@ test("generic isolate transport wires definition, instance, and scoped host impo
   }
 });
 
-test("generic isolate rejects mismatched definition and instance identities", async () => {
+test("generic isolate rejects mismatched instance and descriptor identities", async () => {
   const sessionHost = new SourceDebuggerSessionHost();
-  const isolate = new SourceDebuggerComponentIsolate(
-    "definition",
-    sessionHost.forComponent("definition")
-  );
+  const isolate = new SourceDebuggerComponentIsolate(sessionHost.forComponent("instance"));
   const workerEndpoint = serveSourceDebuggerComponentIsolate(
     isolate.workerPorts,
-    {
-      describe: async () => descriptor("definition"),
-      probeModule: async () => ({ supported: true, confidence: 1 }),
-    },
-    fakeComponent("instance")
+    fakeComponent("instance", "descriptor")
   );
   try {
-    await assert.rejects(isolate.connect(), /descriptor id definition does not match instance/);
+    await assert.rejects(isolate.connect(), /descriptor id descriptor does not match instance/);
   } finally {
     isolate.close();
     workerEndpoint.close();
@@ -101,10 +78,10 @@ function descriptor(id: string) {
   };
 }
 
-function fakeComponent(id: string): SourceDebuggerComponent {
+function fakeComponent(id: string, descriptorId = id): SourceDebuggerComponent {
   return {
     id,
-    describe: async () => descriptor(id),
+    describe: async () => descriptor(descriptorId),
     addModules: async () => {},
     removeModules: async () => {},
     sources: async () => [],

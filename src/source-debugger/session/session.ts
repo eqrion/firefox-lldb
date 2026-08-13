@@ -4,7 +4,6 @@
 
 import { noopLogger, type Logger } from "../../logging.js";
 import type { SourceDebuggerComponent, SourceDebuggerRun } from "../protocol/component.js";
-import type { SourceDebuggerSessionHost } from "../target/host.js";
 import type { SourceDebuggerTarget } from "../protocol/target.js";
 import { SourceDebuggerError } from "../protocol/error.js";
 import {
@@ -15,7 +14,6 @@ import {
   validateSourceValue,
 } from "../protocol/validation.js";
 import type { ModuleOwnerResolver } from "./ownership.js";
-import { isSourceDebuggerRpcTransportError } from "../transport/rpc.js";
 import type {
   BreakpointId,
   CommandResult,
@@ -50,8 +48,6 @@ export interface SourceDebuggerSessionOptions {
   /** Lazily create and attach an installed component selected for a module
    * which appeared after initial discovery. Called only while stopped. */
   ensureComponent?: (componentId: ComponentId) => Promise<SourceDebuggerComponent>;
-  /** Imported debuggee capabilities owned and revoked with this session. */
-  debuggeeHost?: SourceDebuggerSessionHost;
   logger?: Logger;
 }
 
@@ -92,7 +88,6 @@ export class SourceDebuggerSession {
   readonly #ensureComponent:
     | ((componentId: ComponentId) => Promise<SourceDebuggerComponent>)
     | undefined;
-  readonly #debuggeeHost: SourceDebuggerSessionHost | undefined;
   readonly #logger: Logger;
   readonly #frames = new Map<LogicalFrameId, LogicalFrame>();
   readonly #sourceRoutes = new Map<SourceId, SourceRoute>();
@@ -121,7 +116,6 @@ export class SourceDebuggerSession {
     this.#target = options.target;
     this.#resolveModuleOwner = options.resolveModuleOwner ?? (async () => this.#components[0].id);
     this.#ensureComponent = options.ensureComponent;
-    this.#debuggeeHost = options.debuggeeHost;
     this.#logger = options.logger ?? noopLogger;
     this.#stateComponentId = this.#components[0].id;
   }
@@ -484,11 +478,7 @@ export class SourceDebuggerSession {
   }
 
   async close(): Promise<void> {
-    try {
-      await Promise.allSettled(this.#components.map((component) => component.dispose()));
-    } finally {
-      this.#debuggeeHost?.close();
-    }
+    await Promise.allSettled(this.#components.map((component) => component.dispose()));
     this.#frames.clear();
     this.#sourceRoutes.clear();
     this.#valueRoutes.clear();
@@ -920,7 +910,9 @@ export class SourceDebuggerSession {
     try {
       return await invoke();
     } catch (error) {
-      if (!isSourceDebuggerRpcTransportError(error)) throw error;
+      if (!(error instanceof SourceDebuggerError) || error.code !== "component-unavailable") {
+        throw error;
+      }
       this.#quarantine(component, operation, error);
       throw new ComponentUnavailableError(component.id, error);
     }

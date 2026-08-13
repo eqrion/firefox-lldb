@@ -19,7 +19,6 @@ import type {
 import type { ComponentRunRequest, RunId } from "../../protocol/types.js";
 import {
   LldbSourceDebuggerComponent,
-  LldbSourceDebuggerComponentDefinition,
   type LldbComponentRunControl,
   type LldbSourceDebuggerComponentOptions,
 } from "./component.js";
@@ -192,7 +191,6 @@ export interface EmbeddedLldbComponentRuntimeOptions extends LldbSourceDebuggerC
  * its platform server, attach shim, gdbstub component, and every RSP byte
  * stream live here. Its only target import is WasmDebuggee. */
 export class EmbeddedLldbComponentRuntime {
-  readonly definition: LldbSourceDebuggerComponentDefinition;
   readonly component: LldbSourceDebuggerComponent;
   readonly #client: LLDBClient;
   readonly #host: SourceDebuggerComponentHost;
@@ -214,11 +212,9 @@ export class EmbeddedLldbComponentRuntime {
     client: LLDBClient,
     options: EmbeddedLldbComponentRuntimeOptions,
     runtimeRunControl: LldbRuntimeRunControl,
-    definition: LldbSourceDebuggerComponentDefinition,
     component: LldbSourceDebuggerComponent
   ) {
     this.#client = client;
-    this.definition = definition;
     this.#host = options.host;
     this.#logger = options.logger ?? noopLogger;
     this.#verbose = options.verbose ?? false;
@@ -240,7 +236,7 @@ export class EmbeddedLldbComponentRuntime {
         options.exclusiveModules ?? false
       );
       let runtime: EmbeddedLldbComponentRuntime | undefined;
-      const definition = new LldbSourceDebuggerComponentDefinition(client, {
+      const component = new LldbSourceDebuggerComponent(client, {
         id: options.id,
         name: options.name,
         onDispose: () => runtime?.close(),
@@ -251,14 +247,7 @@ export class EmbeddedLldbComponentRuntime {
           : undefined,
         logger,
       });
-      const component = await definition.instantiate(options.host);
-      runtime = new EmbeddedLldbComponentRuntime(
-        client,
-        options,
-        runtimeRunControl,
-        definition,
-        component
-      );
+      runtime = new EmbeddedLldbComponentRuntime(client, options, runtimeRunControl, component);
       return runtime;
     } catch (error) {
       await client.destroy();

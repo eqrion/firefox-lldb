@@ -5,16 +5,10 @@
 import { parseCliArgs } from "../../../src/cli/options.js";
 import { quietLogger } from "../../../src/cli/logger.js";
 import { freePort } from "../../../src/net/free-port.js";
-import {
-  LldbComponentActivator,
-  LldbSourceDebuggerComponentLoader,
-} from "../../../src/source-debugger/components/lldb/loader.js";
-import { WasmSourceDebuggerComponentLoader } from "../../../src/source-debugger/components/wasm-text/loader.js";
-import {
-  createRoutedModuleOwnerResolver,
-  type SourceDebuggerComponentRoute,
-} from "../../../src/source-debugger/config.js";
-import type { LoadedSourceDebuggerComponent } from "../../../src/source-debugger/session/loader.js";
+import { loadFirefoxWasmDebuggerRuntime } from "../../../src/app/firefox-debugger.js";
+import type { SourceDebuggerComponentRoute } from "../../../src/app/component-routes.js";
+import type { SourceDebuggerComponentDefinition } from "../../../src/source-debugger/protocol/component.js";
+import type { SourceDebuggerComponentInstance } from "../../../src/source-debugger/session/loader.js";
 import { SourceDebuggerSessionRuntime } from "../../../src/source-debugger/session/runtime.js";
 import { FirefoxSourceDebuggerTarget } from "../../../src/source-debugger/target/firefox/target.js";
 import type { FirefoxChannel } from "../../../src/source-debugger/target/firefox/rdp/firefox.js";
@@ -70,10 +64,14 @@ export class SourceDebuggerTestSession {
     return this.target.session;
   }
 
-  component(id: string): LoadedSourceDebuggerComponent {
-    const component = this.runtime.components.find((candidate) => candidate.id === id);
+  component(id: string): SourceDebuggerComponentInstance {
+    const component = this.runtime.components.find((candidate) => candidate.component.id === id);
     if (!component) throw new Error(`SourceDebuggerComponent ${id} was not instantiated`);
     return component;
+  }
+
+  definition(id: string): SourceDebuggerComponentDefinition {
+    return this.runtime.catalog.entry(id).definition;
   }
 
   static async attach(
@@ -115,35 +113,13 @@ export class SourceDebuggerTestSession {
           onConsole: options.onConsole,
         });
         await waitForModules(target, options.expectedModules ?? 1);
-        const activator = new LldbComponentActivator({
-          automaticAttach: target.automaticAttach,
-          onDetached: (listener) => void target!.onDetached(listener),
+        runtime = await loadFirefoxWasmDebuggerRuntime({
+          target,
+          routes,
+          routedComponents: explicitlyRouted,
           logger,
           onOutput: options.onOutput,
-        });
-        const lldbLoaders = routes.map(
-          (route) =>
-            new LldbSourceDebuggerComponentLoader(activator, route, {
-              name: routes.length === 1 && route.id === "lldb" ? "LLDB" : `LLDB (${route.id})`,
-              logger,
-              observerResumesTarget: false,
-              exclusiveModules: true,
-              verbose: Boolean(process.env.E2E_RUNTIME_VERBOSE),
-            })
-        );
-        runtime = await SourceDebuggerSessionRuntime.load({
-          loaders: [...lldbLoaders, new WasmSourceDebuggerComponentLoader()],
-          target,
-          ...(explicitlyRouted
-            ? {
-                createModuleOwnerResolver: (
-                  definitions: Parameters<typeof createRoutedModuleOwnerResolver>[1]
-                ) => createRoutedModuleOwnerResolver(routes, definitions),
-              }
-            : {}),
-          eagerComponentIds: explicitlyRouted ? routes.map(({ id }) => id) : [],
-          fallbackComponentIds: routes.map(({ id }) => id),
-          logger,
+          verbose: Boolean(process.env.E2E_RUNTIME_VERBOSE),
         });
         const activation = await runtime.activate();
         return new SourceDebuggerTestSession(

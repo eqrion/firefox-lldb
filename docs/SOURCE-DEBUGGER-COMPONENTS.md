@@ -65,18 +65,21 @@ non-top-frame operations across stops.
 
 ## Source organization
 
-The implementation under `src/source-debugger/` mirrors those boundaries:
+The implementation is organized around those boundaries:
 
 - `protocol/` is the browser- and transport-neutral public contract, imported
   resource types, errors, target discovery surface, and runtime validation. It
   is published as `firefox-wasm-debugger/protocol`.
 - `session/` owns catalog loading, module ownership, component activation, ID
-  routing, frame composition, and the driver/observer coordinator.
+  routing, frame composition, the driver/observer coordinator, and `host.ts`,
+  which scopes imported capabilities for each component.
 - `target/` adapts a physical host. `target/firefox/` contains Firefox launch,
-  RDP, and the portable raw-Wasm resource implementation; `host.ts` scopes
-  imported capabilities without exposing RDP actors to components.
+  RDP, and the portable raw-Wasm resource implementation.
 - `transport/` binds the portable interfaces to workers and `MessagePort`.
   Component RPC and imported-resource RPC stay here.
+- `src/app/` is the product composition root which combines the Firefox target,
+  installed LLDB/Wasm-text ecosystems, and generic runtime. The CLI and primary
+  e2e fixture call the same function.
 - `components/lldb/` contains the LLDB adapter, worker, loader, and its private
   `platform/`, `rsp/`, and `gdbstub/` stack. It adapts its imported
   `WasmDebuggee` to GDB RSP because that is LLDB's supported Wasm interface;
@@ -88,7 +91,8 @@ The implementation under `src/source-debugger/` mirrors those boundaries:
   sequences to opaque `SourceDebuggerRun` tokens.
 
 Both production component implementations now run behind the same generic
-definition/instance/host worker transport. Firefox RDP appears only in the
+instance/host worker transport. Definitions remain lightweight host-side
+catalog metadata. Firefox RDP appears only in the
 Firefox target adapters and in the optional JavaScript REPL extension; the
 generic session has no RDP dependency.
 
@@ -136,14 +140,15 @@ fan out to candidates. Ecosystems that need to validate custom-section payloads
 will eventually need a bounded module-inspection resource or richer normalized
 host metadata.
 
-The loader contract now has two phases. `loadDefinition()` returns the small
-`describe()`/`probeModule()` discovery surface and must not start the language
-debugger. `instantiate(host)` is called only for a selected owner and returns
-its definition and instance RPCs plus generic `activate()`/`close()` lifecycle.
-The generic isolate transport still creates separate definition, instance, and
-imported-host ports for that live engine. The worker receives only its
-component-scoped debuggee host proxy. `SourceDebuggerSessionRuntime` owns the
-catalog, selected instances, broker, browser target, serialized late
+The loader contract separates a lightweight `definition` from
+`instantiate(host)`. The definition supplies `describe()`/`probeModule()` and
+must not start the language debugger. Instantiation is called only for a
+selected owner and returns the live component plus generic
+`activate()`/`close()` lifecycle. The generic isolate transport creates one
+instance port and one imported-host port for that engine. The worker receives
+only its component-scoped debuggee host proxy; definitions and ownership probes
+never need a worker or a target capability. `SourceDebuggerSessionRuntime`
+owns the catalog, selected instances, broker, browser target, serialized late
 activations, and dependency-ordered teardown. LLDB's catalog definition is pure
 TypeScript; its wasm worker is not created until instantiation. Its
 loader/runtime privately handle the platform server, attach shim, gdbstub, RSP

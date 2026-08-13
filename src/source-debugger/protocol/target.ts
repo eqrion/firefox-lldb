@@ -14,7 +14,6 @@ export interface SourceDebuggerTarget {
   modules(): Promise<UnownedModuleDescriptor[]>;
   assignModuleOwner?(moduleId: string, componentId: ComponentId): void;
   removeModuleOwner?(moduleId: string): void;
-  moduleOwner?(moduleId: string): ComponentId | undefined;
   /** Open a component-scoped view of the physical Wasm machine. Target
    * implementations enforce module ownership before returning the resource. */
   openWasmDebuggee?(componentId: ComponentId): Promise<WasmDebuggee>;

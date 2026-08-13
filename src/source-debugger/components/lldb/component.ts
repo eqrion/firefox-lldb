@@ -27,8 +27,6 @@ import type {
 import type {
   ModuleClaim,
   SourceDebuggerComponent,
-  SourceDebuggerComponentDefinition,
-  SourceDebuggerComponentHost,
   SourceDebuggerRun,
 } from "../../protocol/component.js";
 import { noopLogger, type Logger } from "../../../logging.js";
@@ -101,28 +99,6 @@ function escapeLldbArgument(value: string): string {
 
 function breakpointId(result: CommandResult): string | undefined {
   return result.output.match(/\bBreakpoint\s+(\d+):/)?.[1];
-}
-
-export class LldbSourceDebuggerComponentDefinition implements SourceDebuggerComponentDefinition {
-  readonly #client: LLDBClient;
-  readonly #options: LldbSourceDebuggerComponentOptions;
-
-  constructor(client: LLDBClient, options: LldbSourceDebuggerComponentOptions = {}) {
-    this.#client = client;
-    this.#options = options;
-  }
-
-  async describe(): Promise<SourceDebuggerComponentDescriptor> {
-    return lldbSourceDebuggerDescriptor(this.#options);
-  }
-
-  async probeModule(module: Omit<ModuleDescriptor, "owner">): Promise<ModuleClaim> {
-    return probeLldbSourceDebuggerModule(module);
-  }
-
-  async instantiate(_host: SourceDebuggerComponentHost): Promise<LldbSourceDebuggerComponent> {
-    return new LldbSourceDebuggerComponent(this.#client, this.#options);
-  }
 }
 
 export class LldbSourceDebuggerComponent implements SourceDebuggerComponent {

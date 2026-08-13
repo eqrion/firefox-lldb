@@ -10,4 +10,4 @@ export {
   SourceDebuggerSessionRuntime,
   type SourceDebuggerSessionRuntimeOptions,
 } from "./source-debugger/session/runtime.js";
-export { SourceDebuggerSessionHost } from "./source-debugger/target/host.js";
+export { SourceDebuggerSessionHost } from "./source-debugger/session/host.js";
