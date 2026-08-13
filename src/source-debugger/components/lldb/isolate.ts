@@ -4,8 +4,11 @@
 
 import { MessageChannel, type MessagePort, Worker } from "node:worker_threads";
 import { noopLogger, type Logger } from "../../../logging.js";
-import type { ModuleClaim, SourceDebuggerComponent } from "../../protocol/component.js";
-import type { SourceDebuggerComponentHostBinding } from "../../target/host.js";
+import type {
+  ModuleClaim,
+  SourceDebuggerComponent,
+  SourceDebuggerComponentHost,
+} from "../../protocol/component.js";
 import { SourceDebuggerComponentIsolate } from "../../transport/isolate.js";
 import type {
   LldbIsolateControlMethod,
@@ -23,7 +26,7 @@ interface PendingControl {
 }
 
 export interface IsolatedLldbComponentRuntimeOptions {
-  host: SourceDebuggerComponentHostBinding;
+  host: SourceDebuggerComponentHost;
   id?: string;
   name?: string;
   logger?: Logger;
@@ -63,10 +66,11 @@ export class IsolatedLldbComponentRuntime implements SourceDebuggerComponentProb
     const controlChannel = new MessageChannel();
     const logger = options.logger ?? noopLogger;
     let channel: LldbIsolateChannel | undefined;
-    const isolate = new SourceDebuggerComponentIsolate(options.host, {
+    const componentId = options.id ?? "lldb";
+    const isolate = new SourceDebuggerComponentIsolate(componentId, options.host, {
       requestTimeoutMs: options.requestTimeoutMs ?? 30_000,
       onTransportFailure: (error) => {
-        logger.error(`[${options.id ?? "lldb"}] ${error.message}; terminating isolate`);
+        logger.error(`[${componentId}] ${error.message}; terminating isolate`);
         void channel?.terminate();
       },
     });

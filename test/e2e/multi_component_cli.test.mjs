@@ -2,14 +2,14 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-// Production-path proof: spawn the real firefox-lldb executable in a PTY and
+// Production-path proof: spawn the real firefox-wasm-debugger executable in a PTY and
 // ask it to construct isolated LLDB SourceDebuggerComponents itself. Every
 // generic operation crosses the outer worker's MessagePort RPC boundary.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { PtyRepl } from "../../src/mcp/pty-repl.ts";
-import { freePort } from "../../src/platform/gdb-server-spawner.ts";
+import { freePort } from "../../src/net/free-port.ts";
 import { startStaticServer } from "./harness.mjs";
 
 test("the CLI coordinates three routed SourceDebuggerComponents", async () => {
@@ -20,14 +20,9 @@ test("the CLI coordinates three routed SourceDebuggerComponents", async () => {
     const rdpPort = await freePort();
     let marionettePort = await freePort();
     while (marionettePort === rdpPort) marionettePort = await freePort();
-    let platformPort = await freePort();
-    while (platformPort === rdpPort || platformPort === marionettePort) {
-      platformPort = await freePort();
-    }
     repl = await PtyRepl.launch({
       url,
       headless: true,
-      platformPort,
       rdpPort,
       marionettePort,
       fire: "runA()",

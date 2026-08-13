@@ -10,7 +10,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { PassThrough, Writable } from "node:stream";
 import { runRepl } from "../../src/cli/repl.js";
-import type { RdpWasmSession } from "../../src/rdp/session.js";
+import type { RdpWasmSession } from "../../src/source-debugger/target/firefox/rdp/session.js";
 import type { SourceDebuggerSession } from "../../src/source-debugger/session/session.js";
 
 const stripAnsi = (s: string) => s.replace(/\[[0-9;?]*[A-Za-z]/g, "");

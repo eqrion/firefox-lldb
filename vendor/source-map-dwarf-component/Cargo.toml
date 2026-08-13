@@ -1,7 +1,7 @@
 # Thin wasm-component wrapper around the `source-map-dwarf` crate, built to a
 # wasm32-wasip2 component and transpiled with jco (mirrors gdbstub-component).
 [package]
-name = "firefox-lldb-source-map-component"
+name = "firefox-wasm-debugger-source-map-component"
 version = "0.1.0"
 edition = "2024"
 license = "MPL-2.0"

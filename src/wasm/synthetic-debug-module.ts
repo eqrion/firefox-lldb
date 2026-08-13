@@ -94,7 +94,7 @@ function debugInfo(
 ): number[] {
   const body: number[] = [
     0x01, // abbrev 1 = compile_unit
-    ...cstr("firefox-lldb"), // DW_AT_producer
+    ...cstr("firefox-wasm-debugger"), // DW_AT_producer
     ...u16le(0x000c), // DW_AT_language = DW_LANG_C99
     ...cstr(name), // DW_AT_name
     ...cstr(compDir), // DW_AT_comp_dir

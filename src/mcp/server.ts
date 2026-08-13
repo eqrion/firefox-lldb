@@ -3,11 +3,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-// MCP stdio server exposing the firefox-lldb REPL to a coding agent. It holds a
+// MCP stdio server exposing the firefox-wasm-debugger REPL to a coding agent. It holds a
 // single debug session (a real CLI driven in a pty; see pty-repl.ts) and turns
 // REPL interaction into request/response tools. Page automation (navigate,
 // click, screenshot) is left to firefox-devtools-mcp, which connects to the
-// *same* Firefox over Marionette on `marionettePort` — call lldb_launch first.
+// *same* Firefox over Marionette on `marionettePort` — call debugger_launch first.
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -16,7 +16,7 @@ import {
   ListToolsRequestSchema,
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
-import { freePort } from "../platform/gdb-server-spawner.js";
+import { freePort } from "../net/free-port.js";
 import { DEFAULT_SEND_TIMEOUT_MS, PtyRepl, type SendResult } from "./pty-repl.js";
 import { marionettePort } from "../config.js";
 
@@ -26,9 +26,9 @@ const MARIONETTE_PORT = marionettePort();
 
 const TOOLS: Tool[] = [
   {
-    name: "lldb_launch",
+    name: "debugger_launch",
     description:
-      "Launch Firefox and the firefox-lldb REPL against a page, attach to the " +
+      "Launch Firefox and the firefox-wasm-debugger REPL against a page, attach to the " +
       "wasm process, and wait for the (sdb) prompt. Returns the attach/banner " +
       "output and the marionettePort that firefox-devtools-mcp should " +
       "--connect-existing to. Call this before any firefox-devtools tool.",
@@ -51,14 +51,14 @@ const TOOLS: Tool[] = [
     },
   },
   {
-    name: "lldb_send",
+    name: "debugger_send",
     description:
       "Send one command to the language-generic (sdb) prompt and return its output. " +
       "Use SourceDebuggerSession commands (`break`, `continue`, `bt`, `locals`, " +
       "`p`) or prefix a native LLDB command with `lldb`. `js p/bt/frame` remains " +
       "available for JavaScript inspection. " +
       "`continue` returns when the target next stops; if it keeps running the " +
-      "call times out (prompt=false) — use lldb_interrupt.",
+      "call times out (prompt=false) — use debugger_interrupt.",
     inputSchema: {
       type: "object",
       properties: {
@@ -72,12 +72,12 @@ const TOOLS: Tool[] = [
     },
   },
   {
-    name: "lldb_interrupt",
+    name: "debugger_interrupt",
     description: "Send Ctrl-C to interrupt a running target, then wait for the stop output.",
     inputSchema: { type: "object", properties: {} },
   },
   {
-    name: "lldb_read",
+    name: "debugger_read",
     description:
       "Drain buffered async output (streamed page console messages, tab hints) " +
       "without sending a command.",
@@ -89,7 +89,7 @@ const TOOLS: Tool[] = [
     },
   },
   {
-    name: "lldb_shutdown",
+    name: "debugger_shutdown",
     description: "Quit the REPL and tear down Firefox.",
     inputSchema: { type: "object", properties: {} },
   },
@@ -106,7 +106,7 @@ function sendText(r: SendResult): string {
   return (
     (r.output ? r.output + "\n\n" : "") +
     "[no prompt returned — the target is likely still running; " +
-    "call lldb_interrupt to stop it, or lldb_read to watch output]"
+    "call debugger_interrupt to stop it, or debugger_read to watch output]"
   );
 }
 
@@ -120,7 +120,7 @@ function timeoutArg(value: unknown, fallback: number): number {
 
 async function call(name: string, args: Record<string, unknown>) {
   switch (name) {
-    case "lldb_launch": {
+    case "debugger_launch": {
       if (repl) {
         await repl.shutdown();
         repl = undefined;
@@ -138,23 +138,23 @@ async function call(name: string, args: Record<string, unknown>) {
           (banner ? `\n\n${banner}` : "")
       );
     }
-    case "lldb_send": {
-      if (!repl) return text("error: no session — call lldb_launch first");
+    case "debugger_send": {
+      if (!repl) return text("error: no session — call debugger_launch first");
       const r = await repl.send(
         String(args.command),
         timeoutArg(args.timeoutMs, DEFAULT_SEND_TIMEOUT_MS)
       );
       return text(sendText(r));
     }
-    case "lldb_interrupt": {
-      if (!repl) return text("error: no session — call lldb_launch first");
+    case "debugger_interrupt": {
+      if (!repl) return text("error: no session — call debugger_launch first");
       return text(sendText(await repl.interrupt()));
     }
-    case "lldb_read": {
-      if (!repl) return text("error: no session — call lldb_launch first");
+    case "debugger_read": {
+      if (!repl) return text("error: no session — call debugger_launch first");
       return text((await repl.read(timeoutArg(args.timeoutMs, 2000))) || "(no output)");
     }
-    case "lldb_shutdown": {
+    case "debugger_shutdown": {
       if (!repl) return text("no session");
       await repl.shutdown();
       repl = undefined;
@@ -167,7 +167,7 @@ async function call(name: string, args: Record<string, unknown>) {
 
 async function main(): Promise<void> {
   const server = new Server(
-    { name: "firefox-lldb", version: "0.1.0" },
+    { name: "firefox-wasm-debugger", version: "0.1.0" },
     { capabilities: { tools: {} } }
   );
 

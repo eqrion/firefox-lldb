@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "firefox-lldb": {
+    "firefox-wasm-debugger": {
       "command": "node",
       "args": ["--import", "tsx", "src/mcp/server.ts"]
     },

@@ -8,7 +8,11 @@
 
 import readline from "node:readline";
 import type { Readable, Writable } from "node:stream";
-import { grip, type FrameForm, type RdpWasmSession } from "../rdp/session.js";
+import {
+  grip,
+  type FrameForm,
+  type RdpWasmSession,
+} from "../source-debugger/target/firefox/rdp/session.js";
 import { SourceDebuggerSession } from "../source-debugger/session/session.js";
 import type { LogicalFrame, LogicalFrameId } from "../source-debugger/protocol/types.js";
 

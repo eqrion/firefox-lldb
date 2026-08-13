@@ -68,16 +68,17 @@ non-top-frame operations across stops.
 The implementation under `src/source-debugger/` mirrors those boundaries:
 
 - `protocol/` is the browser- and transport-neutral public contract, imported
-  resource types, errors, target discovery surface, and runtime validation.
+  resource types, errors, target discovery surface, and runtime validation. It
+  is published as `firefox-wasm-debugger/protocol`.
 - `session/` owns catalog loading, module ownership, component activation, ID
   routing, frame composition, and the driver/observer coordinator.
-- `target/` adapts a physical host. `firefox.ts` is the Firefox implementation;
-  `host.ts` scopes imported capabilities; `wasm-debuggee.ts` implements the
-  portable raw-Wasm resource without exposing RDP actors to components.
+- `target/` adapts a physical host. `target/firefox/` contains Firefox launch,
+  RDP, and the portable raw-Wasm resource implementation; `host.ts` scopes
+  imported capabilities without exposing RDP actors to components.
 - `transport/` binds the portable interfaces to workers and `MessagePort`.
   Component RPC and imported-resource RPC stay here.
-- `components/lldb/` contains the LLDB adapter, worker, loader, private
-  platform/RSP/gdbstub stack, and target bootstrap. It adapts its imported
+- `components/lldb/` contains the LLDB adapter, worker, loader, and its private
+  `platform/`, `rsp/`, and `gdbstub/` stack. It adapts its imported
   `WasmDebuggee` to GDB RSP because that is LLDB's supported Wasm interface;
   neither the session nor component host exposes RSP.
 - `components/wasm-text/` contains an independent generated-WAT debugger,
@@ -90,6 +91,11 @@ Both production component implementations now run behind the same generic
 definition/instance/host worker transport. Firefox RDP appears only in the
 Firefox target adapters and in the optional JavaScript REPL extension; the
 generic session has no RDP dependency.
+
+The npm package deliberately exposes only the language-generic API at its root
+and the narrower `./protocol` subpath. The two executable surfaces are
+`firefox-wasm-debugger` and `firefox-wasm-debugger-mcp`; there is no standalone
+RSP server product or supported deep-import API.
 
 Component definitions expose `describe()` and `probeModule()` independently of
 their target-specific instance API. The installation loader owns
@@ -139,9 +145,10 @@ imported-host ports for that live engine. The worker receives only its
 component-scoped debuggee host proxy. `SourceDebuggerSessionRuntime` owns the
 catalog, selected instances, broker, browser target, serialized late
 activations, and dependency-ordered teardown. LLDB's catalog definition is pure
-TypeScript; its wasm worker is not created until instantiation. Its loader
-privately handles its platform server, attach shim, gdbstub, RSP connections,
-native setup commands, and physical run-control wiring. A Dart, .NET, or other
+TypeScript; its wasm worker is not created until instantiation. Its
+loader/runtime privately handle the platform server, attach shim, gdbstub, RSP
+connections, native setup commands, and physical run-control wiring. A Dart,
+.NET, or other
 debugger therefore does not need to implement an LLDB-shaped bootstrap,
 discovery, or host protocol.
 
@@ -155,7 +162,7 @@ same stop when opened. LLDB-specific details remain in its loader and are
 exercised through the same generic activation path as a future ecosystem
 integration.
 
-The `firefox-lldb` CLI now presents a language-generic `(sdb)` prompt. Its core
+The `firefox-wasm-debugger` CLI now presents a language-generic `(sdb)` prompt. Its core
 commands call only `SourceDebuggerSession`:
 
 ```text

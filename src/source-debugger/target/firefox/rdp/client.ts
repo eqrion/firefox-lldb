@@ -19,7 +19,7 @@
 import { RdpTransport, type RdpPacket } from "./transport.js";
 import { EVENTS, ROOT_ACTOR } from "./protocol.js";
 import { EventEmitter } from "node:events";
-import type { Logger } from "../logging.js";
+import type { Logger } from "../../../../logging.js";
 
 // Unsolicited notification types (never treated as request replies). Firefox
 // sends {type:"interrupt"} as an ACK when a thread receives interrupt while

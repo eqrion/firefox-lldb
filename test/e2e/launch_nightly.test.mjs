@@ -9,10 +9,13 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseCliArgs } from "../../src/core/platform-session.ts";
-import { findFirefoxBinary, launchFirefox } from "../../src/rdp/firefox.ts";
-import { verifyFirefoxLaunchToken } from "../../src/rdp/session.ts";
-import { freePort } from "../../src/platform/gdb-server-spawner.ts";
+import { parseCliArgs } from "../../src/cli/options.ts";
+import {
+  findFirefoxBinary,
+  launchFirefox,
+} from "../../src/source-debugger/target/firefox/rdp/firefox.ts";
+import { verifyFirefoxLaunchToken } from "../../src/source-debugger/target/firefox/rdp/session.ts";
+import { freePort } from "../../src/net/free-port.ts";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -38,8 +41,6 @@ test("--nightly launches and shuts down cleanly", async (t) => {
     "--launch",
     "--nightly",
     "--headless",
-    "--port",
-    "0",
     "--rdp-port",
     String(await freePort()),
   ]);

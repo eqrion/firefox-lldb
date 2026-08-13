@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-// Drives the *real* firefox-lldb CLI in a pseudo-terminal. Spawning the actual
+// Drives the real firefox-wasm-debugger CLI in a pseudo-terminal. Spawning the actual
 // binary (rather than re-wiring runRepl in-process) means the harness exercises
 // exactly what a human user runs: same readline, same `(sdb)` prompt, same
 // Ctrl-C handling. node-pty gives a genuine TTY so `\x03` becomes a real SIGINT
@@ -27,14 +27,16 @@ interface PromptWaiter {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // In dev we run the .ts CLI through tsx; a built dist runs the .js directly.
 const IS_TS = __dirname.endsWith("src/mcp");
-const CLI = join(__dirname, "..", "cli", IS_TS ? "firefox-lldb.ts" : "firefox-lldb.js");
+const CLI = join(
+  __dirname,
+  "..",
+  "cli",
+  IS_TS ? "firefox-wasm-debugger.ts" : "firefox-wasm-debugger.js"
+);
 
 export interface LaunchOptions {
   url: string;
   headless?: boolean;
-  /** Platform RSP listener. Tests which run multiple CLI processes in parallel
-   * should allocate this explicitly instead of sharing the CLI default. */
-  platformPort?: number;
   rdpPort: number;
   marionettePort: number;
   /** JS to evaluate in the page on the first continue (auto-trigger a workload
@@ -77,7 +79,10 @@ export class PtyRepl {
     this.exited = new Promise<void>((resolve) =>
       child.onExit(() => {
         for (const waiter of [...this.#waiters]) {
-          this.#settleWaiter(waiter, new Error("firefox-lldb exited before returning a prompt"));
+          this.#settleWaiter(
+            waiter,
+            new Error("firefox-wasm-debugger exited before returning a prompt")
+          );
         }
         resolve();
       })
@@ -91,7 +96,6 @@ export class PtyRepl {
       CLI,
       "--launch",
       ...(opts.headless ? ["--headless"] : []),
-      ...(opts.platformPort !== undefined ? ["--port", String(opts.platformPort)] : []),
       "--rdp-port",
       String(opts.rdpPort),
       "--marionette-port",
@@ -210,7 +214,7 @@ export class PtyRepl {
         this.exited.then(() => true),
         new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 3000)),
       ]);
-      if (!killed) throw new Error("firefox-lldb PTY did not exit after kill");
+      if (!killed) throw new Error("firefox-wasm-debugger PTY did not exit after kill");
     }
   }
 

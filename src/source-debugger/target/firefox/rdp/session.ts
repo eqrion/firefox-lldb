@@ -58,17 +58,17 @@ import {
   type PageErrorEvent,
 } from "./protocol.js";
 import { EventEmitter } from "node:events";
-import type { WasmFunctionRange } from "../gdb/wasm-bytecode.js";
+import type { WasmFunctionRange } from "../../../../wasm/bytecode.js";
 import { LAUNCH_TOKEN_PREF } from "./firefox.js";
 import { EMPTY_WASM_MODULE, DETACH_GRACE_MS } from "./constants.js";
-import { noopLogger, type Logger } from "../logging.js";
+import { noopLogger, type Logger } from "../../../../logging.js";
 import {
   defaultModuleByteProvider,
   isWasmBinary,
   MAX_MODULE_BYTES,
   type ModuleByteProvider,
 } from "./module-bytes.js";
-import { wasmDebugInfoHints, type WasmDebugInfoHint } from "../wasm/metadata.js";
+import { wasmDebugInfoHints, type WasmDebugInfoHint } from "../../../../wasm/metadata.js";
 
 export { grip, type TabInfo, type SourceForm, type FrameForm, type PauseEvent, type StoppedEvent };
 
@@ -628,7 +628,7 @@ export class RdpWasmSession extends EventEmitter {
         if (entry) {
           const [, info] = entry;
           // The page's tab was closed or navigated away; let consumers react
-          // (e.g. firefox-lldb detaches the lldb process). Give a Fission
+          // (e.g. firefox-wasm-debugger detaches the lldb process). Give a Fission
           // process-swap replacement (see DETACH_GRACE_MS) a chance to arrive
           // first, so a swap isn't mistaken for a real close.
           if (info.isTopLevel) {

@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { PtyRepl } from "../../src/mcp/pty-repl.ts";
-import { freePort } from "../../src/platform/gdb-server-spawner.ts";
+import { freePort } from "../../src/net/free-port.ts";
 import { startStaticServer } from "./harness.mjs";
 
 test("the generic CLI discovers and presents the Wasm text fallback", async () => {
@@ -18,14 +18,9 @@ test("the generic CLI discovers and presents the Wasm text fallback", async () =
     const rdpPort = await freePort();
     let marionettePort = await freePort();
     while (marionettePort === rdpPort) marionettePort = await freePort();
-    let platformPort = await freePort();
-    while (platformPort === rdpPort || platformPort === marionettePort) {
-      platformPort = await freePort();
-    }
     repl = await PtyRepl.launch({
       url: `http://127.0.0.1:${staticServer.port}/mixed-wat.html`,
       headless: true,
-      platformPort,
       rdpPort,
       marionettePort,
       startupTimeoutMs: 120_000,

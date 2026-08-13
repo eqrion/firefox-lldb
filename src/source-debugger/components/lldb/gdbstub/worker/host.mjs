@@ -106,7 +106,7 @@ export function startGdbServer({ dispatch, port, onInfo, onTrace, onError, verbo
       reportError(
         "[gdb worker] out of memory — the session was likely driven by the generic " +
           "gdb-remote plugin, which misreads the wasm address space. Reattach with " +
-          "the wasm plugin: `attach --pid N` (firefox-lldb) or " +
+          "the wasm plugin: `attach --pid N` (firefox-wasm-debugger) or " +
           "`process attach --plugin wasm --pid N`."
       );
     } else {

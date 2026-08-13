@@ -10,7 +10,7 @@ import {
   escapeBinary,
   unescapeBinary,
   PacketParser,
-} from "../../src/protocol/packet.js";
+} from "../../src/source-debugger/components/lldb/rsp/packet.js";
 
 test("checksum is the byte sum modulo 256", () => {
   assert.equal(checksum(new TextEncoder().encode("OK")), (0x4f + 0x4b) & 0xff);

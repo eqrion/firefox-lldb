@@ -4,14 +4,14 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseCliArgs } from "../../src/core/platform-session.ts";
-import { freePort } from "../../src/platform/gdb-server-spawner.ts";
-import { FirefoxSourceDebuggerTarget } from "../../src/source-debugger/target/firefox.ts";
+import { parseCliArgs } from "../../src/cli/options.ts";
+import { freePort } from "../../src/net/free-port.ts";
+import { FirefoxSourceDebuggerTarget } from "../../src/source-debugger/target/firefox/target.ts";
 import { SourceDebuggerSessionHost } from "../../src/source-debugger/target/host.ts";
 import { IsolatedLldbComponentRuntime } from "../../src/source-debugger/components/lldb/isolate.ts";
 import {
   LldbSourceDebuggerComponentLoader,
-  LldbSourceDebuggerTarget,
+  LldbComponentActivator,
 } from "../../src/source-debugger/components/lldb/loader.ts";
 import { createProbeModuleOwnerResolver } from "../../src/source-debugger/session/ownership.ts";
 import { SourceDebuggerSessionRuntime } from "../../src/source-debugger/session/runtime.ts";
@@ -60,20 +60,19 @@ test("catalog discovery instantiates LLDB but not an unsupported installed ecosy
   const args = parseCliArgs([
     "--launch",
     "--headless",
-    "--port",
-    "0",
     "--rdp-port",
     String(await freePort()),
     "--url",
     `http://127.0.0.1:${staticServer.port}/index.html`,
   ]);
-  const target = await FirefoxSourceDebuggerTarget.start({ args });
-  const lldbTarget = new LldbSourceDebuggerTarget({
-    target,
+  const target = await FirefoxSourceDebuggerTarget.start({ ...args });
+  const lldbActivator = new LldbComponentActivator({
+    automaticAttach: target.automaticAttach,
+    onDetached: (listener) => void target.onDetached(listener),
   });
   const runtime = await SourceDebuggerSessionRuntime.load({
     target,
-    loaders: [unsupportedLoader, new LldbSourceDebuggerComponentLoader(lldbTarget, route)],
+    loaders: [unsupportedLoader, new LldbSourceDebuggerComponentLoader(lldbActivator, route)],
   });
   try {
     assert.equal(runtime.catalog.entries.length, 2);

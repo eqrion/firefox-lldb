@@ -7,10 +7,9 @@ import type {
   ModuleClaim,
   SourceDebuggerComponentDefinition,
   SourceDebuggerComponent,
+  SourceDebuggerComponentHost,
 } from "../../protocol/component.js";
 import type { SourceDebuggerComponentRoute } from "../../config.js";
-import type { FirefoxSourceDebuggerTarget } from "../../target/firefox.js";
-import type { SourceDebuggerComponentHostBinding } from "../../target/host.js";
 import { lldbSourceDebuggerDescriptor, probeLldbSourceDebuggerModule } from "./component.js";
 import {
   IsolatedLldbComponentRuntime,
@@ -24,8 +23,9 @@ import type {
 } from "../../session/loader.js";
 import type { ModuleDescriptor } from "../../protocol/types.js";
 
-export interface LldbSourceDebuggerTargetOptions {
-  target: FirefoxSourceDebuggerTarget;
+export interface LldbComponentActivatorOptions {
+  automaticAttach: boolean;
+  onDetached?: (listener: () => void) => void;
   logger?: Logger;
   /** Status and lifecycle text for the frontend. */
   onOutput?: (message: string) => void;
@@ -35,21 +35,21 @@ interface LldbTargetActivation extends SourceDebuggerComponentActivation {
   close(): Promise<void>;
 }
 
-/** Firefox target integration used by the installed LLDB ecosystem. It owns
- * every LLDB-specific platform/RSP/attach detail; neither the generic session
- * runtime nor its frontend needs to know how LLDB reaches the debuggee. */
-export class LldbSourceDebuggerTarget {
-  readonly #target: FirefoxSourceDebuggerTarget;
+/** Engine lifecycle used by the installed LLDB ecosystem. Target access comes
+ * only from the imported SourceDebuggerComponentHost; these options carry the
+ * frontend's attach policy and a transport-neutral detach notification. */
+export class LldbComponentActivator {
+  readonly #automaticAttach: boolean;
   readonly #logger: Logger;
   readonly #onOutput: (message: string) => void;
   readonly #activeRuntimes = new Map<string, IsolatedLldbComponentRuntime>();
   #primaryId: string | undefined;
 
-  constructor(options: LldbSourceDebuggerTargetOptions) {
-    this.#target = options.target;
+  constructor(options: LldbComponentActivatorOptions) {
+    this.#automaticAttach = options.automaticAttach;
     this.#logger = options.logger ?? noopLogger;
     this.#onOutput = options.onOutput ?? (() => {});
-    this.#target.onDetached(() => {
+    options.onDetached?.(() => {
       for (const runtime of this.#activeRuntimes.values()) {
         void runtime
           .command("process detach")
@@ -83,9 +83,9 @@ export class LldbSourceDebuggerTarget {
       }
 
       const greeting =
-        "firefox-lldb source debugger — `attach --pid N` to attach, `help` for generic commands.";
+        "firefox-wasm-debugger — `attach --pid N` to attach, `help` for generic commands.";
       let readyMessage: string | undefined;
-      if (this.#target.automaticAttach) {
+      if (this.#automaticAttach) {
         if (primary) this.#onOutput(`${greeting}\nattaching...`);
         const attached = await runtime.attach(1, {
           onRetry: (attempt) =>
@@ -141,7 +141,7 @@ export class LldbSourceDebuggerComponentLoader implements SourceDebuggerComponen
   readonly id: string;
 
   constructor(
-    private readonly target: LldbSourceDebuggerTarget,
+    private readonly activator: LldbComponentActivator,
     private readonly route: SourceDebuggerComponentRoute,
     private readonly options: LldbSourceDebuggerComponentLoaderOptions = {}
   ) {
@@ -161,21 +161,19 @@ export class LldbSourceDebuggerComponentLoader implements SourceDebuggerComponen
     };
   }
 
-  async instantiate(
-    host: SourceDebuggerComponentHostBinding
-  ): Promise<LoadedSourceDebuggerComponent> {
+  async instantiate(host: SourceDebuggerComponentHost): Promise<LoadedSourceDebuggerComponent> {
     const runtime = await IsolatedLldbComponentRuntime.create({
       ...this.options,
       id: this.id,
       host,
     });
-    return new LoadedLldbSourceDebuggerComponent(runtime, this.target, this.route);
+    return new LoadedLldbSourceDebuggerComponent(runtime, this.activator, this.route);
   }
 }
 
 class LoadedLldbSourceDebuggerComponent implements LoadedSourceDebuggerComponent {
   readonly #runtime: IsolatedLldbComponentRuntime;
-  readonly #target: LldbSourceDebuggerTarget;
+  readonly #activator: LldbComponentActivator;
   readonly #route: SourceDebuggerComponentRoute;
   #activation: LldbTargetActivation | undefined;
   #activationPromise: Promise<SourceDebuggerComponentActivation> | undefined;
@@ -183,11 +181,11 @@ class LoadedLldbSourceDebuggerComponent implements LoadedSourceDebuggerComponent
 
   constructor(
     runtime: IsolatedLldbComponentRuntime,
-    target: LldbSourceDebuggerTarget,
+    activator: LldbComponentActivator,
     route: SourceDebuggerComponentRoute
   ) {
     this.#runtime = runtime;
-    this.#target = target;
+    this.#activator = activator;
     this.#route = route;
   }
 
@@ -219,7 +217,7 @@ class LoadedLldbSourceDebuggerComponent implements LoadedSourceDebuggerComponent
   }
 
   async #activate(): Promise<SourceDebuggerComponentActivation> {
-    this.#activation = await this.#target.activate(this.#runtime, this.#route);
+    this.#activation = await this.#activator.activate(this.#runtime, this.#route);
     return this.#activation.readyMessage === undefined
       ? {}
       : { readyMessage: this.#activation.readyMessage };

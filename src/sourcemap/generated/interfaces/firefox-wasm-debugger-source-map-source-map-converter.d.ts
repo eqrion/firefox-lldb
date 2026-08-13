@@ -1,4 +1,4 @@
-/** @module Interface firefox-lldb:source-map/source-map-converter@0.1.0 **/
+/** @module Interface firefox-wasm-debugger:source-map/source-map-converter@0.1.0 **/
 export function inspect(wasm: Uint8Array): InspectResult;
 export function convert(wasm: Uint8Array, sourceMap: Uint8Array | undefined, compDir: string | undefined): ConvertResult;
 export interface InspectResult {

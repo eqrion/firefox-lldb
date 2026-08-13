@@ -5,7 +5,7 @@
 // A minimal RSP client used by integration tests to drive a running server.
 
 import net from "node:net";
-import { framePacket, PacketParser } from "../../src/protocol/packet.js";
+import { framePacket, PacketParser } from "../../src/source-debugger/components/lldb/rsp/packet.js";
 
 export class RspClient {
   #socket: net.Socket;

@@ -9,7 +9,7 @@
 
 import net from "node:net";
 import { PacketParser, framePacket } from "./packet.js";
-import { noopLogger, type Logger } from "../logging.js";
+import { noopLogger, type Logger } from "../../../../logging.js";
 
 export interface RspHandler {
   /**

@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // Wasm trap surface behaviour. With pauseOnExceptions + ignoreCaughtExceptions
-// (see src/rdp/session.ts), an uncaught wasm trap pauses at the trapping frame
+// (see src/source-debugger/target/firefox/rdp/session.ts), an uncaught wasm trap pauses at the trapping frame
 // and surfaces to LLDB as a SIGSEGV signal stop. The trapping frame stays
 // inspectable, so we can read the locals that explain why it trapped.
 

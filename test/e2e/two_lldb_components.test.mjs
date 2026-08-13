@@ -9,13 +9,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { PassThrough, Writable } from "node:stream";
-import { parseCliArgs } from "../../src/core/platform-session.ts";
+import { parseCliArgs } from "../../src/cli/options.ts";
 import { runRepl } from "../../src/cli/repl.ts";
 import { IsolatedLldbComponentRuntime } from "../../src/source-debugger/components/lldb/isolate.ts";
 import { SourceDebuggerSessionHost } from "../../src/source-debugger/target/host.ts";
 import { SourceDebuggerSession } from "../../src/source-debugger/session/session.ts";
-import { FirefoxSourceDebuggerTarget } from "../../src/source-debugger/target/firefox.ts";
-import { freePort } from "../../src/platform/gdb-server-spawner.ts";
+import { FirefoxSourceDebuggerTarget } from "../../src/source-debugger/target/firefox/target.ts";
+import { freePort } from "../../src/net/free-port.ts";
 import { consoleLogger } from "../../src/cli/logger.ts";
 import { startStaticServer } from "./harness.mjs";
 
@@ -108,12 +108,10 @@ test("two isolated LLDB components compose an interleaved stack over one Firefox
 
   try {
     target = await FirefoxSourceDebuggerTarget.start({
-      args: parseCliArgs([
+      ...parseCliArgs([
         "--launch",
         "--headless",
         ...(process.env.E2E_VERBOSE ? ["--verbose"] : []),
-        "--port",
-        "0",
         "--rdp-port",
         String(rdpPort),
         "--url",

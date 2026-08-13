@@ -14,7 +14,7 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { Session } from "./harness.mjs";
 
-const CHILD_ENV = "FIREFOX_LLDB_EXPRESSION_POINTER_DEREF_CHILD";
+const CHILD_ENV = "FIREFOX_WASM_DEBUGGER_EXPRESSION_POINTER_DEREF_CHILD";
 
 if (process.env[CHILD_ENV]) {
   let s;

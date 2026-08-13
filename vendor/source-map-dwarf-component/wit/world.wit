@@ -1,4 +1,4 @@
-package firefox-lldb:source-map@0.1.0;
+package firefox-wasm-debugger:source-map@0.1.0;
 
 world converter {
   export source-map-converter;

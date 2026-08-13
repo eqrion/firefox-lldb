@@ -13,7 +13,7 @@ import { connect as netConnect } from "node:net";
 import { tmpdir, homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
-import { firefoxLogDir } from "../config.js";
+import { firefoxLogDir } from "../../../../config.js";
 
 /** True if something is already accepting connections on host:port. */
 function isPortOpen(port: number, host = "127.0.0.1", timeoutMs = 200): Promise<boolean> {
@@ -186,8 +186,8 @@ function isProfileLocked(profileDir: string): boolean {
   return existsSync(join(profileDir, ".parentlock")) || existsSync(join(profileDir, "parent.lock"));
 }
 
-const MARKER_START = "// >>> firefox-lldb (auto-generated; safe to delete) >>>";
-const MARKER_END = "// <<< firefox-lldb <<<";
+const MARKER_START = "// >>> firefox-wasm-debugger (auto-generated; safe to delete) >>>";
+const MARKER_END = "// <<< firefox-wasm-debugger <<<";
 
 async function readOptionalFile(path: string): Promise<string | undefined> {
   try {
@@ -253,7 +253,7 @@ const CONVENIENCE_PREFS = [
 /** Pref used to confirm an RDP connection actually reached the Firefox this
  * process launched, rather than an unrelated (e.g. stale leftover) instance
  * that happens to be listening on the same port. See verifyFirefoxLaunchToken. */
-export const LAUNCH_TOKEN_PREF = "firefoxLldb.launchToken";
+export const LAUNCH_TOKEN_PREF = "firefoxWasmDebugger.launchToken";
 
 export interface FirefoxHandle {
   profileDir: string;
@@ -353,7 +353,7 @@ export async function launchFirefox(opts: {
     String(opts.rdpPort),
   ];
   // RDP (debugger server) and Marionette are independent and coexist; enabling
-  // both lets one Firefox serve firefox-lldb (RDP) and a BiDi page driver.
+  // both lets one Firefox serve firefox-wasm-debugger (RDP) and a BiDi page driver.
   if (opts.marionettePort !== undefined) args.push("--marionette");
   args.push(opts.url ?? "about:blank");
   if (opts.headless ?? false) args.unshift("--headless");

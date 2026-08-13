@@ -1,6 +1,8 @@
-# firefox-lldb
+# firefox-wasm-debugger
 
-Bridge that lets upstream LLDB debug WebAssembly running inside Firefox, via Firefox's Remote Debugging Protocol (RDP). Speaks RSP (GDB remote serial protocol) to LLDB on one side and RDP to Firefox on the other.
+Language-generic source debugger for WebAssembly running inside Firefox. A
+`SourceDebuggerSession` coordinates isolated debugger components; the current
+production components are embedded LLDB and a direct WebAssembly-text debugger.
 
 Read INTERNALS.md for a summary of the architecture, and docs/RDP-USAGE.md for
 the full Firefox RDP surface this tool depends on.
@@ -8,19 +10,16 @@ the full Firefox RDP surface this tool depends on.
 ## Layout
 
 ```
-src/protocol/      RSP framing + TCP server + attach-shim
-src/platform/      LLDB platform server (process list, qLaunchGDBServer)
-src/rdp/           RDP client, RdpWasmSession, headless Firefox launcher
-src/gdb/           RdpDebuggee, worker + SAB-RPC, jco-generated gdbstub
-src/sourcemap/     source-map -> DWARF converter (host glue + jco-generated component)
-src/source-debugger/protocol/ portable SourceDebuggerComponent/Session contracts
+src/source-debugger/protocol/ portable, published SourceDebugger contracts
 src/source-debugger/session/  catalog, ownership, routing, mixed-debugger coordinator
-src/source-debugger/target/   host capabilities + Firefox target adapters
 src/source-debugger/transport/worker RPC + imported-resource RPC
-src/source-debugger/components/ LLDB (including private RSP) + generated-WAT implementations
-src/core/          shared Firefox + per-tab launcher + platform server bring-up
-src/cli/           CLI entry points (firefox-lldb, firefox-lldb-server) + REPL
-src/mcp/           MCP server that drives the real REPL for coding agents
+src/source-debugger/target/firefox/ Firefox target, RDP, and WasmDebuggee adapter
+src/source-debugger/components/lldb/ embedded LLDB plus private RSP/platform/gdbstub
+src/source-debugger/components/wasm-text/ independent generated-WAT debugger
+src/sourcemap/     source-map -> DWARF converter
+src/wasm/          debugger-neutral Wasm parsing/synthetic module helpers
+src/cli/           firefox-wasm-debugger entry point + generic REPL
+src/mcp/           MCP entry point that drives the real CLI
 test/unit/         unit tests (protocol + platform server)
 test/e2e/          Node e2e suite (primary)
 test/fixtures/     emscripten test fixtures
@@ -64,7 +63,7 @@ EMSDK=~/src/emsdk npm run build:fixtures
 
 ## Running a debug session
 
-The primary path is the embedded wasm LLDB: `firefox-lldb` launches Firefox,
+The primary path is the embedded wasm LLDB: `firefox-wasm-debugger` launches Firefox,
 runs the platform server in-process, and drops you into an interactive `(sdb)`
 prompt — no native lldb binary involved.
 
@@ -78,20 +77,7 @@ URL=http://localhost:8080/index.html npm run launch
 ## Driving the REPL from a coding agent
 
 `src/mcp/server.ts` is an MCP server that pty-spawns the real CLI and exposes
-the `(lldb)` REPL as tools (`lldb_launch`/`lldb_send`/`lldb_interrupt`/...), so
+the `(sdb)` REPL as tools (`debugger_launch`/`debugger_send`/`debugger_interrupt`/...), so
 an agent can do manual QA against a real Firefox the way a user would. Page
 automation comes from firefox-devtools-mcp on the same Firefox via Marionette.
-See HARNESS.md and `.mcp.json`.
-
-The standalone server + external native lldb is a secondary, manual path (needs
-a wasm-plugin lldb build from `../llvm-project`):
-
-```sh
-# Terminal 1
-URL=http://localhost:8080/index.html npm run launch-server
-# Terminal 2
-../llvm-project/build/bin/lldb
-(lldb) platform select remote-gdb-server
-(lldb) platform connect connect://127.0.0.1:1234
-(lldb) process attach --plugin wasm --pid 1
-```
+See `.mcp.json`.

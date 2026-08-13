@@ -8,7 +8,7 @@ wit_bindgen::generate!({
     path: "wit",
 });
 
-use exports::firefox_lldb::source_map::source_map_converter::{
+use exports::firefox_wasm_debugger::source_map::source_map_converter::{
     ConvertResult, Guest, InspectResult, SourceFile,
 };
 use source_map_dwarf::{Options, SourceMapInput, convert_with_sources, inspect};

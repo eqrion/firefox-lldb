@@ -7,14 +7,14 @@
 // and present their language-generic SourceDebuggerSession through the (sdb)
 // prompt. Engine-specific target bootstrap lives inside the installed loaders.
 
-import { parseCliArgs } from "../core/platform-session.js";
+import { parseCliArgs } from "./options.js";
 import { quietLogger } from "./logger.js";
 import { runRepl } from "./repl.js";
 import { debugEnvEnabled, sourceDebuggerTraceEnabled } from "../config.js";
-import { FirefoxSourceDebuggerTarget } from "../source-debugger/target/firefox.js";
+import { FirefoxSourceDebuggerTarget } from "../source-debugger/target/firefox/target.js";
 import {
   LldbSourceDebuggerComponentLoader,
-  LldbSourceDebuggerTarget,
+  LldbComponentActivator,
 } from "../source-debugger/components/lldb/loader.js";
 import { SourceDebuggerSessionRuntime } from "../source-debugger/session/runtime.js";
 import { WasmSourceDebuggerComponentLoader } from "../source-debugger/components/wasm-text/loader.js";
@@ -43,7 +43,7 @@ async function main(): Promise<void> {
     else pendingOutput.push(message);
   };
   const target = await FirefoxSourceDebuggerTarget.start({
-    args,
+    ...args,
     logger,
     onOutput: print,
     onConsole: (message) => repl?.printConsole(message),
@@ -52,14 +52,15 @@ async function main(): Promise<void> {
       void cleanup(0);
     },
   });
-  const lldbTarget = new LldbSourceDebuggerTarget({
-    target,
+  const lldbActivator = new LldbComponentActivator({
+    automaticAttach: target.automaticAttach,
+    onDetached: (listener) => void target.onDetached(listener),
     logger,
     onOutput: print,
   });
   const lldbLoaders = routes.map(
     (route) =>
-      new LldbSourceDebuggerComponentLoader(lldbTarget, route, {
+      new LldbSourceDebuggerComponentLoader(lldbActivator, route, {
         name: routes.length === 1 && route.id === "lldb" ? "LLDB" : `LLDB (${route.id})`,
         logger: sourceLogger,
         observerResumesTarget: false,

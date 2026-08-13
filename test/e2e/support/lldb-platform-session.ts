@@ -2,30 +2,36 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-// Shared bring-up core: Firefox + the per-tab GDB server launcher + the
-// platform RSP server. Used by both CLI entry points (the primary in-process
-// wasm-LLDB embedding and the standalone server for an external native lldb).
+// Test-only bring-up for the broad embedded-LLDB compatibility suite. Product
+// code reaches this stack exclusively through the LLDB SourceDebuggerComponent.
 
 import { parseArgs } from "node:util";
-import { RspServer } from "../protocol/rsp-server.js";
-import type { Logger } from "../logging.js";
-import { GdbServerSpawner, type GdbServerLauncher } from "../platform/gdb-server-spawner.js";
-import { startAttachShim } from "../protocol/attach-shim.js";
-import { PlatformServer } from "../platform/platform-server.js";
+import { RspServer } from "../../../src/source-debugger/components/lldb/rsp/rsp-server.js";
+import type { Logger } from "../../../src/logging.js";
+import {
+  GdbServerSpawner,
+  type GdbServerLauncher,
+} from "../../../src/source-debugger/components/lldb/platform/gdb-server-spawner.js";
+import { startAttachShim } from "../../../src/source-debugger/components/lldb/rsp/attach-shim.js";
+import { PlatformServer } from "../../../src/source-debugger/components/lldb/platform/platform-server.js";
 import {
   RdpWasmSession,
   listFirefoxTabs,
   watchAndPrimeFirefoxTabs,
   verifyFirefoxLaunchToken,
   type TabInfo,
-} from "../rdp/session.js";
-import { RdpDebuggee } from "../gdb/rdp-debuggee.js";
-import type { RdpDebuggeeRunControl } from "../gdb/rdp-debuggee.js";
-import { launchFirefox, type FirefoxChannel, type FirefoxHandle } from "../rdp/firefox.js";
+} from "../../../src/source-debugger/target/firefox/rdp/session.js";
+import { RdpDebuggee } from "../../../src/source-debugger/target/firefox/rdp-debuggee.js";
+import type { RdpDebuggeeRunControl } from "../../../src/source-debugger/target/firefox/rdp-debuggee.js";
+import {
+  launchFirefox,
+  type FirefoxChannel,
+  type FirefoxHandle,
+} from "../../../src/source-debugger/target/firefox/rdp/firefox.js";
 // @ts-expect-error - .mjs host has no type declarations
-import { startGdbServer } from "../gdb/worker/host.mjs";
-import { consoleLogger } from "../cli/logger.js";
-import { debugEnvEnabled } from "../config.js";
+import { startGdbServer } from "../../../src/source-debugger/components/lldb/gdbstub/worker/host.mjs";
+import { consoleLogger } from "../../../src/cli/logger.js";
+import { debugEnvEnabled } from "../../../src/config.js";
 
 const MAX_TRACE_CHARS = 4096;
 
@@ -35,7 +41,7 @@ function boundedTrace(message: string): string {
 }
 
 const USAGE = `\
-Usage: firefox-lldb-server [options]
+Usage: LLDB test platform [options]
 
 Modes (default: --launch):
   --launch            Launch a fresh Firefox with a throwaway profile.
@@ -58,7 +64,7 @@ Options:
   --fire <js>         Evaluate JS after the first breakpoint arms (test use).
   --component <ID=TEXT>  Load an isolated source debugger for Wasm module URLs
                       containing TEXT. Repeat to configure multiple components
-                      (embedded firefox-lldb only; currently LLDB-backed).
+                      (embedded firefox-wasm-debugger only; currently LLDB-backed).
   -v, --verbose       Log debug output (may include page/protocol data).
   -h, --help          Show this message.
 
@@ -69,7 +75,7 @@ LLDB attach sequence:
   (lldb) process attach --pid <N>       # attach to a wasm tab
 `;
 
-export interface Args {
+export interface LldbHarnessArgs {
   connect: boolean;
   headless: boolean;
   port: number;
@@ -84,7 +90,7 @@ export interface Args {
   verbose: boolean;
 }
 
-export function parseCliArgs(argv: string[]): Args {
+export function parseLldbHarnessArgs(argv: string[]): LldbHarnessArgs {
   let values;
   try {
     ({ values } = parseArgs({
@@ -249,7 +255,7 @@ export interface PlatformServerHandle {
 // tab, navigate/prime it if needed, build the RdpDebuggee, prime a real stop,
 // then boot the per-tab component + attach shim.
 function createTabLauncher(
-  args: Args,
+  args: LldbHarnessArgs,
   opts: StartOptions,
   logger: Logger,
   launching: boolean,
@@ -420,8 +426,8 @@ function createTabLauncher(
 // Bring up Firefox (if launching), the per-tab GDB server launcher, and the
 // platform RSP server. Returns once the server is listening. Used by both the
 // standalone CLI and the in-process wasm embedding.
-export async function startPlatformServer(
-  args: Args,
+export async function startLldbTestPlatform(
+  args: LldbHarnessArgs,
   opts: StartOptions = {}
 ): Promise<PlatformServerHandle> {
   const verbose = args.verbose || debugEnvEnabled();

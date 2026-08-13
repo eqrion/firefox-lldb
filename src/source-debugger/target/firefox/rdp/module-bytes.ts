@@ -25,7 +25,7 @@ export function isWasmBinary(bytes: Uint8Array): boolean {
 export class HttpModuleByteProvider implements ModuleByteProvider {
   async fetch(url: string): Promise<Uint8Array> {
     const response = await globalThis.fetch(url, {
-      headers: { "X-Firefox-Lldb": "module-fetch" },
+      headers: { "X-Firefox-Wasm-Debugger": "module-fetch" },
     });
     if (!response.ok) {
       throw new Error(`HTTP ${response.status} ${response.statusText}`);

@@ -15,7 +15,7 @@ import { instantiate } from "./generated/sourcemap.js";
 import type {
   InspectResult,
   ConvertResult,
-} from "./generated/interfaces/firefox-lldb-source-map-source-map-converter.js";
+} from "./generated/interfaces/firefox-wasm-debugger-source-map-source-map-converter.js";
 
 const GEN = path.join(path.dirname(fileURLToPath(import.meta.url)), "generated");
 

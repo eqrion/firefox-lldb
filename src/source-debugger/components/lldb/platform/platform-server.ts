@@ -10,10 +10,10 @@
 // against GDBRemoteCommunicationClient.cpp.
 
 import os from "node:os";
-import type { RspHandler, RspSession } from "../protocol/rsp-server.js";
-import { asciiToHex, hexToAscii } from "../protocol/hex.js";
+import type { RspHandler, RspSession } from "../rsp/rsp-server.js";
+import { asciiToHex, hexToAscii } from "../rsp/hex.js";
 import type { GdbServerSpawner } from "./gdb-server-spawner.js";
-import type { TabInfo } from "../rdp/session.js";
+import type { TabInfo } from "../../../target/firefox/rdp/session.js";
 
 interface ProcessInfo {
   pid: number;

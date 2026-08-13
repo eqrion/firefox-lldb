@@ -19,7 +19,9 @@ import { testSourceDebuggerRun } from "../helpers/source-debugger-run.js";
 test("generic isolate transport wires definition, instance, and scoped host imports", async () => {
   const sessionHost = new SourceDebuggerSessionHost();
   const binding = sessionHost.forComponent("fake");
-  const isolate = new SourceDebuggerComponentIsolate(binding, { requestTimeoutMs: 100 });
+  const isolate = new SourceDebuggerComponentIsolate("fake", binding, {
+    requestTimeoutMs: 100,
+  });
   const importedHost = connectSourceDebuggerComponentHost(isolate.workerPorts.hostPort, {
     requestTimeoutMs: 100,
   });
@@ -62,7 +64,10 @@ test("generic isolate transport wires definition, instance, and scoped host impo
 
 test("generic isolate rejects mismatched definition and instance identities", async () => {
   const sessionHost = new SourceDebuggerSessionHost();
-  const isolate = new SourceDebuggerComponentIsolate(sessionHost.forComponent("definition"));
+  const isolate = new SourceDebuggerComponentIsolate(
+    "definition",
+    sessionHost.forComponent("definition")
+  );
   const workerEndpoint = serveSourceDebuggerComponentIsolate(
     isolate.workerPorts,
     {

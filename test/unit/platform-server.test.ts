@@ -4,12 +4,15 @@
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { RspServer } from "../../src/protocol/rsp-server.js";
+import { RspServer } from "../../src/source-debugger/components/lldb/rsp/rsp-server.js";
 import { RspClient } from "./rsp-client.js";
-import { GdbServerSpawner, type GdbServerLauncher } from "../../src/platform/gdb-server-spawner.js";
-import { PlatformServer } from "../../src/platform/platform-server.js";
-import { asciiToHex, hexToAscii } from "../../src/protocol/hex.js";
-import type { TabInfo } from "../../src/rdp/session.js";
+import {
+  GdbServerSpawner,
+  type GdbServerLauncher,
+} from "../../src/source-debugger/components/lldb/platform/gdb-server-spawner.js";
+import { PlatformServer } from "../../src/source-debugger/components/lldb/platform/platform-server.js";
+import { asciiToHex, hexToAscii } from "../../src/source-debugger/components/lldb/rsp/hex.js";
+import type { TabInfo } from "../../src/source-debugger/target/firefox/rdp/session.js";
 
 // Fake launcher: starts a trivial RspServer on the given port so
 // qLaunchGDBServer tests can verify the spawned port is reachable.

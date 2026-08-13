@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-import { buildSyntheticModule } from "../../../gdb/synthetic-module.js";
+import { buildSyntheticModule } from "../../../wasm/synthetic-debug-module.js";
 import type {
   WasmDebuggee,
   WasmDebuggeeDeferredResume,

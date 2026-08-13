@@ -42,14 +42,17 @@ import type {
   StoppedEvent,
   PauseEvent,
   ThreadInfo,
-} from "../rdp/session.js";
-import { buildSyntheticModule } from "./synthetic-module.js";
-import { inspect as inspectWasm, convert as convertSourceMap } from "../sourcemap/converter.js";
-import { EMPTY_WASM_MODULE, RESYNC_GRACE_MS } from "../rdp/constants.js";
-import { containedSourcePath } from "../sourcemap/materialize.js";
-import { sanitizeSourceMapBytes, sourceMapDataUrlBytes } from "../sourcemap/input.js";
-import { noopLogger, type Logger } from "../logging.js";
-import { stripWasmNameSection, wasmFunctionRange } from "./wasm-bytecode.js";
+} from "./rdp/session.js";
+import { buildSyntheticModule } from "../../../wasm/synthetic-debug-module.js";
+import {
+  inspect as inspectWasm,
+  convert as convertSourceMap,
+} from "../../../sourcemap/converter.js";
+import { EMPTY_WASM_MODULE, RESYNC_GRACE_MS } from "./rdp/constants.js";
+import { containedSourcePath } from "../../../sourcemap/materialize.js";
+import { sanitizeSourceMapBytes, sourceMapDataUrlBytes } from "../../../sourcemap/input.js";
+import { noopLogger, type Logger } from "../../../logging.js";
+import { stripWasmNameSection, wasmFunctionRange } from "../../../wasm/bytecode.js";
 
 function urlBasename(url: string): string {
   try {
@@ -177,7 +180,7 @@ export class RdpDebuggee {
   #bytecodeByUrl = new Map<string, Uint8Array>();
 
   // Temp dir for materialized JS source text (for LLDB source list).
-  #tmpDir: string = mkdtempSync(join(tmpdir(), "firefox-lldb-"));
+  #tmpDir: string = mkdtempSync(join(tmpdir(), "firefox-wasm-debugger-"));
 
   // Per-tid frame snapshots (innermost-first wasm+JS frames, set on each stop).
   #framesByTid = new Map<number, FrameForm[]>();

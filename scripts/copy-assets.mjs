@@ -5,11 +5,13 @@
 import { cp, mkdir, readdir } from "node:fs/promises";
 import { extname } from "node:path";
 
-await mkdir("dist/gdb/worker", { recursive: true });
-const workerFiles = await readdir("src/gdb/worker");
+const GDBSTUB = "source-debugger/components/lldb/gdbstub";
+
+await mkdir(`dist/${GDBSTUB}/worker`, { recursive: true });
+const workerFiles = await readdir(`src/${GDBSTUB}/worker`);
 for (const file of workerFiles.filter((f) => extname(f) === ".mjs")) {
-  await cp(`src/gdb/worker/${file}`, `dist/gdb/worker/${file}`);
+  await cp(`src/${GDBSTUB}/worker/${file}`, `dist/${GDBSTUB}/worker/${file}`);
 }
 
-await cp("src/gdb/generated", "dist/gdb/generated", { recursive: true });
+await cp(`src/${GDBSTUB}/generated`, `dist/${GDBSTUB}/generated`, { recursive: true });
 await cp("src/sourcemap/generated", "dist/sourcemap/generated", { recursive: true });

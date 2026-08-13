@@ -2,7 +2,7 @@
 # repackaged as a standalone crate so we can adapt the debuggee bridge to RDP.
 # Upstream dependency versions are pinned to wasmtime's workspace at vendor time.
 [package]
-name = "firefox-lldb-gdbstub-component"
+name = "firefox-wasm-debugger-gdbstub-component"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0 WITH LLVM-exception"

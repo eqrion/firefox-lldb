@@ -15,7 +15,7 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
-import { buildSyntheticModule } from "../src/gdb/synthetic-module.js";
+import { buildSyntheticModule } from "../src/wasm/synthetic-debug-module.js";
 
 const srcPath = process.argv[2];
 const outPath = process.argv[3] ?? "synthetic-out.wasm";

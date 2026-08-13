@@ -6,7 +6,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
-import { HttpModuleByteProvider, isWasmBinary } from "../../src/rdp/module-bytes.js";
+import {
+  HttpModuleByteProvider,
+  isWasmBinary,
+} from "../../src/source-debugger/target/firefox/rdp/module-bytes.js";
 
 const WASM = Uint8Array.of(0x00, 0x61, 0x73, 0x6d, 1, 0, 0, 0);
 

@@ -5,8 +5,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import net from "node:net";
-import { startAttachShim } from "../../src/protocol/attach-shim.js";
-import { framePacket } from "../../src/protocol/packet.js";
+import { startAttachShim } from "../../src/source-debugger/components/lldb/rsp/attach-shim.js";
+import { framePacket } from "../../src/source-debugger/components/lldb/rsp/packet.js";
 
 function checksum(s: string): number {
   let sum = 0;

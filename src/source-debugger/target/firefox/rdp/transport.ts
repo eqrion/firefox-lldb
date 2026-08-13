@@ -8,7 +8,7 @@
 
 import net from "node:net";
 import { EventEmitter } from "node:events";
-import { noopLogger, type Logger } from "../logging.js";
+import { noopLogger, type Logger } from "../../../../logging.js";
 
 export interface RdpPacket {
   from?: string;

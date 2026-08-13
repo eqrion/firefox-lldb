@@ -4,7 +4,12 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { bytesToHex, hexToBytes, asciiToHex, hexToAscii } from "../../src/protocol/hex.js";
+import {
+  bytesToHex,
+  hexToBytes,
+  asciiToHex,
+  hexToAscii,
+} from "../../src/source-debugger/components/lldb/rsp/hex.js";
 
 test("bytesToHex encodes all bytes as two lowercase hex digits", () => {
   assert.equal(bytesToHex(new Uint8Array([0x00, 0x0f, 0x10, 0xff, 0xab])), "000f10ffab");

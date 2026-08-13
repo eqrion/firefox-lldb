@@ -4,7 +4,6 @@
 
 import type { MessagePort } from "node:worker_threads";
 import type { SourceDebuggerComponentHost } from "../protocol/component.js";
-import type { SourceDebuggerComponentHostBinding } from "../target/host.js";
 import type {
   WasmDebuggee,
   WasmDebuggeeEngineResumeAction,
@@ -51,7 +50,7 @@ export type RemoteSourceDebuggerComponentHost = SourceDebuggerComponentHost &
  * resources without exposing MessagePort or Firefox objects to a component. */
 export function serveSourceDebuggerComponentHost(
   port: MessagePort,
-  host: SourceDebuggerComponentHostBinding
+  host: SourceDebuggerComponentHost
 ): SourceDebuggerRpcEndpoint {
   const debuggees = new Map<number, WasmDebuggee>();
   let nextDebuggeeId = 1;

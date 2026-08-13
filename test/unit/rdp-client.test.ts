@@ -7,8 +7,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import net from "node:net";
-import { RdpClient } from "../../src/rdp/client.js";
-import { encodeRdpFrame, sliceRdpFrame } from "../../src/rdp/transport.js";
+import { RdpClient } from "../../src/source-debugger/target/firefox/rdp/client.js";
+import {
+  encodeRdpFrame,
+  sliceRdpFrame,
+} from "../../src/source-debugger/target/firefox/rdp/transport.js";
 
 function startFakeRdpServer(
   handler?: (data: Buffer, socket: net.Socket) => void

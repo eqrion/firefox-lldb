@@ -9,9 +9,6 @@
 // gdbstub component. The launcher is injected so this stays decoupled from
 // the wasm and RDP implementation.
 
-import net from "node:net";
-import type { AddressInfo } from "node:net";
-
 export interface LaunchedServer {
   port: number;
   stop(): void | Promise<void>;
@@ -67,19 +64,4 @@ export class GdbServerSpawner {
       .map((r) => r.reason);
     if (errors.length) throw new AggregateError(errors, "failed to stop one or more GDB servers");
   }
-}
-
-// TOCTOU: we probe an OS-assigned port, release it, then hand the number to
-// Firefox via --start-debugger-server. Firefox doesn't support port 0, so
-// there's no way to eliminate the race. The window is tiny in practice and
-// Session.attach() retries on failure.
-export function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const s = net.createServer();
-    s.listen(0, () => {
-      const port = (s.address() as AddressInfo).port;
-      s.close((err) => (err ? reject(err) : resolve(port)));
-    });
-    s.on("error", reject);
-  });
 }

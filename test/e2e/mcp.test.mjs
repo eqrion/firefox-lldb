@@ -2,9 +2,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-// Drives the firefox-lldb MCP server (src/mcp/server.ts) over stdio with the
+// Drives the firefox-wasm-debugger MCP server over stdio with the
 // MCP SDK client, exactly as a coding agent would. This exercises the full
-// agent path: a pty-spawned real CLI behind the lldb_* tools, against headless
+// agent path: a pty-spawned real CLI behind the debugger_* tools, against headless
 // Firefox. Asserts the REPL output that comes back through the tools.
 
 import { test } from "node:test";
@@ -67,7 +67,7 @@ async function withSession(
   try {
     await withDeadline(
       (async () => {
-        const banner = await send(client, "lldb_launch", {
+        const banner = await send(client, "debugger_launch", {
           url,
           headless: true,
           fire: fire ?? fx.fire,
@@ -81,7 +81,7 @@ async function withSession(
     // A graceful shutdown RPC depends on the (possibly wedged) server
     // responding; bound it so a hang there can't stop us from reaching the
     // forceful client.close() below, which kills the process directly.
-    await withDeadline(send(client, "lldb_shutdown"), 5_000).catch(() => {});
+    await withDeadline(send(client, "debugger_shutdown"), 5_000).catch(() => {});
     await withDeadline(client.close(), 10_000).catch(() => {});
     // close() alone waits for open connections to end naturally, which can
     // hang forever on a lingering keep-alive socket; force them closed too.
@@ -92,20 +92,22 @@ async function withSession(
 
 test("MCP: launch, set a breakpoint, continue, hit it", async () => {
   await withSession("factorial", async (client, fx) => {
-    const bp = await send(client, "lldb_send", { command: `breakpoint set -n ${fx.breakFunc}` });
+    const bp = await send(client, "debugger_send", {
+      command: `breakpoint set -n ${fx.breakFunc}`,
+    });
     assert.match(bp, /Breakpoint 1/, `breakpoint set output: ${bp}`);
 
-    const cont = await send(client, "lldb_send", { command: "continue", timeoutMs: 60000 });
+    const cont = await send(client, "debugger_send", { command: "continue", timeoutMs: 60000 });
     assert.match(cont, new RegExp(fx.breakFunc), `continue/stop output: ${cont}`);
 
-    const frame = await send(client, "lldb_send", { command: "frame variable" });
+    const frame = await send(client, "debugger_send", { command: "frame variable" });
     assert.ok(frame.length > 0, "frame variable returned output");
 
     // MCP clients may issue tool calls concurrently. The PTY driver must keep
     // command echoes/results paired rather than interleaving writes.
     const [version, target] = await Promise.all([
-      send(client, "lldb_send", { command: "version" }),
-      send(client, "lldb_send", { command: "target list" }),
+      send(client, "debugger_send", { command: "version" }),
+      send(client, "debugger_send", { command: "target list" }),
     ]);
     assert.match(version, /lldb version/i);
     assert.match(target, /Current targets|target #0/i);
@@ -113,10 +115,10 @@ test("MCP: launch, set a breakpoint, continue, hit it", async () => {
     // With no more work and no breakpoints, continue never produces another
     // prompt. Omitting timeoutMs must let the server return its documented
     // no-prompt result before the MCP SDK's own 60-second request deadline.
-    await send(client, "lldb_send", { command: "breakpoint delete 1" });
-    const running = await send(client, "lldb_send", { command: "continue" });
+    await send(client, "debugger_send", { command: "breakpoint delete 1" });
+    const running = await send(client, "debugger_send", { command: "continue" });
     assert.match(running, /no prompt returned/i, `continue output: ${running}`);
-    const interrupted = await send(client, "lldb_interrupt");
+    const interrupted = await send(client, "debugger_interrupt");
     assert.doesNotMatch(interrupted, /no prompt returned/i, `interrupt output: ${interrupted}`);
   });
 });
@@ -128,7 +130,9 @@ test("MCP: launch survives a page reload racing automatic attach (#46)", async (
       assert.match(banner, /page navigating; re-syncing/i, `launch banner: ${banner}`);
       assert.match(banner, /Process 1 stopped/i, `launch banner: ${banner}`);
       assert.doesNotMatch(banner, /attach failed/i, `launch banner: ${banner}`);
-      const bp = await send(client, "lldb_send", { command: `breakpoint set -n ${fx.breakFunc}` });
+      const bp = await send(client, "debugger_send", {
+        command: `breakpoint set -n ${fx.breakFunc}`,
+      });
       assert.match(bp, /Breakpoint 1/, `breakpoint set output: ${bp}`);
     },
     { page: "reload-service-worker.html", crossOriginIsolation: false }
@@ -137,12 +141,14 @@ test("MCP: launch survives a page reload racing automatic attach (#46)", async (
 
 test("MCP: thread list shows workers in a threaded program (#7)", async () => {
   await withSession("threaded", async (client, fx) => {
-    const bp = await send(client, "lldb_send", { command: `breakpoint set -n ${fx.breakFunc}` });
+    const bp = await send(client, "debugger_send", {
+      command: `breakpoint set -n ${fx.breakFunc}`,
+    });
     assert.match(bp, /Breakpoint 1/, `breakpoint set output: ${bp}`);
 
-    await send(client, "lldb_send", { command: "continue", timeoutMs: 60000 });
+    await send(client, "debugger_send", { command: "continue", timeoutMs: 60000 });
 
-    const threads = await send(client, "lldb_send", { command: "thread list" });
+    const threads = await send(client, "debugger_send", { command: "thread list" });
     assert.match(threads, /thread #1/, `thread list output: ${threads}`);
   });
 });

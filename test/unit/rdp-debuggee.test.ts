@@ -5,8 +5,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { EventEmitter } from "node:events";
-import { RdpDebuggee } from "../../src/gdb/rdp-debuggee.js";
-import type { RdpWasmSession } from "../../src/rdp/session.js";
+import { RdpDebuggee } from "../../src/source-debugger/target/firefox/rdp-debuggee.js";
+import type { RdpWasmSession } from "../../src/source-debugger/target/firefox/rdp/session.js";
 
 test("RdpDebuggee.dispose removes process and shared-session listeners", () => {
   const before = process.listenerCount("exit");

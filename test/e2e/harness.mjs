@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // Node e2e harness: drives the embedded wasm LLDB through its off-worker
-// "session" API (structured SB-API queries), the same path the `firefox-lldb`
+// "session" API (structured SB-API queries), the same path the `firefox-wasm-debugger`
 // command uses — no native lldb, everything runs in this Node process.
 
 import net from "node:net";
@@ -12,8 +12,8 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { readFileSync } from "node:fs";
 import { LLDBClient } from "lldb-wasm";
-import { parseCliArgs, startPlatformServer } from "../../src/core/platform-session.ts";
-import { freePort } from "../../src/platform/gdb-server-spawner.ts";
+import { parseLldbHarnessArgs, startLldbTestPlatform } from "./support/lldb-platform-session.ts";
+import { freePort } from "../../src/net/free-port.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..", "..");
@@ -162,11 +162,11 @@ export function startStaticServer(
     // page-load request for the same URL. Lets a reload test assert the
     // debugger actually re-fetched (proving its bytecode cache was
     // invalidated) rather than just observing the browser's own re-fetch.
-    if (req.headers["x-firefox-lldb"] === "module-fetch") debuggerFetchCount++;
+    if (req.headers["x-firefox-wasm-debugger"] === "module-fetch") debuggerFetchCount++;
     if (
       requireAuth &&
       path.extname(rel) === ".wasm" &&
-      !req.headers.cookie?.includes("firefox_lldb_test=1")
+      !req.headers.cookie?.includes("firefox_wasm_debugger_test=1")
     ) {
       res.writeHead(401, { "Content-Type": "text/plain" });
       res.end("authentication required");
@@ -180,7 +180,7 @@ export function startStaticServer(
       res.writeHead(200, {
         "Content-Type": MIME[path.extname(rel)] ?? "application/octet-stream",
         ...(requireAuth && path.extname(rel) === ".html"
-          ? { "Set-Cookie": "firefox_lldb_test=1; SameSite=Strict" }
+          ? { "Set-Cookie": "firefox_wasm_debugger_test=1; SameSite=Strict" }
           : {}),
         // COOP/COEP so the page may use SharedArrayBuffer (threaded fixtures).
         // The MCP reload-race fixture deliberately adds these through a service
@@ -366,7 +366,7 @@ export class Session {
 
   // Fire-and-forget JS evaluation on the page, for use *after* attach (the
   // `--fire` CLI flag only covers the one-shot "first breakpoint arms" case).
-  // Mirrors core/platform-session.ts's own --fire wiring: don't await the
+  // Mirrors test LLDB platform bootstrap's own --fire wiring: don't await the
   // evaluate() call itself, since the expression may call into wasm and hit
   // an armed breakpoint, in which case evaluate() never resolves — awaiting
   // it here would just reproduce that hang one level up.
@@ -444,7 +444,7 @@ export class Session {
       session,
       (async () => {
         const rdpPort = await freePort();
-        const args = parseCliArgs([
+        const args = parseLldbHarnessArgs([
           "--launch",
           ...(channel === "nightly" ? ["--nightly"] : channel === "beta" ? ["--beta"] : []),
           ...(headless ? ["--headless"] : []),
@@ -458,7 +458,7 @@ export class Session {
           "--fire",
           fire ?? fx.fire,
         ]);
-        const handle = await startPlatformServer(args, {
+        const handle = await startLldbTestPlatform(args, {
           wrapConnectPort: (port) => session.#bridgeTcp(port),
           onSession: (rdpSession) => {
             session.#rdpSession = rdpSession;
@@ -482,8 +482,8 @@ export class Session {
     const client = await LLDBClient.create();
     const session = new Session(client, null, null);
     const rdpPort = await freePort();
-    const args = parseCliArgs(["--connect", "--port", "0", "--rdp-port", String(rdpPort)]);
-    const handle = await startPlatformServer(args, {
+    const args = parseLldbHarnessArgs(["--connect", "--port", "0", "--rdp-port", String(rdpPort)]);
+    const handle = await startLldbTestPlatform(args, {
       wrapConnectPort: (port) => session.#bridgeTcp(port),
     });
     session.#handle = handle;

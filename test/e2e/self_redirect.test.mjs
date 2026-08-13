@@ -7,7 +7,7 @@
 // #wasmActorByUrl kept pointing at the destroyed page's dead source actor,
 // and the next breakpoint-position lookup against it (#snapOffset ->
 // wasmBreakpointOffsets) threw uncaught, killing the whole gdbstub worker —
-// see src/rdp/session.ts's #invalidateActorCaches()/target-destroyed-form
+// see src/source-debugger/target/firefox/rdp/session.ts's #invalidateActorCaches()/target-destroyed-form
 // handling.
 //
 // This only checks survival, not that the breakpoint refires correctly on

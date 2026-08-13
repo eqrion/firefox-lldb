@@ -14,7 +14,7 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { Session } from "./harness.mjs";
-import { findFirefoxBinary } from "../../src/rdp/firefox.ts";
+import { findFirefoxBinary } from "../../src/source-debugger/target/firefox/rdp/firefox.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WASM = path.join(HERE, "..", "fixtures", "large", "large.wasm");

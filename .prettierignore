@@ -1,5 +1,5 @@
 dist/
-src/gdb/generated/
+src/source-debugger/components/lldb/gdbstub/generated/
 src/sourcemap/generated/
 node_modules/
 vendor/

@@ -40,9 +40,9 @@ jobs:
       - name: Run Node e2e tests
         env:
           E2E_CONCURRENCY: 1
-          FIREFOX_LLDB_LOG_DIR: /tmp/firefox-logs
+          FIREFOX_WASM_DEBUGGER_LOG_DIR: /tmp/firefox-logs
         run: |
-          mkdir -p "$FIREFOX_LLDB_LOG_DIR"
+          mkdir -p "$FIREFOX_WASM_DEBUGGER_LOG_DIR"
           npm run test:e2e
 
       - name: Dump captured Firefox process output (diagnostic, on failure)

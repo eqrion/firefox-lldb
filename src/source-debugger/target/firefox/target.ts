@@ -2,17 +2,29 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-import type { Args } from "../../core/platform-session.js";
-import { RdpDebuggee } from "../../gdb/rdp-debuggee.js";
-import { noopLogger, type Logger } from "../../logging.js";
-import { focusFirefoxWindow, launchFirefox, type FirefoxHandle } from "../../rdp/firefox.js";
-import { RdpWasmSession, verifyFirefoxLaunchToken } from "../../rdp/session.js";
-import type { SourceDebuggerTarget, UnownedModuleDescriptor } from "../protocol/target.js";
-import type { WasmDebuggee } from "../protocol/wasm-debuggee.js";
+import { noopLogger, type Logger } from "../../../logging.js";
+import { RdpDebuggee } from "./rdp-debuggee.js";
+import {
+  focusFirefoxWindow,
+  launchFirefox,
+  type FirefoxChannel,
+  type FirefoxHandle,
+} from "./rdp/firefox.js";
+import { RdpWasmSession, verifyFirefoxLaunchToken } from "./rdp/session.js";
+import type { SourceDebuggerTarget, UnownedModuleDescriptor } from "../../protocol/target.js";
+import type { WasmDebuggee } from "../../protocol/wasm-debuggee.js";
 import { FirefoxWasmDebuggee } from "./wasm-debuggee.js";
 
 export interface FirefoxSourceDebuggerTargetOptions {
-  args: Args;
+  connect: boolean;
+  headless: boolean;
+  rdpPort: number;
+  marionettePort?: number;
+  url?: string;
+  firefox?: string;
+  channel: FirefoxChannel;
+  defaultProfile: boolean;
+  fire?: string;
   logger?: Logger;
   onOutput?: (message: string) => void;
   onConsole?: (message: string) => void;
@@ -24,7 +36,7 @@ export interface FirefoxSourceDebuggerTargetOptions {
  * selected component a filtered WasmDebuggee view over the shared RDP stop. */
 export class FirefoxSourceDebuggerTarget implements SourceDebuggerTarget {
   readonly session: RdpWasmSession;
-  readonly #args: Args;
+  readonly #options: FirefoxSourceDebuggerTargetOptions;
   readonly #logger: Logger;
   readonly #firefox: FirefoxHandle | undefined;
   readonly #onOutput: (message: string) => void;
@@ -43,7 +55,7 @@ export class FirefoxSourceDebuggerTarget implements SourceDebuggerTarget {
   ) {
     this.session = session;
     this.#firefox = firefox;
-    this.#args = options.args;
+    this.#options = options;
     this.#logger = options.logger ?? noopLogger;
     this.#onOutput = options.onOutput ?? (() => {});
     this.#onConsole = options.onConsole ?? (() => {});
@@ -52,7 +64,7 @@ export class FirefoxSourceDebuggerTarget implements SourceDebuggerTarget {
   }
 
   get automaticAttach(): boolean {
-    return this.#args.url !== undefined;
+    return this.#options.url !== undefined;
   }
 
   static async start(
@@ -62,23 +74,23 @@ export class FirefoxSourceDebuggerTarget implements SourceDebuggerTarget {
     let firefox: FirefoxHandle | undefined;
     let session: RdpWasmSession | undefined;
     try {
-      if (!options.args.connect) {
+      if (!options.connect) {
         firefox = await launchFirefox({
-          rdpPort: options.args.rdpPort,
-          binary: options.args.firefox,
-          channel: options.args.channel,
-          defaultProfile: options.args.defaultProfile,
-          headless: options.args.headless,
-          marionettePort: options.args.marionettePort,
+          rdpPort: options.rdpPort,
+          binary: options.firefox,
+          channel: options.channel,
+          defaultProfile: options.defaultProfile,
+          headless: options.headless,
+          marionettePort: options.marionettePort,
         });
-        await verifyFirefoxLaunchToken(options.args.rdpPort, "127.0.0.1", firefox.launchToken);
+        await verifyFirefoxLaunchToken(options.rdpPort, "127.0.0.1", firefox.launchToken);
         logger.info("launched Firefox");
       }
 
-      session = await connectRdpWithRetry(options.args.rdpPort, logger);
+      session = await connectRdpWithRetry(options.rdpPort, logger);
       const target = new FirefoxSourceDebuggerTarget(session, firefox, options);
-      if (options.args.url) {
-        await session.navigate(options.args.url);
+      if (options.url) {
+        await session.navigate(options.url);
         await waitForInitialWasm(session, logger);
       }
 
@@ -183,7 +195,7 @@ export class FirefoxSourceDebuggerTarget implements SourceDebuggerTarget {
   #onFirstContinue(): void {
     if (this.#firstContinueFired) return;
     this.#firstContinueFired = true;
-    const fire = this.#args.fire;
+    const fire = this.#options.fire;
     if (!fire) return;
     const wrapped = `(function poll(){try{${fire}}catch(e){setTimeout(poll,20);}})()`;
     void this.session

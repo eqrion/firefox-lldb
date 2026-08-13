@@ -1,4 +1,4 @@
-# firefox-lldb internals
+# firefox-wasm-debugger internals
 
 Architecture, protocol details, and implementation notes.
 
@@ -17,7 +17,7 @@ The bridge sits between two protocols:
   inbound, from the lldb client
 - **Firefox Remote Debug Protocol** (RDP) — outbound, to the browser
 
-The **primary** entry point is `firefox-lldb`, which embeds LLDB compiled to
+The **primary** entry point is `firefox-wasm-debugger`, which embeds LLDB compiled to
 WebAssembly behind the language-generic `(sdb)` REPL and runs everything
 (session, isolated component runtimes, and RDP client) in a single Node
 process:
@@ -35,11 +35,6 @@ REPL → SourceDebuggerSession → LLDB SourceDebuggerComponent (outer Worker)
                                              ▼
                     FirefoxWasmDebuggee/RdpDebuggee → RdpWasmSession ──RDP──► Firefox
 ```
-
-The **secondary** path, `firefox-lldb-server`, runs only the platform + per-tab
-servers and listens on a real TCP port for an external native wasm-plugin lldb.
-The two paths share everything from the per-tab GDB server inward; they differ
-only in how the RSP bytes reach it.
 
 The multi-component prototype creates a separate wasm LLDB worker and private
 gdbstub/RSP stack for each LLDB `SourceDebuggerComponent`, but lends each one a
@@ -142,9 +137,9 @@ from later fan-out barriers. Surviving components remain available for stack
 inspection and subsequent runs, while `components` reports the failed route and
 its reason.
 
-### Embedded wasm LLDB (`firefox-lldb`)
+### Embedded wasm LLDB (`firefox-wasm-debugger`)
 
-The `firefox-lldb` command does not spawn a native lldb. Each selected LLDB
+The `firefox-wasm-debugger` command does not spawn a native lldb. Each selected LLDB
 component runs its own private platform server and drives LLDB compiled to WebAssembly (the `lldb-wasm`
 package, built from `../llvm-project/lldb/tools/lldb-wasm`) as an installed
 `LldbSourceDebuggerComponentLoader`. Before LLDB exists,
@@ -189,7 +184,7 @@ round-trips, so the REPL drives it through an **off-worker session API**
 (`sessionCommand`/`sessionState`/`sessionFrames`/`sessionVariable`) that runs on
 a dedicated session pthread, keeping the worker that pumps the bridge free.
 
-### The attach handshake (`src/protocol/attach-shim.ts`)
+### The attach handshake (`src/source-debugger/components/lldb/rsp/attach-shim.ts`)
 
 The gdbstub component presents an already-attached, stopped process the instant
 LLDB connects. That satisfies `process connect`, but breaks LLDB's native
@@ -206,11 +201,12 @@ yet" so `ConnectRemote` lands in `eStateConnected` and the real attach happens a
 binary RSP payloads are ever parsed. See the file header for the exact reply
 codes and why each one is chosen.
 
-### Layer 1 — platform server (`src/platform/`)
+### Layer 1 — platform server (`src/source-debugger/components/lldb/platform/`)
 
 Models the browser as an LLDB platform: tabs are processes, and
 `qLaunchGDBServer` spawns a per-tab GDB server. Implements the platform packet
-set from `lldbplatformpackets.md`. Reachable directly via `connect://`.
+set from `lldbplatformpackets.md`. It is an implementation detail of each LLDB
+component and is not exposed as a standalone server.
 
 Wire-format note: `triple` and process `name` are hex-encoded on the wire even
 though the protocol docs render them plain — verified against
@@ -229,20 +225,20 @@ lldb, and **imports a WIT `debuggee` interface that we implement** over RDP.
 
 The WIT `debuggee` interface is synchronous, but RDP is async. The solution:
 
-- The component runs on a **Worker thread** (`src/gdb/worker/`). Its WASI poll /
+- The component runs on a **Worker thread** (`src/source-debugger/components/lldb/gdbstub/worker/`). Its WASI poll /
   socket blocking happens on the worker, keeping the main event loop free.
 - Each synchronous `debuggee` call is forwarded to the main thread over a
-  SharedArrayBuffer (`src/gdb/worker/wire.mjs`). The worker blocks on
+  SharedArrayBuffer (`src/source-debugger/components/lldb/gdbstub/worker/wire.mjs`). The worker blocks on
   `Atomics.wait`; the main thread services the call asynchronously (RDP
   round-trip) and wakes the worker via `Atomics.notify`.
 - JSPI is not needed — the bridge runs on plain Node.
 
 Key modules:
 
-- `src/rdp/transport.ts`, `client.ts` — RDP transport + request/reply/events
-- `src/rdp/session.ts` (`RdpWasmSession`) — the validated wasm-debug RDP flow
-- `src/gdb/rdp-debuggee.ts` (`RdpDebuggee`) — the WIT `debuggee` impl over RDP
-- `src/gdb/worker/host.mjs`, `component-worker.mjs`, `wire.mjs` — the worker +
+- `src/source-debugger/target/firefox/rdp/transport.ts`, `client.ts` — RDP transport + request/reply/events
+- `src/source-debugger/target/firefox/rdp/session.ts` (`RdpWasmSession`) — the validated wasm-debug RDP flow
+- `src/source-debugger/target/firefox/rdp-debuggee.ts` (`RdpDebuggee`) — the WIT `debuggee` impl over RDP
+- `src/source-debugger/components/lldb/gdbstub/worker/host.mjs`, `component-worker.mjs`, `wire.mjs` — the worker +
   SAB RPC bridge
 
 RDP replies are FIFO per actor. Every request has a finite deadline; a timeout
@@ -324,7 +320,7 @@ section is mapped at `(module_id << 32)`.
 ### Firefox-side RDP surface
 
 See [`docs/RDP-USAGE.md`](docs/RDP-USAGE.md) for the full RDP surface (actors,
-requests, events) generated from [`src/rdp/protocol.ts`](src/rdp/protocol.ts),
+requests, events) generated from [`src/source-debugger/target/firefox/rdp/protocol.ts`](src/source-debugger/target/firefox/rdp/protocol.ts),
 the single source of truth. The table below maps each debugger need to the
 part of that surface serving it.
 
@@ -335,7 +331,7 @@ part of that surface serving it.
 | Stack frames       | `thread.frames` returns interleaved `wasmcall`/`call` frames; both are surfaced to LLDB. `resources-available-array` records each frame's thread-local source actor → URL mapping, including worker actors.                                                                                                                                                                                                   |
 | wasm PC            | a `wasmcall` frame's `where.line` is the byte offset (column is always 1; not column as the original design assumed)                                                                                                                                                                                                                                                                                          |
 | JS PC              | a `call` frame's `where.line` is the source line (1-based). Reported as `where.line + codeOffset` so LLDB's code-section subtraction recovers the DWARF address = source line.                                                                                                                                                                                                                                |
-| JS sources         | each JS source is a synthetic wasm module (`src/gdb/synthetic-module.ts`) with DWARF v4 mapping address L → line L. Source text is fetched via the source actor `source` request and written to a temp file for `source list`.                                                                                                                                                                                |
+| JS sources         | each JS source is a synthetic wasm module (`src/wasm/synthetic-debug-module.ts`) with DWARF v4 mapping address L → line L. Source text is fetched via the source actor `source` request and written to a temp file for `source list`.                                                                                                                                                                         |
 | Breakpoints (wasm) | `thread.setBreakpoint` at `{ sourceUrl, line: <offset>, column: 1 }` — offset snapped to a valid position from `getBreakpointPositionsCompressed`; an invalid offset is a silent no-op in Firefox                                                                                                                                                                                                             |
 | Breakpoints (JS)   | same packet; line = source line number (pc - codeOffset), snapped to a valid (line, column) from `getBreakpointPositionsCompressed` on the JS source actor — an unsnapped column binds to nothing and the breakpoint silently never fires                                                                                                                                                                     |
 | Continue / step    | `thread.resume()` / `thread.resume({type:"step"})` for wasm frames, `{type:"next"}` for a JS innermost frame (one wasm instruction jumps an arbitrary number of JS source lines); a multi-component step-in preserves `step` at an opaque JS boundary to observe foreign Wasm entry; observer breakpoints preempt an active source plan through a private logical abort sentinel; stop via the `paused` event |
@@ -348,7 +344,7 @@ part of that surface serving it.
 - **Unit tests** (`npm test`) — protocol layer, platform server, attach-shim,
   SAB-RPC wire codec, synthetic modules, REPL. Run without Firefox or any lldb.
 - **e2e suite** (`npm run test:e2e`) — the primary correctness signal. Drives the
-  **embedded wasm LLDB** (the same path `firefox-lldb` uses, no native lldb) against
+  **embedded wasm LLDB** (the same path `firefox-wasm-debugger` uses, no native lldb) against
   headless Firefox, through the off-worker session API. Needs only Firefox plus
   emsdk-built fixtures (`npm run build:fixtures`). Files run concurrently
   (`--test-concurrency=4`, override `E2E_CONCURRENCY=N`); each does one attach in
@@ -440,8 +436,8 @@ RDP facts confirmed experimentally:
   the frame's `getEnvironment` bindings), and `js p <expr>` evaluates an
   expression in the stopped JS frame's scope (or page scope if not paused).
   Similarly `console on`/`console off` toggle live streaming of the page's
-  `console.*` output and uncaught errors. These are REPL features of
-  `firefox-lldb` only — they are not available through an external native lldb.
+  `console.*` output and uncaught errors. These are frontend extensions rather
+  than operations implemented by the LLDB component.
 - **Per-function JS names** — each JS source is one synthetic module with one subprogram; the subprogram name is taken from `callee.displayName` of the innermost active JS frame, so the first JS caller correctly shows its function name instead of the filename. Outer JS frames from the same file (which Firefox reports at the same source line, see next bullet) still show the innermost function name. A full fix (distinct name per frame) requires multi-subprogram modules with per-depth unique ids, which needs a Rust change.
 - **Duplicate frame IDs for recursive JS frames** — `qWasmCallStack` reports only
   PCs; LLDB's wasm plugin derives `GetFrameID()` from the PC alone (no FP/SP

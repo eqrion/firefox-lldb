@@ -4,7 +4,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildSyntheticModule } from "../../src/gdb/synthetic-module.js";
+import { buildSyntheticModule } from "../../src/wasm/synthetic-debug-module.js";
 import { wasmCustomSectionNames, wasmDebugInfoHints } from "../../src/wasm/metadata.js";
 
 test("Wasm metadata normalizes DWARF and source map custom sections", () => {

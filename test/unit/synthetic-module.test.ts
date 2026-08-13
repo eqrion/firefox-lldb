@@ -4,7 +4,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildSyntheticModule } from "../../src/gdb/synthetic-module.js";
+import { buildSyntheticModule } from "../../src/wasm/synthetic-debug-module.js";
 
 function readUleb(bytes: Uint8Array, offset: number): { value: number; next: number } {
   let value = 0;
@@ -85,7 +85,7 @@ test("codeOffset < bytecode.length and all source lines are in range", () => {
 
 test(".debug_info contains the file name and comp_dir as C strings", () => {
   const name = "math.js";
-  const compDir = "/tmp/firefox-lldb-abc";
+  const compDir = "/tmp/firefox-wasm-debugger-abc";
   const { bytecode } = buildSyntheticModule({ name, compDir, lineCount: 3 });
   const info = findCustomSection(bytecode, ".debug_info");
   assert.ok(info);

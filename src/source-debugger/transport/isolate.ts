@@ -7,8 +7,8 @@ import type {
   ModuleClaim,
   SourceDebuggerComponentDefinition,
   SourceDebuggerComponent,
+  SourceDebuggerComponentHost,
 } from "../protocol/component.js";
-import type { SourceDebuggerComponentHostBinding } from "../target/host.js";
 import { serveSourceDebuggerComponentHost } from "./host-rpc.js";
 import type { SourceDebuggerComponentProbe } from "../session/ownership.js";
 import {
@@ -45,7 +45,8 @@ export class SourceDebuggerComponentIsolate implements SourceDebuggerComponentPr
   #closed = false;
 
   constructor(
-    host: SourceDebuggerComponentHostBinding,
+    componentId: string,
+    host: SourceDebuggerComponentHost,
     private readonly options: SourceDebuggerRpcOptions = {}
   ) {
     const definitionChannel = new MessageChannel();
@@ -53,7 +54,7 @@ export class SourceDebuggerComponentIsolate implements SourceDebuggerComponentPr
     const hostChannel = new MessageChannel();
     this.#definitionPort = definitionChannel.port1;
     this.#componentPort = componentChannel.port1;
-    this.#hostComponentId = host.componentId;
+    this.#hostComponentId = componentId;
     this.#hostEndpoint = serveSourceDebuggerComponentHost(hostChannel.port1, host);
     this.workerPorts = {
       definitionPort: definitionChannel.port2,

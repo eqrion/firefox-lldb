@@ -9,9 +9,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import net from "node:net";
-import { RdpWasmSession, type StoppedEvent, type PauseEvent } from "../../src/rdp/session.js";
-import { encodeRdpFrame, sliceRdpFrame } from "../../src/rdp/transport.js";
-import { buildSyntheticModule } from "../../src/gdb/synthetic-module.js";
+import {
+  RdpWasmSession,
+  type StoppedEvent,
+  type PauseEvent,
+} from "../../src/source-debugger/target/firefox/rdp/session.js";
+import {
+  encodeRdpFrame,
+  sliceRdpFrame,
+} from "../../src/source-debugger/target/firefox/rdp/transport.js";
+import { buildSyntheticModule } from "../../src/wasm/synthetic-debug-module.js";
 
 // ---------------------------------------------------------------------------
 // Fake RDP server

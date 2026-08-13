@@ -174,8 +174,8 @@ function fakeLoader(
         close: () => {},
       };
     },
-    async instantiate(host) {
-      events.push(`instantiate:${id}:${host.componentId}`);
+    async instantiate() {
+      events.push(`instantiate:${id}:${id}`);
       return fakeLoadedComponent(id, events, readyMessage, failActivation);
     },
   };
@@ -234,8 +234,8 @@ function discoveryLoader(
         close: () => {},
       };
     },
-    async instantiate(host) {
-      events.push(`instantiate:${id}:${host.componentId}`);
+    async instantiate() {
+      events.push(`instantiate:${id}:${id}`);
       return fakeLoadedComponent(id, events);
     },
   };
@@ -261,8 +261,8 @@ function routedDiscoveryLoader(id: string, events: string[]): SourceDebuggerComp
         close: () => {},
       };
     },
-    async instantiate(host) {
-      events.push(`instantiate:${id}:${host.componentId}`);
+    async instantiate() {
+      events.push(`instantiate:${id}:${id}`);
       return fakeLoadedComponent(id, events);
     },
   };

@@ -2,16 +2,16 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-// Unit tests for the SAB-RPC wire codec (src/gdb/worker/wire.mjs).
+// Unit tests for the SAB-RPC wire codec (src/source-debugger/components/lldb/gdbstub/worker/wire.mjs).
 // The codec serialises structured values (including Uint8Array blobs and BigInt)
 // into a flat Uint8Array that can be written to a SharedArrayBuffer.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 // @ts-expect-error — .mjs file has no type declarations
-import { encode, decode } from "../../src/gdb/worker/wire.mjs";
+import { encode, decode } from "../../src/source-debugger/components/lldb/gdbstub/worker/wire.mjs";
 // @ts-expect-error — .mjs file has no type declarations
-import { normalizeDebuggeeError } from "../../src/gdb/worker/errors.mjs";
+import { normalizeDebuggeeError } from "../../src/source-debugger/components/lldb/gdbstub/worker/errors.mjs";
 
 function roundTrip(value: unknown): unknown {
   const encoded = encode(value);

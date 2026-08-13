@@ -59,7 +59,7 @@ keep this list current when editing.
 
 ## 2. jco-generated JS patch (regenerated; reapplied by a script)
 
-`jco transpile` regenerates `../../src/gdb/generated/` and would clobber any hand
+`jco transpile` regenerates `../../src/source-debugger/components/lldb/gdbstub/generated/` and would clobber any hand
 edit. There is exactly one needed patch (a jco 1.24 codegen bug: a bare
 `currentSubtask` referenced in trampoline catch blocks, which throws a
 `ReferenceError` instead of lifting a WIT `result` Err). It is applied by
@@ -78,7 +78,7 @@ changed.
 
 ## 3. Not patches (our own committed source)
 
-Fixes like `src/gdb/worker/component-worker.mjs` attaching `.payload` to thrown
+Fixes like `src/source-debugger/components/lldb/gdbstub/worker/component-worker.mjs` attaching `.payload` to thrown
 errors (so jco lifts them as WIT `result` Err) are in our own source, not
 generated or vendored-from-upstream — normal version control.
 

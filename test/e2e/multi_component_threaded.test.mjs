@@ -9,7 +9,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { PtyRepl } from "../../src/mcp/pty-repl.ts";
-import { freePort } from "../../src/platform/gdb-server-spawner.ts";
+import { freePort } from "../../src/net/free-port.ts";
 import { startStaticServer } from "./harness.mjs";
 
 test("two debugger components coordinate stops across Firefox worker threads", async () => {
@@ -27,7 +27,6 @@ test("two debugger components coordinate stops across Firefox worker threads", a
     repl = await PtyRepl.launch({
       url,
       headless: true,
-      platformPort: await nextPort(),
       rdpPort: await nextPort(),
       marionettePort: await nextPort(),
       fire: "runWorkerMainWorkerSequence()",

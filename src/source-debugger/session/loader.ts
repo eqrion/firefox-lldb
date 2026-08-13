@@ -5,8 +5,8 @@
 import type {
   SourceDebuggerComponentDefinition,
   SourceDebuggerComponent,
+  SourceDebuggerComponentHost,
 } from "../protocol/component.js";
-import type { SourceDebuggerComponentHostBinding } from "../target/host.js";
 import type { SourceDebuggerComponentProbe } from "./ownership.js";
 import type { ComponentId } from "../protocol/types.js";
 
@@ -41,5 +41,5 @@ export interface SourceDebuggerComponentLoader<
 > {
   readonly id: ComponentId;
   loadDefinition(): Promise<LoadedSourceDebuggerComponentDefinition>;
-  instantiate(host: SourceDebuggerComponentHostBinding): Promise<Runtime>;
+  instantiate(host: SourceDebuggerComponentHost): Promise<Runtime>;
 }

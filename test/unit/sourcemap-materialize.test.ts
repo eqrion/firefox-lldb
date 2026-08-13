@@ -7,7 +7,7 @@ import test from "node:test";
 import { resolve } from "node:path";
 import { containedSourcePath } from "../../src/sourcemap/materialize.js";
 
-const ROOT = resolve("/tmp/firefox-lldb-test/module.src");
+const ROOT = resolve("/tmp/firefox-wasm-debugger-test/module.src");
 
 test("containedSourcePath keeps ordinary nested paths below the module directory", () => {
   assert.equal(containedSourcePath(ROOT, "src/lib/math.cpp"), resolve(ROOT, "src/lib/math.cpp"));

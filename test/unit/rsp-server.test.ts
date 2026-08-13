@@ -4,7 +4,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { RspServer } from "../../src/protocol/rsp-server.js";
+import { RspServer } from "../../src/source-debugger/components/lldb/rsp/rsp-server.js";
 import { RspClient } from "./rsp-client.js";
 
 const echoHandler = {

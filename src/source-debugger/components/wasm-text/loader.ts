@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-import type { SourceDebuggerComponentHostBinding } from "../../target/host.js";
+import type { SourceDebuggerComponentHost } from "../../protocol/component.js";
 import type {
   LoadedSourceDebuggerComponent,
   LoadedSourceDebuggerComponentDefinition,
@@ -35,9 +35,7 @@ export class WasmSourceDebuggerComponentLoader implements SourceDebuggerComponen
     };
   }
 
-  async instantiate(
-    host: SourceDebuggerComponentHostBinding
-  ): Promise<LoadedSourceDebuggerComponent> {
+  async instantiate(host: SourceDebuggerComponentHost): Promise<LoadedSourceDebuggerComponent> {
     const runtime = await IsolatedWasmTextComponentRuntime.create({
       host,
       id: this.id,

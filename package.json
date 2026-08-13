@@ -1,7 +1,7 @@
 {
-  "name": "firefox-lldb",
+  "name": "firefox-wasm-debugger",
   "version": "0.1.6",
-  "description": "LLDB platform server and GDB remote stub for debugging WebAssembly running inside Firefox",
+  "description": "Language-generic source debugging for WebAssembly running inside Firefox",
   "keywords": [
     "lldb",
     "wasm",
@@ -10,10 +10,10 @@
     "firefox",
     "gdb"
   ],
-  "homepage": "https://github.com/eqrion/firefox-lldb",
+  "homepage": "https://github.com/eqrion/firefox-wasm-debugger",
   "repository": {
     "type": "git",
-    "url": "https://github.com/eqrion/firefox-lldb.git"
+    "url": "https://github.com/eqrion/firefox-wasm-debugger.git"
   },
   "type": "module",
   "license": "MPL-2.0",
@@ -23,14 +23,23 @@
   "files": [
     "dist"
   ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./protocol": {
+      "types": "./dist/source-debugger/protocol/index.d.ts",
+      "import": "./dist/source-debugger/protocol/index.js"
+    }
+  },
   "bin": {
-    "firefox-lldb": "./dist/cli/firefox-lldb.js",
-    "firefox-lldb-server": "./dist/cli/firefox-lldb-server.js",
-    "firefox-lldb-mcp": "./dist/mcp/server.js"
+    "firefox-wasm-debugger": "./dist/cli/firefox-wasm-debugger.js",
+    "firefox-wasm-debugger-mcp": "./dist/mcp/server.js"
   },
   "scripts": {
     "postinstall": "chmod +x node_modules/node-pty/prebuilds/*/spawn-helper 2>/dev/null || true",
-    "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
+    "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.json && node scripts/copy-assets.mjs",
     "prepublishOnly": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "format": "prettier --write .",
@@ -38,15 +47,13 @@
     "check": "npm run typecheck && npm run format:check",
     "test": "node --import tsx --test test/unit/*.test.ts",
     "test:e2e": "node --import tsx --test --test-concurrency=${E2E_CONCURRENCY:-4} --test-timeout=180000 --test-reporter=./test/e2e/reporter.mjs test/e2e/*.test.mjs",
-    "launch": "node --import tsx src/cli/firefox-lldb.ts --launch --rdp-port ${RDP_PORT:-6080} ${URL:+--url $URL}",
-    "launch-server": "node --import tsx src/cli/firefox-lldb-server.ts --launch --port ${PORT:-1234} --rdp-port ${RDP_PORT:-6080} ${URL:+--url $URL}",
-    "connect": "node --import tsx src/cli/firefox-lldb-server.ts --connect --port ${PORT:-1234} --rdp-port ${RDP_PORT:-6080} ${URL:+--url $URL}",
+    "launch": "node --import tsx src/cli/firefox-wasm-debugger.ts --launch --rdp-port ${RDP_PORT:-6080} ${URL:+--url $URL}",
     "mcp": "node --import tsx src/mcp/server.ts",
     "component:build": "cd vendor/gdbstub-component && cargo build --release --target wasm32-wasip2",
-    "component:transpile": "npx jco transpile vendor/gdbstub-component/target/wasm32-wasip2/release/firefox_lldb_gdbstub_component.wasm -o src/gdb/generated --name gdbstub --instantiation async && node scripts/patch-generated.mjs",
+    "component:transpile": "node scripts/clean-generated.mjs gdbstub && npx jco transpile vendor/gdbstub-component/target/wasm32-wasip2/release/firefox_wasm_debugger_gdbstub_component.wasm -o src/source-debugger/components/lldb/gdbstub/generated --name gdbstub --instantiation async && node scripts/patch-generated.mjs && node scripts/normalize-generated.mjs gdbstub",
     "component": "npm run component:build && npm run component:transpile",
     "sourcemap:build": "cd vendor/source-map-dwarf-component && cargo build --release --target wasm32-wasip2",
-    "sourcemap:transpile": "npx jco transpile vendor/source-map-dwarf-component/target/wasm32-wasip2/release/firefox_lldb_source_map_component.wasm -o src/sourcemap/generated --name sourcemap --instantiation async",
+    "sourcemap:transpile": "node scripts/clean-generated.mjs sourcemap && npx jco transpile vendor/source-map-dwarf-component/target/wasm32-wasip2/release/firefox_wasm_debugger_source_map_component.wasm -o src/sourcemap/generated --name sourcemap --instantiation async && node scripts/normalize-generated.mjs sourcemap",
     "sourcemap": "npm run sourcemap:build && npm run sourcemap:transpile",
     "test:rust": "cargo test --manifest-path vendor/source-map-dwarf/Cargo.toml",
     "build:fixtures": "npm run build:fixture-simple && npm run build:fixture-two-components && npm run build:fixture-wasm-text && npm run build:fixture-self-redirect && npm run build:fixture-oop && npm run build:fixture-parser && npm run build:fixture-ledger && npm run build:fixture-types && npm run build:fixture-heap && npm run build:fixture-trap && npm run build:fixture-sourcemap && npm run build:fixture-eh && npm run build:fixture-jspi && npm run build:fixture-threaded && npm run build:fixture-threaded-dynamic && npm run build:fixture-large",

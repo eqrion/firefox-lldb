@@ -20,7 +20,7 @@ import { fileURLToPath } from "node:url";
 const file = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
-  "src/gdb/generated/gdbstub.js"
+  "src/source-debugger/components/lldb/gdbstub/generated/gdbstub.js"
 );
 const MARKER = "let currentSubtask; // jco-patch";
 const ANCHOR =

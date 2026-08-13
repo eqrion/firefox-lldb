@@ -4,7 +4,10 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { findFirefoxBinary, launchFirefox } from "../../src/rdp/firefox.js";
+import {
+  findFirefoxBinary,
+  launchFirefox,
+} from "../../src/source-debugger/target/firefox/rdp/firefox.js";
 import net from "node:net";
 
 async function freePort(): Promise<number> {

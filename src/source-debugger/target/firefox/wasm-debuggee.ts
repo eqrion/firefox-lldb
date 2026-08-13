@@ -2,16 +2,16 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-import type { FrameForm, RdpWasmSession, StoppedEvent } from "../../rdp/session.js";
-import { grip } from "../../rdp/session.js";
+import type { FrameForm, RdpWasmSession, StoppedEvent } from "./rdp/session.js";
+import { grip } from "./rdp/session.js";
 import {
   RdpDebuggee,
   type RdpDebuggeeResumeAction,
   type RdpDebuggeeRunControl,
   type RpcRequest,
-} from "../../gdb/rdp-debuggee.js";
-import { noopLogger, type Logger } from "../../logging.js";
-import type { SessionStopReason } from "../protocol/types.js";
+} from "./rdp-debuggee.js";
+import { noopLogger, type Logger } from "../../../logging.js";
+import type { SessionStopReason } from "../../protocol/types.js";
 import type {
   WasmDebuggee,
   WasmDebuggeeEngineResumeAction,
@@ -22,7 +22,7 @@ import type {
   WasmDebuggeeStop,
   WasmDebuggeeThread,
   WasmDebuggeeVariable,
-} from "../protocol/wasm-debuggee.js";
+} from "../../protocol/wasm-debuggee.js";
 
 class DeferredResumeGate implements RdpDebuggeeRunControl {
   readonly #pending = new Map<string, (action: RdpDebuggeeResumeAction) => void>();

@@ -1,26 +1,26 @@
-# firefox-lldb
+# firefox-wasm-debugger
 
 _Experimental prototype: not an official product, nor fully working yet!_
 
-Source-level debugging for WebAssembly running in your browser.
+Language-generic source-level debugging for WebAssembly running in Firefox.
 
-`firefox-lldb` gives you a real LLDB prompt attached to a WebAssembly module
-executing inside a live Firefox tab.
+`firefox-wasm-debugger` coordinates isolated `SourceDebuggerComponents` behind
+one `(sdb)` session. Modules with DWARF or source maps use a real embedded LLDB;
+plain Wasm falls back to an independent WebAssembly-text debugger.
 
 ```
-(lldb) breakpoint set -n compute_factorial
-(lldb) continue
-* thread #1, stop reason = breakpoint 1.1
-    frame #0: wasm-0`compute_factorial(n=5) at math.cpp:23
-   22     int compute_factorial(int n) {
--> 23       if (n <= 1) return 1;
-   24       return n * compute_factorial(n - 1);
-(lldb) p n
-(int) 5
+(sdb) break compute_factorial
+Breakpoint lldb:1: verified
+(sdb) continue
+stop reason = breakpoint
+#0 compute_factorial at math.cpp:23 [lldb]
+(sdb) p n
+5
 ```
 
-No separate LLDB install is needed: the tool ships LLDB compiled to
-WebAssembly and runs it in-process. You just need Node and Firefox.
+No separate debugger installation is needed. LLDB is compiled to WebAssembly
+and runs inside its component worker; Firefox access is provided through the
+portable `WasmDebuggee` host interface.
 
 ## Requirements
 
@@ -31,28 +31,28 @@ WebAssembly and runs it in-process. You just need Node and Firefox.
 ## Install
 
 ```sh
-npm install -g firefox-lldb
+npm install -g firefox-wasm-debugger
 ```
 
 ## Getting started
 
 Say your app is served at `http://localhost:8080/index.html` and loads a wasm
-module built with debug info. Point `firefox-lldb` at it:
+module built with debug info. Point `firefox-wasm-debugger` at it:
 
 ```sh
-firefox-lldb --url http://localhost:8080/index.html
+firefox-wasm-debugger --url http://localhost:8080/index.html
 ```
 
 This launches a fresh Firefox, opens the page, attaches to its wasm module, and
-drops you at an `(lldb)` prompt. From there:
+drops you at an `(sdb)` prompt. From there:
 
 ```
-(lldb) b compute_factorial   # break on a function
-(lldb) continue              # run until it's hit
-(lldb) bt                    # see the call stack
-(lldb) p n                   # inspect a local
-(lldb) step                  # step to the next source line
-(lldb) frame variable        # list all locals + args
+(sdb) break compute_factorial # break on a function
+(sdb) continue                # run until it is hit
+(sdb) bt                      # composed cross-component call stack
+(sdb) locals                  # inspect locals and arguments
+(sdb) p n                     # evaluate in the selected source frame
+(sdb) step                    # step, including component handoffs
 ```
 
 ### Attaching by hand
@@ -60,12 +60,8 @@ drops you at an `(lldb)` prompt. From there:
 If you don't pass `--url`, Firefox starts on a blank page. Navigate to your page,
 then attach:
 
-```
-(lldb) platform process list   # list open tabs and their PIDs
-(lldb) attach --pid 1          # attach to the wasm tab
-```
-
-(`attach` is a shortcut for `process attach --plugin wasm`)
+Use `attach --pid N` to select a tab. `lldb <command>` remains available as an
+explicit LLDB-native escape hatch.
 
 ### Experimental source debugger components
 
@@ -74,7 +70,7 @@ over one Firefox tab. Each repeated `--component` assigns matching Wasm module
 URLs to a separate wasm LLDB runtime:
 
 ```sh
-firefox-lldb --url http://localhost:8080/index.html \
+firefox-wasm-debugger --url http://localhost:8080/index.html \
   --component lldb-a=component=a \
   --component lldb-b=component=b
 ```
@@ -98,12 +94,10 @@ same generic component-host resource transport used for LLDB's RSP import.
 
 Each installed ecosystem enters through a generic
 `SourceDebuggerComponentLoader`. A shared `SourceDebuggerSessionHost` gives the
-resulting isolate a component-scoped debuggee interface and owns its RSP
-connections for the session lifetime; LLDB is now one implementation of that
-loader rather than part of the generic worker protocol. The CLI activates and
-closes those loaders through `SourceDebuggerSessionRuntime`; LLDB-specific
-platform servers, attach commands, shared-RDP wiring, and run control no longer
-appear in the CLI lifecycle. Firefox now starts and exposes normalized Wasm
+resulting isolate a component-scoped `WasmDebuggee`; debugger-engine transports
+never cross that host interface. LLDB privately owns its RSP, platform server,
+attach shim, and gdbstub stack. The CLI activates and closes all loaders through
+`SourceDebuggerSessionRuntime`. Firefox starts and exposes normalized Wasm
 metadata before any debugger engine is created. The catalog probes lightweight
 installed definitions and instantiates only initial module owners; an e2e proof
 verifies that an unsupported installed ecosystem is never instantiated. If a
@@ -140,7 +134,7 @@ Rich source-level debugging still needs debug information:
 - **Emscripten / C / C++:** compile with `-g` (e.g. `emcc app.cpp -g -O0 -o app.js`).
 - **Rust / wasm-pack:** debug builds embed DWARF by default.
 - **Source maps only:** if your toolchain emits a source map (a
-  `sourceMappingURL`) but no embedded DWARF, `firefox-lldb` synthesizes the
+  `sourceMappingURL`) but no embedded DWARF, `firefox-wasm-debugger` synthesizes the
   debug info from the source map automatically at attach time. Breakpoints and
   source listing should work, but you won't get variable printing or
   evaluation.
@@ -152,11 +146,28 @@ Rich source-level debugging still needs debug information:
 Unoptimized builds (`-O0`) give the most faithful stepping and variable
 inspection. Optimized builds may inline or drop variables.
 
+## TypeScript API
+
+The portable component contract is a supported package export:
+
+```ts
+import type {
+  SourceDebuggerComponent,
+  SourceDebuggerComponentDefinition,
+  SourceDebuggerComponentHost,
+} from "firefox-wasm-debugger/protocol";
+```
+
+The root export adds the session, runtime, ownership, and loader APIs for Node
+hosts. Internal Firefox, RDP, LLDB, gdbstub, and worker modules are deliberately
+not package exports.
+
 ## Working at the prompt
 
-This is a real LLDB prompt, so standard LLDB commands work: `breakpoint`,
-`continue`/`c`, `step`/`s`, `next`/`n`, `finish`, `bt`, `frame`,
-`frame variable`, `p <var>`, `memory read`/`x`, `thread list`, and so on.
+Generic commands include `components`, `modules`, `sources`, `list`, `threads`,
+`bt`, `frame`, `locals`, `p`, `break`, `breakpoints`, `continue`, `step`, `next`,
+and `finish`. Use `lldb <command>` when you specifically need LLDB's native
+command interpreter.
 
 ### Inspecting JavaScript (`js`)
 

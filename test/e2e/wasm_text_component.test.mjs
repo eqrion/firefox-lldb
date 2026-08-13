@@ -8,12 +8,12 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseCliArgs } from "../../src/core/platform-session.ts";
-import { freePort } from "../../src/platform/gdb-server-spawner.ts";
-import { FirefoxSourceDebuggerTarget } from "../../src/source-debugger/target/firefox.ts";
+import { parseCliArgs } from "../../src/cli/options.ts";
+import { freePort } from "../../src/net/free-port.ts";
+import { FirefoxSourceDebuggerTarget } from "../../src/source-debugger/target/firefox/target.ts";
 import {
   LldbSourceDebuggerComponentLoader,
-  LldbSourceDebuggerTarget,
+  LldbComponentActivator,
 } from "../../src/source-debugger/components/lldb/loader.ts";
 import { SourceDebuggerSessionRuntime } from "../../src/source-debugger/session/runtime.ts";
 import { WASM_SOURCE_DEBUGGER_ID } from "../../src/source-debugger/components/wasm-text/component.ts";
@@ -28,23 +28,22 @@ test("LLDB and generated Wasm text coordinate one mixed source session", async (
     const args = parseCliArgs([
       "--launch",
       "--headless",
-      "--port",
-      "0",
       "--rdp-port",
       String(await freePort()),
       "--url",
       `http://127.0.0.1:${staticServer.port}/mixed-wat.html`,
     ]);
-    target = await FirefoxSourceDebuggerTarget.start({ args });
+    target = await FirefoxSourceDebuggerTarget.start({ ...args });
     await waitForModules(target, 2);
 
     const route = { id: "lldb", urlSubstring: "*" };
-    const lldbTarget = new LldbSourceDebuggerTarget({
-      target,
+    const lldbActivator = new LldbComponentActivator({
+      automaticAttach: target.automaticAttach,
+      onDetached: (listener) => void target.onDetached(listener),
     });
     runtime = await SourceDebuggerSessionRuntime.load({
       loaders: [
-        new LldbSourceDebuggerComponentLoader(lldbTarget, route, {
+        new LldbSourceDebuggerComponentLoader(lldbActivator, route, {
           observerResumesTarget: false,
           exclusiveModules: true,
         }),

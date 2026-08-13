@@ -3,15 +3,18 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 import { Worker } from "node:worker_threads";
-import type { ModuleClaim, SourceDebuggerComponent } from "../../protocol/component.js";
+import type {
+  ModuleClaim,
+  SourceDebuggerComponent,
+  SourceDebuggerComponentHost,
+} from "../../protocol/component.js";
 import type { ModuleDescriptor } from "../../protocol/types.js";
 import type { SourceDebuggerComponentProbe } from "../../session/ownership.js";
-import type { SourceDebuggerComponentHostBinding } from "../../target/host.js";
 import { SourceDebuggerComponentIsolate } from "../../transport/isolate.js";
 import type { WasmTextIsolateMessage, WasmTextIsolateWorkerData } from "./isolate-protocol.js";
 
 export interface IsolatedWasmTextComponentRuntimeOptions {
-  host: SourceDebuggerComponentHostBinding;
+  host: SourceDebuggerComponentHost;
   id: string;
   name: string;
   requestTimeoutMs?: number;
@@ -33,7 +36,7 @@ export class IsolatedWasmTextComponentRuntime implements SourceDebuggerComponent
     options: IsolatedWasmTextComponentRuntimeOptions
   ): Promise<IsolatedWasmTextComponentRuntime> {
     let worker: Worker | undefined;
-    const isolate = new SourceDebuggerComponentIsolate(options.host, {
+    const isolate = new SourceDebuggerComponentIsolate(options.id, options.host, {
       requestTimeoutMs: options.requestTimeoutMs ?? 30_000,
       onTransportFailure: () => void worker?.terminate(),
     });

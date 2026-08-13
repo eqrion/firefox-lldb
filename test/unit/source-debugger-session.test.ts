@@ -10,7 +10,7 @@ import { SourceDebuggerSessionHost } from "../../src/source-debugger/target/host
 import type { SourceDebuggerComponent } from "../../src/source-debugger/protocol/component.js";
 import { SequencedSourceDebuggerRun } from "../../src/source-debugger/components/run.js";
 import { SourceDebuggerError } from "../../src/source-debugger/protocol/error.js";
-import type { RdpWasmSession } from "../../src/rdp/session.js";
+import type { RdpWasmSession } from "../../src/source-debugger/target/firefox/rdp/session.js";
 import type { SourceDebuggerTarget } from "../../src/source-debugger/protocol/target.js";
 import type {
   ComponentRunRequest,

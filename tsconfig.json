@@ -17,5 +17,10 @@
     "skipLibCheck": true
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["node_modules", "dist", "src/gdb/generated", "src/sourcemap/generated"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    "src/source-debugger/components/lldb/gdbstub/generated",
+    "src/sourcemap/generated"
+  ]
 }

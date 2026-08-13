@@ -4,7 +4,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { stripWasmNameSection, wasmFunctionRange } from "../../src/gdb/wasm-bytecode.js";
+import { stripWasmNameSection, wasmFunctionRange } from "../../src/wasm/bytecode.js";
 
 const header = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
 

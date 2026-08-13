@@ -4,12 +4,12 @@
 
 import { LLDBClient, type FileProvider } from "lldb-wasm";
 import { noopLogger, type Logger } from "../../../logging.js";
-import { RspServer } from "../../../protocol/rsp-server.js";
-import { startAttachShim } from "../../../protocol/attach-shim.js";
-import { PlatformServer } from "../../../platform/platform-server.js";
-import { GdbServerSpawner } from "../../../platform/gdb-server-spawner.js";
+import { RspServer } from "./rsp/rsp-server.js";
+import { startAttachShim } from "./rsp/attach-shim.js";
+import { PlatformServer } from "./platform/platform-server.js";
+import { GdbServerSpawner } from "./platform/gdb-server-spawner.js";
 // @ts-expect-error - .mjs host has no type declarations
-import { startGdbServer } from "../../../gdb/worker/host.mjs";
+import { startGdbServer } from "./gdbstub/worker/host.mjs";
 import type { SourceDebuggerComponentHost } from "../../protocol/component.js";
 import type {
   WasmDebuggee,

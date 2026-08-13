@@ -4,14 +4,14 @@
 
 // REPL-level e2e harness: boots the same Firefox + platform-server + bridge
 // stack as harness.mjs, then drives the *real* runRepl (src/cli/repl.ts) with
-// injected streams. This exercises the dominant `firefox-lldb` code path —
+// injected streams. This exercises the dominant `firefox-wasm-debugger` code path —
 // readline routing, js subcommands, console streaming — rather than the
 // lower-level session API the Session harness drives directly.
 
 import { PassThrough, Writable } from "node:stream";
 import { LLDBClient } from "lldb-wasm";
-import { parseCliArgs, startPlatformServer } from "../../src/core/platform-session.ts";
-import { freePort } from "../../src/platform/gdb-server-spawner.ts";
+import { parseLldbHarnessArgs, startLldbTestPlatform } from "./support/lldb-platform-session.ts";
+import { freePort } from "../../src/net/free-port.ts";
 import { runRepl } from "../../src/cli/repl.ts";
 import { LldbSourceDebuggerComponent } from "../../src/source-debugger/components/lldb/component.ts";
 import { SourceDebuggerSession } from "../../src/source-debugger/session/session.ts";
@@ -107,7 +107,7 @@ export class ReplSession {
       rs,
       (async () => {
         const rdpPort = await freePort();
-        const args = parseCliArgs([
+        const args = parseLldbHarnessArgs([
           "--launch",
           ...(headless ? ["--headless"] : []),
           "--port",
@@ -119,7 +119,7 @@ export class ReplSession {
           "--fire",
           fire ?? fx.fire,
         ]);
-        const handle = await startPlatformServer(args, {
+        const handle = await startLldbTestPlatform(args, {
           wrapConnectPort: (port) => rs.#bridgeTcp(port),
           onSession: (s, interrupt) => {
             rs.session = s;
