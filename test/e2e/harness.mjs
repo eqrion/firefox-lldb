@@ -38,6 +38,16 @@ export const FIXTURES = {
     breakFunc: "sum_range",
     file: "math.cpp",
   },
+  // Page carrying sources Firefox reports with url:null (new Function, eval)
+  // plus a wasm module compiled from inline bytes. A url:null reaching
+  // fetchModuleBytes used to crash the gdbstub worker on the first module scan
+  // and take every other module on the page with it.
+  anon_module: {
+    pageDir: "test/fixtures/anon_module",
+    fire: "runFactorial()",
+    breakFunc: "compute_factorial",
+    file: "math.cpp",
+  },
   self_redirect: {
     pageDir: "test/fixtures/self_redirect",
     fire: "runFactorial()",

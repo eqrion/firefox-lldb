@@ -32,6 +32,7 @@ import {
   EVENTS,
   ROOT_ACTOR,
   grip,
+  hasUrl,
   type ThreadConfig,
   type TabInfo,
   type RdpTabForm,
@@ -41,6 +42,7 @@ import {
   type GetWatcherResponse,
   type GetThreadConfigurationActorResponse,
   type SourceForm,
+  type UrlSourceForm,
   type ResourcesAvailableArrayEvent,
   type SourcesResponse,
   type SourceResponse,
@@ -69,7 +71,15 @@ import {
   type ModuleByteProvider,
 } from "./module-bytes.js";
 
-export { grip, type TabInfo, type SourceForm, type FrameForm, type PauseEvent, type StoppedEvent };
+export {
+  grip,
+  type TabInfo,
+  type SourceForm,
+  type UrlSourceForm,
+  type FrameForm,
+  type PauseEvent,
+  type StoppedEvent,
+};
 
 // Thread configuration applied before navigation. observeWasm/observeAsmJS so the
 // page's wasm compiles with debug support; pauseOnExceptions with
@@ -309,6 +319,8 @@ export class RdpWasmSession extends EventEmitter {
   // The single owner of actor->url lookups — RdpDebuggee reads it via
   // urlForSourceActor() instead of keeping its own copy.
   #sourceUrlByActor = new Map<string, { url: string; generation: number }>();
+  // Actors already reported as URL-less, so a busy page warns once each.
+  #warnedUrllessActors = new Set<string>();
 
   // Pending "is this top-level destroy a real close?" checks (see DETACH_GRACE_MS).
   #pendingDetachChecks = new Set<ReturnType<typeof setTimeout>>();
@@ -667,7 +679,7 @@ export class RdpWasmSession extends EventEmitter {
         for (const group of groups) {
           if (!Array.isArray(group) || group[0] !== "source" || !Array.isArray(group[1])) continue;
           for (const source of group[1] as SourceForm[]) {
-            if (!source.actor || !source.url) continue;
+            if (!source.actor || !this.#reportUsableSource(source)) continue;
             const generation = this.#activeGeneration;
             if (generation === 0) continue;
             this.#sourceUrlByActor.set(source.actor, { url: source.url, generation });
@@ -773,16 +785,18 @@ export class RdpWasmSession extends EventEmitter {
   // --- wasm sources ---
 
   /** Wasm sources from the given thread. */
-  async wasmSourcesForTid(tid: number): Promise<SourceForm[]> {
+  async wasmSourcesForTid(tid: number): Promise<UrlSourceForm[]> {
     return this.#wasmSourcesForInfo(this.#info(tid));
   }
 
-  async #wasmSourcesForInfo(info: ThreadInfo): Promise<SourceForm[]> {
+  async #wasmSourcesForInfo(info: ThreadInfo): Promise<UrlSourceForm[]> {
     const { sources } = (await this.#client.request(info.threadActor, {
       type: REQUESTS.sources,
     })) as SourcesResponse;
     if (!this.#isCurrentThread(info)) return [];
-    const wasm = (sources ?? []).filter((s) => s.introductionType === "wasm");
+    const wasm = (sources ?? [])
+      .filter((s) => s.introductionType === "wasm")
+      .filter((s) => this.#reportUsableSource(s));
     for (const s of wasm) {
       this.#wasmActorByUrl.set(s.url, { actor: s.actor, generation: info.generation });
       this.#sourceUrlByActor.set(s.actor, { url: s.url, generation: info.generation });
@@ -790,8 +804,29 @@ export class RdpWasmSession extends EventEmitter {
     return wasm;
   }
 
+  // A URL-less source cannot be addressed: Firefox resolves breakpoints by
+  // `location.sourceUrl`, and our buffering maps are URL-keyed so a new worker
+  // thread inherits them. Drop it, once per actor.
+  //
+  // Firefox reports url:null routinely for eval/new Function/debugger-eval
+  // scripts, which nobody expects to debug, so those stay at debug level. A
+  // URL-less *wasm* module is different: it silently will not be debuggable,
+  // and the user needs to be told why.
+  #reportUsableSource(s: SourceForm): s is UrlSourceForm {
+    if (hasUrl(s)) return true;
+    if (!this.#warnedUrllessActors.has(s.actor)) {
+      this.#warnedUrllessActors.add(s.actor);
+      const msg =
+        `[rdp] ignoring ${s.introductionType ?? "unknown"} source ${s.actor}: ` +
+        `Firefox reports no URL for it, and a breakpoint can only be addressed by URL`;
+      if (s.introductionType === "wasm") this.#logger.warn(msg);
+      else this.#logger.debug(msg);
+    }
+    return false;
+  }
+
   /** Wasm sources deduped by URL across all known threads. */
-  async wasmSources(): Promise<SourceForm[]> {
+  async wasmSources(): Promise<UrlSourceForm[]> {
     // Use the top-level thread (lowest tid, always has the full source list).
     const tids = [...this.#threads.keys()].sort((a, b) => a - b);
     if (tids.length === 0) return [];
@@ -815,6 +850,13 @@ export class RdpWasmSession extends EventEmitter {
   }
 
   async fetchModuleBytes(url: string): Promise<Uint8Array> {
+    // Module.bytecode's WIT signature has no error case, so a throw here is
+    // re-thrown uncaught inside the gdbstub worker and takes the whole session
+    // with it. Degrade like the unavailable-bytes path below instead.
+    if (typeof url !== "string") {
+      this.#logger.error(`[rdp] module bytes requested for a source with no URL (${url})`);
+      return EMPTY_WASM_MODULE;
+    }
     const actorEntry = this.#wasmActorByUrl.get(url);
     const actor = actorEntry?.generation === this.#activeGeneration ? actorEntry.actor : undefined;
     if (url.startsWith("http://") || url.startsWith("https://")) {
@@ -990,7 +1032,7 @@ export class RdpWasmSession extends EventEmitter {
     return cols.length > 0 ? { line: snLine, column: cols[0] } : { line: snLine };
   }
 
-  async jsSources(): Promise<SourceForm[]> {
+  async jsSources(): Promise<UrlSourceForm[]> {
     const tids = [...this.#threads.keys()].sort((a, b) => a - b);
     if (tids.length === 0) return [];
     try {
@@ -998,7 +1040,9 @@ export class RdpWasmSession extends EventEmitter {
       const { sources } = (await this.#client.request(info.threadActor, {
         type: REQUESTS.sources,
       })) as SourcesResponse;
-      const js = (sources ?? []).filter((s) => s.url && s.introductionType !== "wasm");
+      const js = (sources ?? [])
+        .filter((s) => s.introductionType !== "wasm")
+        .filter((s) => this.#reportUsableSource(s));
       if (!this.#isCurrentThread(info)) return [];
       for (const s of js) {
         this.#jsActorByUrl.set(s.url, { actor: s.actor, generation: info.generation });

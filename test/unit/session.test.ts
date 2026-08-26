@@ -11,6 +11,8 @@ import assert from "node:assert/strict";
 import net from "node:net";
 import { RdpWasmSession, type StoppedEvent, type PauseEvent } from "../../src/rdp/session.js";
 import { encodeRdpFrame, sliceRdpFrame } from "../../src/rdp/transport.js";
+import { EMPTY_WASM_MODULE } from "../../src/rdp/constants.js";
+import { noopLogger, type Logger } from "../../src/logging.js";
 
 // ---------------------------------------------------------------------------
 // Fake RDP server
@@ -75,7 +77,7 @@ class FakeRdpServer {
 
   /** Wait for a client connection, send the root greeting, handle the
    * session init sequence, then return the live session. */
-  async acceptSession(): Promise<RdpWasmSession> {
+  async acceptSession(logger?: Logger): Promise<RdpWasmSession> {
     // Register init-sequence handlers before starting (they match in order).
     this.#on(
       (r) => r.to === "root" && r.type === "listTabs",
@@ -107,7 +109,7 @@ class FakeRdpServer {
     );
 
     // Start the session connection concurrently with waiting for the socket.
-    const sessionP = RdpWasmSession.start(this.port);
+    const sessionP = RdpWasmSession.start(this.port, "127.0.0.1", undefined, logger);
 
     // Wait for the connection, then send the root greeting to unblock the client.
     await new Promise<void>((resolve) => {
@@ -811,6 +813,61 @@ test("setWasmBreakpoint sends to all existing threads at call time", async () =>
   const actors = new Set(bps.map((r) => r.to));
   assert.ok(actors.has("threadA"), "breakpoint sent to threadA");
   assert.ok(actors.has("threadB"), "breakpoint sent to threadB");
+
+  session.close();
+  srv.close();
+});
+
+// Firefox reports url:null for a source with no URL (bundler-inlined wasm,
+// blob:, `new WebAssembly.Module(bytes)`). Such a source used to be stored
+// unchecked and later reached fetchModuleBytes, where url.startsWith threw a
+// TypeError. That throw crossed the SAB, was re-thrown uncaught in the gdbstub
+// worker, and killed the whole session, so one inlined module took down
+// debugging for every other module on the page.
+test("a wasm source with no URL is skipped instead of poisoning the session", async () => {
+  const srv = new FakeRdpServer();
+  await srv.listen();
+  const warnings: string[] = [];
+  const session = await srv.acceptSession({
+    ...noopLogger,
+    warn: (msg) => warnings.push(msg),
+  });
+  const wasmUrl = "http://host/mod.wasm";
+
+  srv.targetAvailable("threadA", { isTopLevel: true });
+  await sleep(200);
+  srv.onNext(
+    (r) => r.type === "sources",
+    () => ({
+      from: "threadA",
+      sources: [
+        { actor: "wasmAnon", url: null, introductionType: "wasm" },
+        { actor: "wasmActor", url: wasmUrl, introductionType: "wasm" },
+      ],
+    })
+  );
+
+  const sources = await session.wasmSources();
+  assert.deepEqual(
+    sources.map((s) => s.url),
+    [wasmUrl],
+    "the URL-less source is dropped and the usable one survives"
+  );
+  assert.equal(warnings.filter((w) => w.includes("wasmAnon")).length, 1, "warns once, by actor");
+
+  session.close();
+  srv.close();
+});
+
+// Defence at the WIT boundary: Module.bytecode has no error case, so any throw
+// out of it is fatal to the worker. Degrade to an empty module instead.
+test("fetchModuleBytes degrades instead of throwing when the URL is not a string", async () => {
+  const srv = new FakeRdpServer();
+  await srv.listen();
+  const session = await srv.acceptSession();
+
+  const bytes = await session.fetchModuleBytes(null as unknown as string);
+  assert.deepEqual(bytes, EMPTY_WASM_MODULE);
 
   session.close();
   srv.close();

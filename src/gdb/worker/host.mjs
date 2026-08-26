@@ -48,13 +48,25 @@ export function startGdbServer({ dispatch, port, onInfo, onTrace, onError, verbo
   worker.on("message", async (m) => {
     if (m === 1) {
       let out;
+      let req;
       try {
         const len = Atomics.load(ctrl, CTRL_LEN);
         if (len < 0 || len > data.length) throw new Error("invalid worker request length");
-        const req = decode(data.subarray(0, len));
+        req = decode(data.subarray(0, len));
         out = encode({ ok: true, value: await dispatch(req) });
       } catch (e) {
+        // Only the message crosses the wire and the worker re-throws it as a
+        // fresh Error, so the stack a user sees points at that re-throw and
+        // names neither the real thrower nor the method. Log both here.
+        // A `payload` means a modeled WIT failure, i.e. expected control flow.
+        if (e?.payload === undefined) {
+          const where = req ? `${req.type}.${req.method}` : "<undecodable request>";
+          reportError(`[gdb dispatch error] ${where}: ${e?.stack || e}`);
+        }
         try {
+          // The message must stay verbatim: the worker assigns it to
+          // `err.payload`, which jco matches against the WIT error enum tag
+          // (see the "out-of-bounds" thrower in rdp-debuggee.ts).
           out = encode({ ok: false, error: String(e?.message || e) });
         } catch {
           out = encode({ ok: false, error: "rpc failure" });

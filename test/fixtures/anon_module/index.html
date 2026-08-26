@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>URL-less Source Test</title>
+</head>
+<body>
+  <h1>URL-less Source Test</h1>
+
+  <p>
+    Carries sources that Firefox reports with <code>url: null</code>
+    (<code>new Function</code> and <code>eval</code>, both confirmed null in
+    RDP source forms) plus a wasm module compiled from inline bytes, alongside
+    a normal URL-backed module. None of them may stop the URL-backed module
+    from being debuggable.
+  </p>
+
+  <div class="row">
+    <label>n =</label>
+    <input id="fac-n" type="number" value="10" size="4">
+    <button onclick="runFactorial()">factorial(n)</button>
+    <div class="result" id="fac-result"></div>
+  </div>
+  <div class="result" id="anon-result"></div>
+
+  <script>
+    // A whole valid module as literal bytes: no fetch, no network URL. This is
+    // what a bundler that inlines wasm as base64 produces.
+    const ANON_WASM = new Uint8Array([
+      0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+      0x01, 0x07, 0x01, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f,
+      0x03, 0x02, 0x01, 0x00,
+      0x07, 0x07, 0x01, 0x03, 0x61, 0x64, 0x64, 0x00, 0x00,
+      0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x6a, 0x0b,
+    ]);
+
+    // Compiled before the debugger attaches, so these are present in the very
+    // first sources listing.
+    const inlineAdd = new WebAssembly.Instance(new WebAssembly.Module(ANON_WASM)).exports.add;
+
+    // Sources with no URL at all.
+    const fnAdd = new Function('a', 'b', 'return a + b');
+    const evalAdd = eval('(a, b) => a + b');
+
+    document.getElementById('anon-result').textContent =
+      `inline ${inlineAdd(2, 3)} | Function ${fnAdd(2, 3)} | eval ${evalAdd(2, 3)}`;
+  </script>
+
+  <script src="math.js"></script>
+  <script>
+    let factorial;
+
+    MathModule().then(mod => {
+      factorial = mod.cwrap('compute_factorial', 'number', ['number']);
+    });
+
+    function runFactorial() {
+      const n = parseInt(document.getElementById('fac-n').value);
+      document.getElementById('fac-result').textContent = `factorial(${n}) = ${factorial(n)}`;
+    }
+  </script>
+</body>
+</html>

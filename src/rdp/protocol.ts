@@ -132,8 +132,23 @@ export interface WatchResourcesArgs {
 
 export interface SourceForm {
   actor: string;
-  url: string;
+  // Firefox reports null when it has no URL for a source. Observed for
+  // introductionType "eval", "Function", and "debugger eval"; a wasm module
+  // usually gets a synthesized "wasm:<introducer> line N > ..." URL instead.
+  url: string | null;
   introductionType?: string;
+}
+
+/**
+ * A source we can actually address. Every breakpoint path here is keyed by
+ * sourceUrl (Firefox resolves `location: {sourceUrl, ...}`, and the buffering
+ * maps are URL-keyed so new worker threads inherit breakpoints), so a source
+ * with no URL is unusable and must be dropped at ingestion.
+ */
+export type UrlSourceForm = SourceForm & { url: string };
+
+export function hasUrl(s: SourceForm): s is UrlSourceForm {
+  return typeof s.url === "string" && s.url !== "";
 }
 
 export interface ResourcesAvailableArrayEvent {
