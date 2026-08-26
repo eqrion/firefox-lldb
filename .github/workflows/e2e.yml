@@ -10,12 +10,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
-      # Firefox 153 deadlocks Emscripten pthread workers after an RDP
-      # interrupt/resume cycle. Keep the bridge's full threaded coverage on
-      # the latest known-compatible release until that engine regression is
-      # resolved, rather than silently changing browser behavior on every
-      # Mozilla repository update.
-      FIREFOX_VERSION: 152.0.6~build1
+      FIREFOX_VERSION: 154.0.0
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
