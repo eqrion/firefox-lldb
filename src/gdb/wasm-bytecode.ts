@@ -2,16 +2,12 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-// LLDB's wasm object reader currently maps function names from the `name`
-// custom section as if its function indices excluded imports. The wasm format
-// includes imports in that index space, so names after the imported functions
-// are attached to the wrong code addresses. Embedded DWARF already carries the
-// authoritative function names and ranges; removing only the `name` section
-// prevents duplicate, incorrectly-addressed symbol matches without touching
-// executable code or debug sections.
-
 const WASM_HEADER = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
-const NAME_BYTES = new Uint8Array([0x6e, 0x61, 0x6d, 0x65]);
+const CUSTOM_SECTION_ID = 0;
+const CODE_SECTION_ID = 10;
+const EXTERNAL_DEBUG_INFO = "external_debug_info";
+
+const decoder = new TextDecoder();
 
 function readU32(bytes: Uint8Array, start: number, end = bytes.length) {
   let value = 0;
@@ -25,11 +21,67 @@ function readU32(bytes: Uint8Array, start: number, end = bytes.length) {
   return null;
 }
 
-function isNameSection(bytes: Uint8Array, payloadStart: number, payloadEnd: number): boolean {
-  const nameLength = readU32(bytes, payloadStart, payloadEnd);
-  if (!nameLength || nameLength.value !== NAME_BYTES.length) return false;
-  if (nameLength.next + NAME_BYTES.length > payloadEnd) return false;
-  return NAME_BYTES.every((byte, i) => bytes[nameLength.next + i] === byte);
+/** Read a length-prefixed UTF-8 string, as used for custom-section names. */
+function readName(bytes: Uint8Array, start: number, end: number) {
+  const length = readU32(bytes, start, end);
+  if (!length || length.next + length.value > end) return null;
+  return {
+    value: decoder.decode(bytes.subarray(length.next, length.next + length.value)),
+    next: length.next + length.value,
+  };
+}
+
+interface WasmSection {
+  id: number;
+  /** Custom-section name, or "" for a known section. */
+  name: string;
+  /** Offset of the section id byte. */
+  start: number;
+  /** Offset of the section content: the name for a custom section. */
+  contentStart: number;
+  /** Offset immediately after the section. */
+  end: number;
+}
+
+/** Split a module into its sections, or undefined if it is not a well-formed
+ * wasm binary. Callers use the offsets to slice the original bytes, so nothing
+ * is copied here. */
+function wasmSections(bytes: Uint8Array): WasmSection[] | undefined {
+  if (bytes.length < WASM_HEADER.length || !WASM_HEADER.every((byte, i) => bytes[i] === byte)) {
+    return undefined;
+  }
+
+  const sections: WasmSection[] = [];
+  let offset = WASM_HEADER.length;
+  while (offset < bytes.length) {
+    const start = offset;
+    const id = bytes[offset++];
+    const size = readU32(bytes, offset);
+    if (!size) return undefined;
+    const contentStart = size.next;
+    const end = contentStart + size.value;
+    if (end > bytes.length) return undefined;
+
+    let name = "";
+    if (id === CUSTOM_SECTION_ID) {
+      const parsed = readName(bytes, contentStart, end);
+      if (!parsed) return undefined;
+      name = parsed.value;
+    }
+    sections.push({ id, name, start, contentStart, end });
+    offset = end;
+  }
+  return sections;
+}
+
+function concatBytes(parts: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.length;
+  }
+  return out;
 }
 
 export interface WasmFunctionRange {
@@ -50,75 +102,57 @@ export function wasmFunctionRange(
   bytes: Uint8Array,
   targetOffset: number
 ): WasmFunctionRange | undefined {
-  if (bytes.length < WASM_HEADER.length || !WASM_HEADER.every((byte, i) => bytes[i] === byte)) {
-    return undefined;
-  }
+  const code = wasmSections(bytes)?.find((section) => section.id === CODE_SECTION_ID);
+  if (!code) return undefined;
 
-  let offset = WASM_HEADER.length;
-  while (offset < bytes.length) {
-    const sectionId = bytes[offset++];
-    const size = readU32(bytes, offset);
-    if (!size) return undefined;
-    const payloadStart = size.next;
-    const payloadEnd = payloadStart + size.value;
-    if (payloadEnd > bytes.length) return undefined;
-
-    if (sectionId === 10) {
-      const count = readU32(bytes, payloadStart, payloadEnd);
-      if (!count) return undefined;
-      let bodyOffset = count.next;
-      for (let i = 0; i < count.value; i++) {
-        const bodyStart = bodyOffset;
-        const bodySize = readU32(bytes, bodyOffset, payloadEnd);
-        if (!bodySize) return undefined;
-        const bodyEnd = bodySize.next + bodySize.value;
-        if (bodyEnd > payloadEnd) return undefined;
-        if (targetOffset >= bodyStart && targetOffset < bodyEnd) {
-          return { start: bodyStart, end: bodyEnd };
-        }
-        bodyOffset = bodyEnd;
-      }
-      return undefined;
+  const count = readU32(bytes, code.contentStart, code.end);
+  if (!count) return undefined;
+  let bodyOffset = count.next;
+  for (let i = 0; i < count.value; i++) {
+    const bodyStart = bodyOffset;
+    const bodySize = readU32(bytes, bodyOffset, code.end);
+    if (!bodySize) return undefined;
+    const bodyEnd = bodySize.next + bodySize.value;
+    if (bodyEnd > code.end) return undefined;
+    if (targetOffset >= bodyStart && targetOffset < bodyEnd) {
+      return { start: bodyStart, end: bodyEnd };
     }
-
-    offset = payloadEnd;
+    bodyOffset = bodyEnd;
   }
   return undefined;
 }
 
+/**
+ * Remove the `name` custom section.
+ *
+ * LLDB's wasm object reader maps names from that section as if its function
+ * indices excluded imports. The wasm format includes imports in that index
+ * space, so names after the imported functions are attached to the wrong code
+ * addresses. DWARF already carries the authoritative function names and ranges,
+ * so dropping the section prevents duplicate, incorrectly-addressed symbol
+ * matches without touching executable code or debug sections.
+ */
 export function stripWasmNameSection(bytes: Uint8Array): Uint8Array {
-  if (bytes.length < WASM_HEADER.length || !WASM_HEADER.every((byte, i) => bytes[i] === byte)) {
-    return bytes;
-  }
+  const sections = wasmSections(bytes);
+  if (!sections || !sections.some((section) => section.name === "name")) return bytes;
+  return concatBytes([
+    bytes.subarray(0, WASM_HEADER.length),
+    ...sections
+      .filter((section) => section.name !== "name")
+      .map((section) => bytes.subarray(section.start, section.end)),
+  ]);
+}
 
-  const kept: Uint8Array[] = [bytes.subarray(0, WASM_HEADER.length)];
-  let offset = WASM_HEADER.length;
-  let stripped = false;
-
-  while (offset < bytes.length) {
-    const sectionStart = offset;
-    const sectionId = bytes[offset++];
-    const size = readU32(bytes, offset);
-    if (!size) return bytes;
-    const payloadStart = size.next;
-    const payloadEnd = payloadStart + size.value;
-    if (payloadEnd > bytes.length) return bytes;
-
-    if (sectionId === 0 && isNameSection(bytes, payloadStart, payloadEnd)) {
-      stripped = true;
-    } else {
-      kept.push(bytes.subarray(sectionStart, payloadEnd));
-    }
-    offset = payloadEnd;
-  }
-
-  if (!stripped) return bytes;
-  const length = kept.reduce((sum, part) => sum + part.length, 0);
-  const out = new Uint8Array(length);
-  let write = 0;
-  for (const part of kept) {
-    out.set(part, write);
-    write += part.length;
-  }
-  return out;
+/**
+ * Read the `external_debug_info` custom section: the path or URL of a companion
+ * wasm file holding this module's DWARF (emscripten's `-gseparate-dwarf`).
+ *
+ * See https://yurydelendik.github.io/webassembly-dwarf/#external-DWARF.
+ */
+export function wasmExternalDebugInfo(bytes: Uint8Array): string | undefined {
+  const section = wasmSections(bytes)?.find((s) => s.name === EXTERNAL_DEBUG_INFO);
+  if (!section) return undefined;
+  const name = readName(bytes, section.contentStart, section.end);
+  if (!name) return undefined;
+  return readName(bytes, name.next, section.end)?.value || undefined;
 }

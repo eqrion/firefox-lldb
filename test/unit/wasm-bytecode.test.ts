@@ -4,7 +4,11 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { stripWasmNameSection, wasmFunctionRange } from "../../src/gdb/wasm-bytecode.js";
+import {
+  stripWasmNameSection,
+  wasmExternalDebugInfo,
+  wasmFunctionRange,
+} from "../../src/gdb/wasm-bytecode.js";
 
 const header = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
 
@@ -32,4 +36,23 @@ test("wasmFunctionRange finds encoded bodies including their size fields", () =>
   assert.deepEqual(wasmFunctionRange(module, 16), { start: 14, end: 18 });
   assert.equal(wasmFunctionRange(module, 10), undefined);
   assert.equal(wasmFunctionRange(new Uint8Array([...header, 0x0a, 0x7f]), 12), undefined);
+});
+
+function customSection(name: string, payload: number[] = []): number[] {
+  const nameBytes = [...Buffer.from(name)];
+  const content = [nameBytes.length, ...nameBytes, ...payload];
+  return [0x00, content.length, ...content];
+}
+
+test("wasmExternalDebugInfo reads the separate DWARF path", () => {
+  const path = "math.debug.wasm";
+  const section = customSection("external_debug_info", [path.length, ...Buffer.from(path)]);
+  const module = new Uint8Array([...header, 0x01, 0x01, 0x00, ...section]);
+
+  assert.equal(wasmExternalDebugInfo(module), path);
+  assert.equal(
+    wasmExternalDebugInfo(new Uint8Array([...header, ...customSection("name")])),
+    undefined
+  );
+  assert.equal(wasmExternalDebugInfo(new Uint8Array([...header, 0x00, 0x7f])), undefined);
 });
