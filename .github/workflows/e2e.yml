@@ -41,7 +41,7 @@ jobs:
           npm run test:e2e
 
       - name: Dump captured Firefox process output (diagnostic, on failure)
-        if: failure()
+        if: failure() || cancelled()
         run: |
           shopt -s nullglob
           for f in /tmp/firefox-logs/*; do

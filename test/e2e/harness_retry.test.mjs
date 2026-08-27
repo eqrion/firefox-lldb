@@ -8,20 +8,28 @@ import { retrySessionSetup } from "./harness.mjs";
 
 test("session setup retries with a fresh attempt after transient failures", async () => {
   let attempts = 0;
-  const session = await retrySessionSetup(async () => {
-    attempts++;
-    if (attempts < 3) throw new Error(`transient failure ${attempts}`);
-    return { attempt: attempts };
-  });
+  const session = await retrySessionSetup(
+    async () => {
+      attempts++;
+      if (attempts < 3) throw new Error(`transient failure ${attempts}`);
+      return { attempt: attempts };
+    },
+    3,
+    { quiet: true }
+  );
 
   assert.deepEqual(session, { attempt: 3 });
 });
 
 test("session setup reports every failure after exhausting retries", async () => {
   await assert.rejects(
-    retrySessionSetup(async () => {
-      throw new Error("still wedged");
-    }, 2),
+    retrySessionSetup(
+      async () => {
+        throw new Error("still wedged");
+      },
+      2,
+      { quiet: true }
+    ),
     (err) => {
       assert.ok(err instanceof AggregateError);
       assert.equal(err.message, "session setup failed after 2 attempts");

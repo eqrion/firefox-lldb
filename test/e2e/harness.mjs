@@ -230,12 +230,42 @@ export function startStaticServer(
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// A logger that keeps the tail of the debug trace in memory. Debug lines are
+// emitted unconditionally at the call sites (see rdp/transport.ts) and dropped
+// by the console logger unless verbose, so recording here costs nothing in a
+// normal run and gives an attach that times out something to say beyond "30s
+// elapsed": the last RDP exchange before it stopped making progress.
+export function tracingLogger(keep = 40) {
+  const lines = [];
+  const record = (line) => {
+    lines.push(line);
+    if (lines.length > keep) lines.shift();
+  };
+  const echo = process.env.E2E_VERBOSE ? (level, m) => console.error(`[${level}] ${m}`) : () => {};
+  return {
+    tail: () => lines,
+    debug: (m) => {
+      record(m);
+      echo("debug", m);
+    },
+    info: (m) => echo("info", m),
+    warn: (m) => {
+      record(`WARN ${m}`);
+      console.error(`[warn] ${m}`);
+    },
+    error: (m) => {
+      record(`ERROR ${m}`);
+      console.error(`[error] ${m}`);
+    },
+  };
+}
+
 // A Firefox launch can occasionally wedge without returning an RDP error. A
 // deadline cleans that attempt up, but retrying only `process attach` cannot
 // recover because the browser and LLDB worker from that attempt are already
 // unusable. Retry the factory so every attempt gets a fresh browser, worker,
 // client, and set of transport sockets.
-export async function retrySessionSetup(factory, maxAttempts = 3) {
+export async function retrySessionSetup(factory, maxAttempts = 3, { quiet = false } = {}) {
   const errors = [];
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
@@ -244,12 +274,14 @@ export async function retrySessionSetup(factory, maxAttempts = 3) {
       errors.push(err);
       // Surface each consumed attempt: a retry that succeeds otherwise leaves
       // no trace but a slow test, which is how a high setup-failure rate stays
-      // invisible for weeks.
-      process.stderr.write(
-        `[harness] session setup attempt ${attempt}/${maxAttempts} failed: ${
-          err instanceof Error ? err.message : String(err)
-        }\n`
-      );
+      // invisible for weeks. Quiet for this helper's own test, whose synthetic
+      // failures would otherwise read as real ones in a CI log.
+      if (!quiet)
+        process.stderr.write(
+          `[harness] session setup attempt ${attempt}/${maxAttempts} failed: ${
+            err instanceof Error ? err.message : String(err)
+          }\n`
+        );
       if (attempt < maxAttempts) await sleep(250);
     }
   }
@@ -343,10 +375,16 @@ export function forceKillFirefoxPid(pid) {
 // that's wedged in the first place. forceKillFirefox() is called first as an
 // unconditional, direct SIGKILL that doesn't depend on that chain completing;
 // the graceful shutdown is still attempted afterward, bounded, best-effort.
-export async function withDeadline(session, work, ms) {
+export async function withDeadline(session, work, ms, trace) {
   let timer;
   const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms waiting for Firefox`)), ms);
+    timer = setTimeout(() => {
+      const tail = trace?.tail() ?? [];
+      const where = tail.length
+        ? `; last ${tail.length} trace lines:\n${tail.join("\n")}`
+        : " (no trace captured)";
+      reject(new Error(`timed out after ${ms}ms waiting for Firefox${where}`));
+    }, ms);
   });
   try {
     const result = await Promise.race([work, timeout]);
@@ -465,6 +503,7 @@ export class Session {
     const url = `http://127.0.0.1:${staticServer.port}/index.html`;
 
     const client = await LLDBClient.create();
+    const trace = tracingLogger();
     // Serve each module's separate DWARF file from the fixture's own server.
     // Nothing else is served: LLDB has no access to the host source tree here.
     const debugFiles = new DebugFileRegistry();
@@ -492,6 +531,7 @@ export class Session {
         const handle = await startPlatformServer(args, {
           wrapConnectPort: (port) => session.#bridgeTcp(port),
           debugFiles,
+          logger: trace,
           onSession: (rdpSession) => {
             session.#rdpSession = rdpSession;
           },
@@ -503,7 +543,8 @@ export class Session {
         await attachWithRetry(client);
         return session;
       })(),
-      30_000
+      30_000,
+      trace
     );
   }
 
