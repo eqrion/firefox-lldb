@@ -13,6 +13,7 @@ import path from "node:path";
 import { readFileSync } from "node:fs";
 import { LLDBClient } from "lldb-wasm";
 import { parseCliArgs, startPlatformServer } from "../../src/core/platform-session.ts";
+import { DebugFileRegistry } from "../../src/core/debug-files.ts";
 import { freePort } from "../../src/platform/gdb-server-spawner.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -31,6 +32,14 @@ export const FIXTURES = {
     breakFunc: "compute_factorial",
     file: "math.cpp",
     requireAuth: true,
+  },
+  // The wasm carries no DWARF: an external_debug_info section points at
+  // math.debug.wasm served alongside it (emscripten -gseparate-dwarf).
+  separate_dwarf: {
+    pageDir: "test/fixtures/separate_dwarf",
+    fire: "runFactorial()",
+    breakFunc: "compute_factorial",
+    file: "math.cpp",
   },
   sum_range: {
     pageDir: "test/fixtures/simple",
@@ -437,6 +446,10 @@ export class Session {
     const url = `http://127.0.0.1:${staticServer.port}/index.html`;
 
     const client = await LLDBClient.create();
+    // Serve each module's separate DWARF file from the fixture's own server.
+    // Nothing else is served: LLDB has no access to the host source tree here.
+    const debugFiles = new DebugFileRegistry();
+    client.setFileProvider((path) => debugFiles.read(path));
     const session = new Session(client, null, staticServer);
 
     return withDeadline(
@@ -459,6 +472,7 @@ export class Session {
         ]);
         const handle = await startPlatformServer(args, {
           wrapConnectPort: (port) => session.#bridgeTcp(port),
+          debugFiles,
           onSession: (rdpSession) => {
             session.#rdpSession = rdpSession;
           },

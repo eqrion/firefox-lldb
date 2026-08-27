@@ -70,6 +70,7 @@ Requires Firefox installed in a standard location (see `findFirefoxBinary` in
 - `lldb_lifecycle_commands.test.mjs` — detach/re-attach, invalid PID rejection, and remote-platform command survival.
 - `source_listing.test.mjs` — wasm and JS frames carry valid file/line DWARF info.
 - `sourcemap_source_listing.test.mjs` — source-map DWARF resolves inside the per-session materialization directory.
+- `separate_dwarf.test.mjs` — `-gseparate-dwarf` module: the companion debug file is fetched from the page's server and gives source, args, and file:line breakpoints.
 - `js_debugging.test.mjs` — JS file:line breakpoint fires; step-over advances source line.
 - `mixed_js.test.mjs` — mixed JS/wasm: source file discovery (app.js, math.js, math.cpp).
 - `threaded.test.mjs` — multithreaded fixture: thread list, matmul_threaded frame, step.
