@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Uncaught exception during load</title>
+</head>
+<body>
+  <h1>Uncaught exception during load</h1>
+  <div class="result" id="fac-result"></div>
+
+  <!-- Throws while the page is still loading, before the wasm module is even
+       requested. With pauseOnExceptions set on the tab (as firefox-lldb sets it
+       before navigating), Firefox pauses the page's thread here — so the
+       debugger's attach-time primeStop finds a thread that is already paused. -->
+  <script>
+    throw new Error("uncaught during load");
+  </script>
+
+  <script src="math.js"></script>
+  <script>
+    let factorial;
+    MathModule().then(mod => {
+      factorial = mod.cwrap('compute_factorial', 'number', ['number']);
+    });
+
+    function runFactorial() {
+      document.getElementById('fac-result').textContent = `factorial(10) = ${factorial(10)}`;
+    }
+  </script>
+</body>
+</html>

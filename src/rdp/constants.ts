@@ -37,3 +37,8 @@ export const RESYNC_GRACE_MS = 250;
 // seconds in practice, so this is generous while still well inside the harness
 // and MCP client deadlines that would otherwise fire first.
 export const PRIME_STOP_TIMEOUT_MS = 8000;
+// navigate() awaits a replacement top-level generation after navigateTo has
+// already reported the load complete, so the swap is due immediately. The bound
+// exists for the case where a Fission process swap (DETACH_GRACE_MS above) eats
+// the replacement: failing lets the caller retry instead of hanging.
+export const NAVIGATE_TARGET_TIMEOUT_MS = 10000;

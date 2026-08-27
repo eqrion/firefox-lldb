@@ -62,7 +62,7 @@ import {
 import { EventEmitter } from "node:events";
 import type { WasmFunctionRange } from "../gdb/wasm-bytecode.js";
 import { LAUNCH_TOKEN_PREF } from "./firefox.js";
-import { EMPTY_WASM_MODULE, DETACH_GRACE_MS } from "./constants.js";
+import { EMPTY_WASM_MODULE, DETACH_GRACE_MS, NAVIGATE_TARGET_TIMEOUT_MS } from "./constants.js";
 import { noopLogger, type Logger } from "../logging.js";
 import {
   defaultModuleByteProvider,
@@ -709,6 +709,9 @@ export class RdpWasmSession extends EventEmitter {
           this.#unwitnessedPausedTids.add(tid);
         }
         this.emit(`paused:${tid}`, p as PauseEvent);
+        // Generic form for listeners that do not yet know which tids exist
+        // (navigate() waiting out a load-time pause).
+        this.emit("paused", tid, p as PauseEvent);
         break;
       }
       case EVENTS.resumed: {
@@ -733,8 +736,15 @@ export class RdpWasmSession extends EventEmitter {
     const startingGeneration = this.topLevelGeneration();
     const cleanupRef = { fn: null as (() => void) | null };
     const target = new Promise<void>((resolve, reject) => {
+      // navigateTo has already reported the load complete by the time this is
+      // awaited, so a replacement generation is due immediately. Bound the wait
+      // anyway: a Fission process swap can destroy and recreate the top-level
+      // target around this exact moment (see DETACH_GRACE_MS), and a swap missed
+      // in that window would otherwise hang the caller with no error to retry on.
+      let timer: ReturnType<typeof setTimeout> | undefined;
       const cleanup = () => {
         cleanupRef.fn = null;
+        clearTimeout(timer);
         this.off("target", onTarget);
         this.off("close", onClose);
       };
@@ -750,9 +760,27 @@ export class RdpWasmSession extends EventEmitter {
         cleanup();
         reject(new Error("session closed during navigate"));
       };
+      timer = setTimeout(() => {
+        cleanup();
+        reject(new Error(`no replacement top-level target within ${NAVIGATE_TARGET_TIMEOUT_MS}ms`));
+      }, NAVIGATE_TARGET_TIMEOUT_MS);
       this.on("target", onTarget);
       this.on("close", onClose);
     });
+    // A pause during the load leaves navigateTo unanswerable: with
+    // pauseOnExceptions armed, an uncaught exception in a loading script stops
+    // the thread, the load event never fires, and waitForLoad holds the reply.
+    // That request going unanswered would take the whole connection down at the
+    // client's request timeout (replies are FIFO, so it closes rather than risk
+    // a late reply landing on the next request). Resume past such a pause so the
+    // load can finish; the page is only mid-load, and the attach sequence makes
+    // its own stop afterwards (RdpDebuggee.primeStop).
+    const onPausedDuringLoad = (tid: number) => {
+      this.#logger.debug(`[rdp] resuming tid ${tid} paused during navigation to ${url}`);
+      const info = this.#threads.get(tid);
+      if (info) this.#client.send(info.threadActor, { type: REQUESTS.resume });
+    };
+    this.on("paused", onPausedDuringLoad);
     try {
       await this.#client.request(this.#tabActor, {
         type: REQUESTS.navigateTo,
@@ -763,6 +791,8 @@ export class RdpWasmSession extends EventEmitter {
     } catch (err) {
       cleanupRef.fn?.();
       throw err;
+    } finally {
+      this.off("paused", onPausedDuringLoad);
     }
   }
 

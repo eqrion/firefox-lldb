@@ -41,6 +41,17 @@ export const FIXTURES = {
     breakFunc: "compute_factorial",
     file: "math.cpp",
   },
+  // Page whose inline script throws while still loading. With pauseOnExceptions
+  // armed on the tab before navigation, Firefox pauses the page thread before
+  // the debugger's attach-time primeStop runs, which used to hang the attach:
+  // interrupting an already-paused thread draws an alreadyPaused error reply
+  // rather than the paused event primeStop was waiting for.
+  throw_on_load: {
+    pageDir: "test/fixtures/throw_on_load",
+    fire: "runFactorial()",
+    breakFunc: "compute_factorial",
+    file: "math.cpp",
+  },
   sum_range: {
     pageDir: "test/fixtures/simple",
     fire: "runSum()",
@@ -231,6 +242,14 @@ export async function retrySessionSetup(factory, maxAttempts = 3) {
       return await factory();
     } catch (err) {
       errors.push(err);
+      // Surface each consumed attempt: a retry that succeeds otherwise leaves
+      // no trace but a slow test, which is how a high setup-failure rate stays
+      // invisible for weeks.
+      process.stderr.write(
+        `[harness] session setup attempt ${attempt}/${maxAttempts} failed: ${
+          err instanceof Error ? err.message : String(err)
+        }\n`
+      );
       if (attempt < maxAttempts) await sleep(250);
     }
   }
