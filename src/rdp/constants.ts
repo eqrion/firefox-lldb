@@ -28,3 +28,12 @@ export const DETACH_GRACE_MS = 250;
 // target swap was a real close, this one decides whether to force a stop so
 // the gdbstub component's update_on_stop -> all_modules re-sync ever runs.
 export const RESYNC_GRACE_MS = 250;
+
+// primeStop() interrupts a live thread at attach and waits for the resulting
+// pause. Firefox answers an interrupt aimed at an already-paused thread with an
+// error reply rather than a paused event, and a thread can also resume or have
+// its target destroyed in the window before the request lands, so that wait
+// needs a bound: hanging here wedges the whole attach. Attach latency is a few
+// seconds in practice, so this is generous while still well inside the harness
+// and MCP client deadlines that would otherwise fire first.
+export const PRIME_STOP_TIMEOUT_MS = 8000;

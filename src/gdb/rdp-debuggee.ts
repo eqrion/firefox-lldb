@@ -45,7 +45,7 @@ import type {
 } from "../rdp/session.js";
 import { buildSyntheticModule } from "./synthetic-module.js";
 import { inspect as inspectWasm, convert as convertSourceMap } from "../sourcemap/converter.js";
-import { EMPTY_WASM_MODULE, RESYNC_GRACE_MS } from "../rdp/constants.js";
+import { EMPTY_WASM_MODULE, PRIME_STOP_TIMEOUT_MS, RESYNC_GRACE_MS } from "../rdp/constants.js";
 import type { DebugFileRegistry } from "../core/debug-files.js";
 import { containedSourcePath } from "../sourcemap/materialize.js";
 import { sanitizeSourceMapBytes, sourceMapDataUrlBytes } from "../sourcemap/input.js";
@@ -926,7 +926,7 @@ export class RdpDebuggee {
    * gdbstub component starts, since its startup `update_on_stop` reads the frame
    * snapshot once and never re-snapshots on attach.
    */
-  async primeStop(): Promise<void> {
+  async primeStop(timeoutMs = PRIME_STOP_TIMEOUT_MS): Promise<void> {
     // Interrupt a live thread (lowest tid = top-level), not the default
     // stoppedTid: after a navigate the top-level target re-arrives under a fresh
     // tid, so stoppedTid (1) no longer names a live thread. armAllStop then
@@ -934,11 +934,41 @@ export class RdpDebuggee {
     const tid = this.#session.listTids()[0];
     if (tid === undefined) return;
     this.#armStopped();
-    this.#session.armAllStop();
-    this.#session.interrupt(tid);
-    await this.#stop.promise;
+    if (this.#session.hasUnwitnessedPause()) {
+      // A thread paused before we armed a listener (pauseOnExceptions fires
+      // during page load). Interrupting it would draw an alreadyPaused error
+      // reply instead of a paused event, which armAllStop cannot see, so adopt
+      // the known paused state directly. Same guard as #doContinue/#doSingleStep.
+      await this.#session.adoptPausedState();
+    } else {
+      this.#session.armAllStop();
+      this.#session.interrupt(tid);
+    }
+    // An interrupt can still go unanswered (the thread resumes, or its target is
+    // destroyed, between the check above and the request). Attach must not hang
+    // on that: give up the primed stop and let the component report its
+    // synthetic one, which costs frame quality on the first stop (issue #21) but
+    // keeps the session alive.
+    if (!(await this.#awaitStop(timeoutMs))) {
+      this.#logger.warn(`[rdp] no stop within ${timeoutMs}ms of priming; attaching without one`);
+      return;
+    }
     await this.#snapshotAll();
     await this.#preloadJsSources();
+  }
+
+  /** Await the armed stop, resolving false if it does not arrive in time. The
+   * stop stays armed either way: a late pause is still reported normally. */
+  async #awaitStop(timeoutMs: number): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<false>((resolve) => {
+      timer = setTimeout(() => resolve(false), timeoutMs);
+    });
+    try {
+      return await Promise.race([this.#stop.promise.then(() => true), expired]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /** Request a genuine Firefox all-stop when the user presses Ctrl-C. */
