@@ -20,6 +20,7 @@ import {
   type TabInfo,
 } from "../rdp/session.js";
 import { RdpDebuggee } from "../gdb/rdp-debuggee.js";
+import type { DebugFileRegistry } from "./debug-files.js";
 import { launchFirefox, type FirefoxChannel, type FirefoxHandle } from "../rdp/firefox.js";
 // @ts-expect-error - .mjs host has no type declarations
 import { startGdbServer } from "../gdb/worker/host.mjs";
@@ -216,6 +217,9 @@ export interface StartOptions {
   /** Called once per newly-seen tab with a non-blank URL. Defaults to printing
    * a `process attach --plugin wasm --pid N` hint to stderr (for native lldb). */
   onTab?: (tab: TabInfo, pid: number) => void;
+  /** Where each module's separate DWARF file is registered, for the file
+   * provider to serve to LLDB (see DebugFileRegistry). */
+  debugFiles?: DebugFileRegistry;
   /** Called with each per-tab RDP session as it is created (the in-process
    * embedding uses this to drive `js` commands and console streaming).
    * The second argument interrupts the running target: sends RDP pauses to all
@@ -322,6 +326,7 @@ function createTabLauncher(
 
       const liveDebuggee = new RdpDebuggee(session, {
         ...(onFirstContinue ? { onFirstContinue } : {}),
+        ...(opts.debugFiles ? { debugFiles: opts.debugFiles } : {}),
         logger,
       });
       debuggee = liveDebuggee;

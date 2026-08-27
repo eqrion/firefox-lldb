@@ -46,10 +46,11 @@ import type {
 import { buildSyntheticModule } from "./synthetic-module.js";
 import { inspect as inspectWasm, convert as convertSourceMap } from "../sourcemap/converter.js";
 import { EMPTY_WASM_MODULE, RESYNC_GRACE_MS } from "../rdp/constants.js";
+import type { DebugFileRegistry } from "../core/debug-files.js";
 import { containedSourcePath } from "../sourcemap/materialize.js";
 import { sanitizeSourceMapBytes, sourceMapDataUrlBytes } from "../sourcemap/input.js";
 import { noopLogger, type Logger } from "../logging.js";
-import { stripWasmNameSection, wasmFunctionRange } from "./wasm-bytecode.js";
+import { stripWasmNameSection, wasmExternalDebugInfo, wasmFunctionRange } from "./wasm-bytecode.js";
 
 function urlBasename(url: string): string {
   try {
@@ -140,6 +141,9 @@ export class RdpDebuggee {
   // source map instead of DWARF, this holds the source-map-derived bytecode.
   #bytecodeByUrl = new Map<string, Uint8Array>();
 
+  // Where a module's separate DWARF file is registered for LLDB to open.
+  #debugFiles?: DebugFileRegistry;
+
   // Temp dir for materialized JS source text (for LLDB source list).
   #tmpDir: string = mkdtempSync(join(tmpdir(), "firefox-lldb-"));
 
@@ -193,10 +197,14 @@ export class RdpDebuggee {
     }
   };
 
-  constructor(session: RdpWasmSession, opts?: { onFirstContinue?: () => void; logger?: Logger }) {
+  constructor(
+    session: RdpWasmSession,
+    opts?: { onFirstContinue?: () => void; logger?: Logger; debugFiles?: DebugFileRegistry }
+  ) {
     this.#session = session;
     this.#logger = opts?.logger ?? noopLogger;
     this.#onFirstContinue = opts?.onFirstContinue ?? null;
+    this.#debugFiles = opts?.debugFiles;
 
     session.on("stopped", (e: StoppedEvent) => {
       this.#clearResyncTimer();
@@ -356,20 +364,22 @@ export class RdpDebuggee {
     return `${urlBasename(entry.url)}#${id}`;
   }
 
-  // Fetch a real wasm module's bytecode, converting source maps to DWARF on the
-  // fly so source-map-only modules are debuggable. Cached per URL.
+  // Fetch a real wasm module's bytecode, attaching debug info the module only
+  // points at (separate DWARF, source maps) so it is debuggable. Cached per URL.
   async #wasmBytecode(url: string): Promise<Uint8Array> {
     const cached = this.#bytecodeByUrl.get(url);
     if (cached) return cached;
     const bytes = await this.#session.fetchModuleBytes(url);
-    const out = await this.#maybeConvertSourceMap(url, bytes);
+    const out = await this.#withDebugInfo(url, bytes);
     this.#bytecodeByUrl.set(url, out);
     return out;
   }
 
-  // If `bytes` carries a source map (and no DWARF), synthesize DWARF from it via
-  // the source-map component. Falls back to the original bytes on any failure.
-  async #maybeConvertSourceMap(url: string, bytes: Uint8Array): Promise<Uint8Array> {
+  // Resolve the debug info for `bytes`: embedded DWARF is used as-is, separate
+  // DWARF is registered for LLDB to open through the file provider, and a source
+  // map is converted to DWARF via the source-map component. Falls back to the
+  // original bytes on any failure.
+  async #withDebugInfo(url: string, bytes: Uint8Array): Promise<Uint8Array> {
     let info;
     try {
       info = await inspectWasm(bytes);
@@ -383,6 +393,16 @@ export class RdpDebuggee {
     // section from LLDB because its imported-function index handling otherwise
     // creates bogus duplicate symbols at later functions.
     if (info.hasDwarf) return stripWasmNameSection(bytes);
+
+    const externalDebugInfo = wasmExternalDebugInfo(bytes);
+    if (externalDebugInfo) {
+      // The DWARF arrives later, when LLDB opens the companion file. Keep the
+      // name section: until then (or if the file cannot be fetched) it carries
+      // the only symbols this module has, and LLDB prefers DWARF once loaded.
+      this.#debugFiles?.register(externalDebugInfo, url);
+      return bytes;
+    }
+
     if (!info.sourceMapUrl) return bytes;
 
     const mapUrl = info.sourceMapUrl;

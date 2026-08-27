@@ -16,6 +16,7 @@ import net from "node:net";
 import { readFile } from "node:fs/promises";
 import { LLDBClient } from "lldb-wasm";
 import { parseCliArgs, startPlatformServer } from "../core/platform-session.js";
+import { DebugFileRegistry } from "../core/debug-files.js";
 import { focusFirefoxWindow } from "../rdp/firefox.js";
 import { createLogger } from "./logger.js";
 import { captureFatalErrors, defaultLogPath, openSessionLog } from "./session-log.js";
@@ -104,7 +105,12 @@ async function main(): Promise<void> {
   const logger = createLogger({ verbose, quiet: true, sessionLog });
 
   const client = await LLDBClient.create();
-  client.setFileProvider((path) => readFile(path).catch(() => null));
+  // A module's separate DWARF file is fetched from the page's server; anything
+  // else LLDB opens (source text, a local symbol file) comes off local disk.
+  const debugFiles = new DebugFileRegistry(logger);
+  client.setFileProvider(
+    async (path) => (await debugFiles.read(path)) ?? readFile(path).catch(() => null)
+  );
 
   let handle: Awaited<ReturnType<typeof startPlatformServer>> | undefined;
   let exiting = false;
@@ -156,6 +162,7 @@ async function main(): Promise<void> {
     handle = await startPlatformServer(args, {
       wrapConnectPort: (port) => bridgeTcp(client, port, logger),
       logger,
+      debugFiles,
       onTab: (tab, pid) => repl.print(`tab available: ${tab.url}\n  attach --pid ${pid}`),
       onSession: (s, interrupt) => {
         session = s;
