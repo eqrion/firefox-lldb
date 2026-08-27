@@ -72,9 +72,27 @@ export async function* report(
 
   for (const { name, err } of failures) {
     yield `\n${RED}FAIL:${RESET} ${name}\n`;
-    const stack = err.stack ?? err.message ?? String(err);
-    for (const line of stack.split("\n")) {
+    for (const line of errorDetail(err)) {
       yield `  ${line}\n`;
+    }
+  }
+}
+
+// Node wraps a failing hook or test in ERR_TEST_FAILURE and hangs the real
+// error off `cause`; the harness's own retry wrapper collects one error per
+// attempt in an AggregateError. Printing only the outer stack reports
+// "failed running before hook" and discards every actual reason, so walk the
+// chain. Depth-limited because a cause chain can be self-referential.
+function* errorDetail(err, depth = 0, seen = new Set()) {
+  if (!err || depth > 4 || seen.has(err)) return;
+  seen.add(err);
+  const text = err.stack ?? err.message ?? String(err);
+  for (const line of String(text).split("\n")) yield line;
+  const nested = [...(err.errors ?? []), ...(err.cause ? [err.cause] : [])];
+  for (const [i, inner] of nested.entries()) {
+    yield `${"  ".repeat(depth)}caused by [${i + 1}/${nested.length}]:`;
+    for (const line of errorDetail(inner, depth + 1, seen)) {
+      yield `${"  ".repeat(depth + 1)}${line}`;
     }
   }
 }

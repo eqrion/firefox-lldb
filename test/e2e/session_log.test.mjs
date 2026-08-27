@@ -10,8 +10,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync } from "node:fs";
+import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn as ptySpawn } from "node-pty";
 import { findFirefoxBinary } from "../../src/rdp/firefox.ts";
@@ -70,6 +70,7 @@ test("--log captures a full transcript while keeping the terminal clean", async 
   let out = "";
   child.onData((d) => (out += d));
   let logPath;
+  let keepLog = false;
 
   try {
     await waitFor(
@@ -105,10 +106,28 @@ test("--log captures a full transcript while keeping the terminal clean", async 
 
     // The debug trace that went to the file must never have reached the pty.
     assert.doesNotMatch(stripAnsi(out), /\[debug]\s*\[rdp]/);
+  } catch (err) {
+    // The log is a full RDP transcript of whatever went wrong, and this test is
+    // one of the few that drives a real attach with no retry. Keep it where CI's
+    // artifact step will collect it instead of deleting the only evidence.
+    keepLog = true;
+    throw err;
   } finally {
     if (!child.killed) child.kill();
     staticServer.server.closeAllConnections();
     await new Promise((resolve) => staticServer.server.close(resolve));
-    if (logPath && existsSync(logPath)) rmSync(logPath);
+    if (logPath && existsSync(logPath)) {
+      const keepDir = keepLog ? process.env.FIREFOX_LLDB_LOG_DIR : undefined;
+      if (keepDir) {
+        try {
+          mkdirSync(keepDir, { recursive: true });
+          renameSync(logPath, join(keepDir, basename(logPath)));
+        } catch {
+          rmSync(logPath);
+        }
+      } else {
+        rmSync(logPath);
+      }
+    }
   }
 });
