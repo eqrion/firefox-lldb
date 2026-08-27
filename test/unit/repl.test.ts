@@ -21,7 +21,11 @@ interface FakeClient {
   pause: () => Promise<void>;
 }
 
-type ExtraOpts = { onTargetInterrupt?: () => void; onTargetResume?: () => void };
+type ExtraOpts = {
+  onTargetInterrupt?: () => void;
+  onTargetResume?: () => void;
+  record?: (kind: "stdin" | "stdout", text: string) => void;
+};
 
 function harness(client: FakeClient, session?: Partial<RdpWasmSession>, extra?: ExtraOpts) {
   const input = new PassThrough();
@@ -91,6 +95,25 @@ test("a plain command is routed to sessionCommand and its output printed", async
   await h.start();
   const out = await h.type("breakpoint set -n foo");
   assert.match(out, /Breakpoint 1: where = math`foo/);
+});
+
+test("record is called with the typed line and the printed output", async () => {
+  const recorded: [string, string][] = [];
+  const h = harness(
+    okClient(() => ({ output: "Breakpoint 1: where = math`foo\n", error: "", status: 0 })),
+    undefined,
+    { record: (kind, text) => recorded.push([kind, text]) }
+  );
+  await h.start();
+  await h.type("breakpoint set -n foo");
+  assert.deepEqual(
+    recorded.find((r) => r[0] === "stdin"),
+    ["stdin", "breakpoint set -n foo"]
+  );
+  assert.ok(
+    recorded.some(([kind, text]) => kind === "stdout" && text.includes("Breakpoint 1")),
+    `expected a recorded stdout line with the command output, got ${JSON.stringify(recorded)}`
+  );
 });
 
 test("command error text is surfaced", async () => {

@@ -130,6 +130,18 @@ terminal as they happen, so you can correlate them with where you've stopped.
 | Evaluate expressions over variables (`p n + 1`, `expr a > b`)    | ✅     | Arithmetic, comparisons, casts, temp vars  |
 | Call functions from an expression (`expr foo(3)`)                | ❌     | Needs a JIT, which wasm targets don't have |
 
+## Reporting bugs
+
+If you hit a bug, reproduce it with `--log`:
+
+```sh
+firefox-lldb --url http://localhost:8080/index.html --log
+```
+
+This will capture internal logging information and save it to a file for
+debugging. The log can contain page content, console output, and raw protocol
+data, so review it before making it public.
+
 ## License
 
 Mozilla Public License, v. 2.0 (see [LICENSE](LICENSE)). Portions are vendored

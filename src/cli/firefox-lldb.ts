@@ -17,7 +17,8 @@ import { readFile } from "node:fs/promises";
 import { LLDBClient } from "lldb-wasm";
 import { parseCliArgs, startPlatformServer } from "../core/platform-session.js";
 import { focusFirefoxWindow } from "../rdp/firefox.js";
-import { quietLogger } from "./logger.js";
+import { createLogger } from "./logger.js";
+import { captureFatalErrors, defaultLogPath, openSessionLog } from "./session-log.js";
 import { runRepl } from "./repl.js";
 import type { RdpWasmSession } from "../rdp/session.js";
 import { debugEnvEnabled } from "../config.js";
@@ -93,7 +94,14 @@ async function bridgeTcp(client: LLDBClient, port: number, logger: Logger): Prom
 async function main(): Promise<void> {
   const args = parseCliArgs(process.argv.slice(2));
   const verbose = args.verbose || debugEnvEnabled();
-  const logger = quietLogger(verbose);
+
+  const sessionLog = args.log ? openSessionLog(defaultLogPath(), process.argv.slice(2)) : undefined;
+  if (sessionLog) {
+    sessionLog.captureStdio();
+    captureFatalErrors(sessionLog);
+    process.stderr.write(`logging this session to ${sessionLog.path}\n`);
+  }
+  const logger = createLogger({ verbose, quiet: true, sessionLog });
 
   const client = await LLDBClient.create();
   client.setFileProvider((path) => readFile(path).catch(() => null));
@@ -112,6 +120,7 @@ async function main(): Promise<void> {
         code = code || 1;
       }
     }
+    sessionLog?.close();
     process.exit(code);
   };
   process.on("SIGTERM", () => void cleanup(0));
@@ -137,6 +146,7 @@ async function main(): Promise<void> {
       if (handle?.firefoxPid !== undefined) focusFirefoxWindow(handle.firefoxPid);
     },
     onTargetInterrupt: () => triggerInterrupt?.(),
+    record: sessionLog?.record,
   });
 
   // Each per-tab GDB server launched by qLaunchGDBServer gets bridged; the

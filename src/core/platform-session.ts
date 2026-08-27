@@ -56,6 +56,9 @@ Options:
   --headless          Run Firefox headlessly.
   --fire <js>         Evaluate JS after the first breakpoint arms (test use).
   -v, --verbose       Log debug output (may include page/protocol data).
+  --log               Write a full session transcript (stdin, output, and debug
+                      logging) to a file for bug reports; may include page and
+                      protocol data.
   -h, --help          Show this message.
 
 LLDB attach sequence:
@@ -77,6 +80,7 @@ export interface Args {
   defaultProfile: boolean;
   fire?: string;
   verbose: boolean;
+  log: boolean;
 }
 
 export function parseCliArgs(argv: string[]): Args {
@@ -99,6 +103,7 @@ export function parseCliArgs(argv: string[]): Args {
         "default-profile": { type: "boolean" },
         fire: { type: "string" },
         verbose: { type: "boolean", short: "v" },
+        log: { type: "boolean" },
         help: { type: "boolean", short: "h" },
       },
     }));
@@ -158,6 +163,7 @@ export function parseCliArgs(argv: string[]): Args {
     defaultProfile: !!values["default-profile"],
     fire: values.fire,
     verbose: !!values.verbose,
+    log: !!values.log,
   };
 }
 
@@ -236,7 +242,7 @@ function createTabLauncher(
   opts: StartOptions,
   logger: Logger,
   launching: boolean,
-  verbose: boolean,
+  debugEnabled: boolean,
   getCurrentTabs: () => TabInfo[],
   isValidAttachPid: (pid: number) => boolean
 ): GdbServerLauncher {
@@ -342,14 +348,14 @@ function createTabLauncher(
         onInfo: (m: string) => logger.debug(`[component] ${m}`),
         onTrace: (m: string) => logger.debug(`[gdbstub] ${boundedTrace(m)}`),
         onError: (m: string) => logger.error(m),
-        verbose,
+        verbose: debugEnabled,
       });
       await gdbServer.ready;
       const shim = await startAttachShim({
         listenPort: port,
         componentPort: gdbServer.port,
         isValidPid: isValidAttachPid,
-        trace: verbose ? (m) => logger.debug(`[shim] ${m}`) : undefined,
+        trace: debugEnabled ? (m) => logger.debug(`[shim] ${m}`) : undefined,
       });
       return {
         port: shim.port,
@@ -398,8 +404,11 @@ export async function startPlatformServer(
   args: Args,
   opts: StartOptions = {}
 ): Promise<PlatformServerHandle> {
-  const verbose = args.verbose || debugEnvEnabled();
-  const logger = opts.logger ?? consoleLogger(verbose);
+  const consoleVerbose = args.verbose || debugEnvEnabled();
+  // Debug trace must still be generated when it's only going to a --log file,
+  // even though the console itself stays quiet.
+  const debugEnabled = consoleVerbose || args.log;
+  const logger = opts.logger ?? consoleLogger(consoleVerbose);
   const launching = !args.connect;
 
   let firefox: FirefoxHandle | undefined;
@@ -449,7 +458,7 @@ export async function startPlatformServer(
     opts,
     logger,
     launching,
-    verbose,
+    debugEnabled,
     () => currentTabs,
     // LLDB may reach vAttach before the asynchronous tab watcher has assigned
     // the first tab's synthetic PID. PID 1 is reserved for that first tab;

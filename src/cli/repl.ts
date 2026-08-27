@@ -25,6 +25,8 @@ export interface ReplDeps {
   onTargetResume?: () => void;
   /** Called when the user Ctrl-C's a running target. Should interrupt Firefox directly. */
   onTargetInterrupt?: () => void;
+  /** Session-log hook: every line the user types and every line printed back. */
+  record?: (kind: "stdin" | "stdout", text: string) => void;
 }
 
 export interface Repl {
@@ -67,6 +69,7 @@ export function runRepl(deps: ReplDeps): Repl {
 
   const write = (text: string): void => {
     output.write(text.endsWith("\n") ? text : text + "\n");
+    deps.record?.("stdout", text);
   };
 
   // Print an async notice. While a command is running, the prompt isn't shown,
@@ -97,6 +100,7 @@ export function runRepl(deps: ReplDeps): Repl {
 
   rl.on("line", (line) => {
     if (closed) return;
+    deps.record?.("stdin", line);
     queue.push(line);
     if (ready) void drain();
   });
