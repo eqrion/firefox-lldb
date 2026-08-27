@@ -128,12 +128,49 @@ or malformed frame closes the entire RDP connection and rejects all pending
 work, because accepting a late reply after abandoning its request would shift
 the FIFO and corrupt every later reply on that actor.
 
-### Source maps → DWARF (`src/sourcemap/`)
+### Attaching debug info a module only points at
+
+`RdpDebuggee.#wasmBytecode` fetches a real module's bytes and runs them through
+`#withDebugInfo`, which resolves whatever debug info the module implies. Embedded
+DWARF is served as-is (minus the `name` section, see `wasm-bytecode.ts`); the two
+indirect forms are handled below. Any failure falls back to the original bytes:
+this never breaks a module that would otherwise load.
+
+#### Separate DWARF (`-gseparate-dwarf`)
+
+A module can keep its DWARF in a companion wasm file, naming it in an
+`external_debug_info` custom section
+([spec](https://yurydelendik.github.io/webassembly-dwarf/#external-DWARF)).
+LLDB already supports this — `SymbolVendorWasm` loads the file and grafts its
+DWARF sections onto the module — but it looks the name up on its own filesystem,
+which for the embedded wasm LLDB is an in-memory FS whose misses are answered by
+a host file provider (`LLDBClient.setFileProvider`). So nothing here parses debug
+info; the work is routing that lookup to the page's server:
+
+1. `#withDebugInfo` reads the recorded path and hands it to a
+   `DebugFileRegistry` (`src/core/debug-files.ts`) along with the module URL.
+   The registry resolves one against the other, so a relative path and an
+   absolute `-sSEPARATE_DWARF_URL` both work.
+2. The module's bytes are served to LLDB unchanged, `name` section included:
+   until the debug file loads (or if it can't be fetched) those are the only
+   symbols the module has, and LLDB prefers DWARF once it has both.
+3. LLDB opens the file while vendoring symbols. The registry keys on basename,
+   because `SymbolLocatorDefault` builds each candidate as
+   `<search dir>/<basename>` — any directory in the recorded path is gone by the
+   time the request arrives, and it probes several directories plus `.dwp`
+   variants for one file.
+4. The file provider fetches the URL and returns the bytes. LLDB's own symbol
+   vendor does the rest.
+
+Both CLI entry points reach the registry, but only the embedded wasm LLDB has a
+file provider; an external native lldb driven by `firefox-lldb-server` resolves
+the recorded path against the real filesystem itself.
+
+#### Source maps → DWARF (`src/sourcemap/`)
 
 Wasm modules built with a source map but no embedded DWARF (e.g. some toolchains
 that emit only `sourceMappingURL`) are made debuggable by synthesizing DWARF from
-the source map at debug time. `RdpDebuggee.#wasmBytecode` fetches a real module's
-bytes and runs them through `#maybeConvertSourceMap`:
+the source map at debug time:
 
 1. `inspect(bytes)` reports whether the module already `hasDwarf` and its
    `sourceMapUrl`. If it has DWARF, or has no source map, the original bytes are
@@ -148,16 +185,14 @@ bytes and runs them through `#maybeConvertSourceMap`:
    Source names are rewritten to safe relative paths before DWARF conversion,
    and the materializer independently verifies containment before filesystem
    access, since source maps are remote page input.
-4. Any failure falls back to the original bytes — source-map support never breaks
-   a module that would otherwise load.
 
 The converter is a pure-compute wasm component (no host imports beyond WASI),
 vendored as the Rust `source-map-dwarf` crate and its `source-map-dwarf-component`
-wrapper, transpiled by jco into `src/sourcemap/generated/`. `src/sourcemap/
-converter.ts` instantiates it once on the main thread and exposes `inspect` /
-`convert`. This is distinct from the **synthetic modules** above: synthetic
-modules represent _JS_ sources LLDB can't otherwise see, while the converter
-rewrites a _real wasm_ module to add the DWARF its source map implies.
+wrapper, transpiled by jco into `src/sourcemap/generated/`. `src/sourcemap/converter.ts`
+instantiates it once on the main thread and exposes `inspect` / `convert`. This is
+distinct from the **synthetic modules** above: synthetic modules represent _JS_
+sources LLDB can't otherwise see, while the converter rewrites a _real wasm_
+module to add the DWARF its source map implies.
 
 ## Enabling wasm debugging in Firefox (the `observeWasm` timing problem)
 

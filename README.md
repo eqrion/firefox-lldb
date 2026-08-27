@@ -73,6 +73,10 @@ Your module needs debug info for source-level debugging to work:
 
 - **Emscripten / C / C++:** compile with `-g` (e.g. `emcc app.cpp -g -O0 -o app.js`).
 - **Rust / wasm-pack:** debug builds embed DWARF by default.
+- **Separate DWARF:** builds made with `-gseparate-dwarf` (or
+  `-sSEPARATE_DWARF_URL=...`) keep their DWARF in a companion wasm file. Serve
+  that file at the URL recorded in the module and `firefox-lldb` fetches it when
+  LLDB asks for it; if it can't, it says so at the prompt.
 - **Source maps only:** if your toolchain emits a source map (a
   `sourceMappingURL`) but no embedded DWARF, `firefox-lldb` synthesizes the
   debug info from the source map automatically at attach time. Breakpoints and
