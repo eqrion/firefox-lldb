@@ -41,7 +41,10 @@ export async function* report(
       }
       case "test:stdout":
       case "test:stderr": {
-        if (verbose) writeDiagnostic(data.message);
+        // Harness notices (a consumed setup retry) report on the run itself, so
+        // they print unconditionally; everything else is page/protocol chatter
+        // that only belongs in a verbose run.
+        if (verbose || /^\[harness\]/m.test(data.message)) writeDiagnostic(data.message);
         break;
       }
       case "test:pass": {

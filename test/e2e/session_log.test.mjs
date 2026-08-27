@@ -73,13 +73,21 @@ test("--log captures a full transcript while keeping the terminal clean", async 
   let keepLog = false;
 
   try {
+    // Learn the log path before waiting on the prompt. An attach that never
+    // reaches `(lldb)` is exactly when the transcript is worth keeping, and it
+    // cannot be kept if this runs after the wait that timed out.
     await waitFor(
       () => out,
-      (s) => s.includes("(lldb)")
+      (s) => /logging this session to \S+\.log/.test(stripAnsi(s))
     );
     const startupMatch = stripAnsi(out).match(/logging this session to (\S+\.log)/);
     assert.ok(startupMatch, `startup path line not printed; output: ${stripAnsi(out)}`);
     logPath = join(REPO, startupMatch[1]);
+
+    await waitFor(
+      () => out,
+      (s) => s.includes("(lldb)")
+    );
 
     child.write("breakpoint set -n " + fx.breakFunc + "\r");
     await waitFor(
