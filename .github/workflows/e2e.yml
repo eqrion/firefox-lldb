@@ -8,7 +8,10 @@ on:
 jobs:
   e2e:
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    # Temporarily raised while the attach hang is being diagnosed: ~28 blown 30s
+    # attach deadlines per run put the suite over 25 minutes, and a cancelled job
+    # never prints the failure summary that carries the RDP trace.
+    timeout-minutes: 40
     env:
       FIREFOX_VERSION: 154.0.1~build1
     steps:

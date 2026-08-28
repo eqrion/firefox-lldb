@@ -238,7 +238,10 @@ export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export function tracingLogger(keep = 40) {
   const lines = [];
   const record = (line) => {
-    lines.push(line);
+    // Trace lines carry whole RDP payloads: a `source`/`substring` reply is the
+    // full text of a script. What matters here is which exchange came last, so
+    // keep the head of each line — 28 untruncated blowouts would bury the log.
+    lines.push(line.length > 240 ? `${line.slice(0, 240)}… (${line.length} chars)` : line);
     if (lines.length > keep) lines.shift();
   };
   const echo = process.env.E2E_VERBOSE ? (level, m) => console.error(`[${level}] ${m}`) : () => {};
@@ -276,12 +279,17 @@ export async function retrySessionSetup(factory, maxAttempts = 3, { quiet = fals
       // no trace but a slow test, which is how a high setup-failure rate stays
       // invisible for weeks. Quiet for this helper's own test, whose synthetic
       // failures would otherwise read as real ones in a CI log.
-      if (!quiet)
+      if (!quiet) {
+        // Prefix every line, not just the first: node delivers a multi-line
+        // write as one stderr event per line, and the e2e reporter only lets
+        // harness-tagged lines through when it is not in verbose mode.
+        const detail = (err instanceof Error ? err.message : String(err))
+          .split("\n")
+          .join("\n[harness]   ");
         process.stderr.write(
-          `[harness] session setup attempt ${attempt}/${maxAttempts} failed: ${
-            err instanceof Error ? err.message : String(err)
-          }\n`
+          `[harness] session setup attempt ${attempt}/${maxAttempts} failed: ${detail}\n`
         );
+      }
       if (attempt < maxAttempts) await sleep(250);
     }
   }
