@@ -37,3 +37,8 @@ export function marionettePort(): number {
 export function firefoxLogDir(): string | undefined {
   return process.env.FIREFOX_LLDB_LOG_DIR;
 }
+
+/** Bypass the tested Firefox version window (used by forward-compatibility CI). */
+export function allowUnsupportedFirefox(): boolean {
+  return process.env.FIREFOX_LLDB_ALLOW_UNSUPPORTED === "1";
+}

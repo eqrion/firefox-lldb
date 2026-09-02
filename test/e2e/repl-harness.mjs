@@ -93,6 +93,7 @@ export class ReplSession {
         const rdpPort = await freePort();
         const args = parseCliArgs([
           "--launch",
+          ...(process.env.FIREFOX_BINARY ? ["--firefox", process.env.FIREFOX_BINARY] : []),
           ...(headless ? ["--headless"] : []),
           "--port",
           "0",

@@ -4,16 +4,39 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+  schedule:
+    # Exercise moving channel aliases weekly, away from the top-of-hour load spike.
+    - cron: "37 8 * * 2"
 
 jobs:
   e2e:
+    name: Firefox ${{ matrix.firefox.channel }} (${{ matrix.firefox.suite }})
     runs-on: ubuntu-24.04
     # Temporarily raised while the attach hang is being diagnosed: ~28 blown 30s
     # attach deadlines per run put the suite over 25 minutes, and a cancelled job
     # never prints the failure summary that carries the RDP trace.
     timeout-minutes: 40
-    env:
-      FIREFOX_VERSION: 154.0.1~build1
+    strategy:
+      fail-fast: false
+      matrix:
+        firefox:
+          - channel: esr
+            version: latest-esr
+            suite: compatibility
+            command: npm run test:e2e:compat
+          - channel: release
+            version: latest
+            suite: full
+            command: npm run test:e2e
+          - channel: beta
+            version: latest-beta
+            suite: compatibility
+            command: npm run test:e2e:compat
+          - channel: nightly
+            version: latest-nightly
+            suite: compatibility
+            command: npm run test:e2e:compat
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -23,31 +46,88 @@ jobs:
 
       - run: npm ci
 
-      - name: Install Firefox
-        run: |
-          sudo install -d -m 0755 /etc/apt/keyrings
-          wget -qO- https://packages.mozilla.org/apt/repo-signing-key.gpg \
-            | sudo tee /etc/apt/keyrings/packages.mozilla.org.asc > /dev/null
-          echo "deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main" \
-            | sudo tee /etc/apt/sources.list.d/mozilla.list > /dev/null
-          printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' \
-            | sudo tee /etc/apt/preferences.d/mozilla > /dev/null
-          sudo apt-get update
-          sudo apt-get install -y --allow-downgrades "firefox=$FIREFOX_VERSION"
+      - name: Install Firefox ${{ matrix.firefox.channel }}
+        id: firefox
+        uses: browser-actions/setup-firefox@v1
+        with:
+          firefox-version: ${{ matrix.firefox.version }}
+
+      - name: Show Firefox version
+        env:
+          FIREFOX_BINARY: ${{ steps.firefox.outputs.firefox-path }}
+        run: '"$FIREFOX_BINARY" --version'
 
       - name: Run Node e2e tests
+        id: tests
+        continue-on-error: true
         env:
           E2E_CONCURRENCY: 1
+          E2E_FIREFOX_CHANNEL: ${{ matrix.firefox.channel }}
+          FIREFOX_BINARY: ${{ steps.firefox.outputs.firefox-path }}
+          FIREFOX_LLDB_ALLOW_UNSUPPORTED: 1
           FIREFOX_LLDB_LOG_DIR: /tmp/firefox-logs
         run: |
           mkdir -p "$FIREFOX_LLDB_LOG_DIR"
-          npm run test:e2e
+          ${{ matrix.firefox.command }}
 
-      - name: Dump captured Firefox process output (diagnostic, on failure)
-        if: failure() || cancelled()
+      - name: Dump captured Firefox process output
+        if: steps.tests.outcome == 'failure' || cancelled()
         run: |
           shopt -s nullglob
           for f in /tmp/firefox-logs/*; do
             echo "=== $f ==="
             cat "$f"
           done
+
+      - name: Fail the job when the suite failed
+        if: steps.tests.outcome == 'failure'
+        run: exit 1
+
+  report-scheduled-failure:
+    name: Report scheduled compatibility result
+    if: always() && github.event_name == 'schedule'
+    needs: e2e
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      MATRIX_RESULT: ${{ needs.e2e.result }}
+      ISSUE_TITLE: "Automated Firefox compatibility check is failing"
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: File, update, or close the compatibility issue
+        run: |
+          summary="$(gh api "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/jobs" --paginate \
+            --jq '.jobs[] | select(.name | startswith("Firefox ")) | "- \(.name): **\(.conclusion)**"')"
+          issue_number="$(gh issue list --state open --json number,title \
+            --jq '.[] | select(.title == env.ISSUE_TITLE) | .number' | head -n 1)"
+
+          if [[ "$MATRIX_RESULT" != "success" ]]; then
+            body_file="$RUNNER_TEMP/firefox-compatibility-issue.md"
+            {
+              echo "The weekly release-channel compatibility matrix failed."
+              echo
+              echo "$summary"
+              echo
+              echo "Run: $RUN_URL"
+              echo
+              echo "This can indicate an RDP compatibility regression or an e2e reliability failure."
+            } > "$body_file"
+
+            if [[ -n "$issue_number" ]]; then
+              gh issue comment "$issue_number" --body-file "$body_file"
+            else
+              gh issue create --title "$ISSUE_TITLE" --body-file "$body_file"
+            fi
+            exit 1
+          fi
+
+          if [[ -n "$issue_number" ]]; then
+            gh issue comment "$issue_number" \
+              --body "The Firefox compatibility matrix is green again: $RUN_URL"
+            gh issue close "$issue_number" --reason completed
+          fi

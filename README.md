@@ -25,7 +25,7 @@ WebAssembly and runs it in-process. You just need Node and Firefox.
 ## Requirements
 
 - Node.js 20 or newer
-- Firefox 120 or newer
+- Firefox 140–157 (the tested window spans ESR through Nightly)
 - A WebAssembly module built with debug info (see [below](#preparing-your-wasm))
 
 ## Install

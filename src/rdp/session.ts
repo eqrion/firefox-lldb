@@ -70,6 +70,7 @@ import {
   MAX_MODULE_BYTES,
   type ModuleByteProvider,
 } from "./module-bytes.js";
+import { requireCompatibleFirefox, type FirefoxRuntime } from "./firefox-compatibility.js";
 
 export {
   grip,
@@ -104,7 +105,7 @@ export async function verifyFirefoxLaunchToken(
   host: string,
   expectedToken: string,
   attempts = 80
-): Promise<void> {
+): Promise<FirefoxRuntime> {
   let lastConnectErr: unknown;
   for (let i = 0; i < attempts; i++) {
     let client: RdpClient;
@@ -131,7 +132,7 @@ export async function verifyFirefoxLaunchToken(
             `launched — a different (possibly stale) Firefox is listening there.`
         );
       }
-      return;
+      return await requireCompatibleFirefox(client);
     } finally {
       client.close();
     }
@@ -234,6 +235,7 @@ export async function watchAndPrimeFirefoxTabs(
   });
 
   try {
+    await requireCompatibleFirefox(client, logger);
     await query();
     const startupRetry = setTimeout(
       () =>
@@ -508,6 +510,7 @@ export class RdpWasmSession extends EventEmitter {
   }
 
   async #init(tabActor?: string): Promise<void> {
+    await requireCompatibleFirefox(this.#client, this.#logger);
     const { tabs } = (await this.#client.request(ROOT_ACTOR, {
       type: REQUESTS.listTabs,
     })) as ListTabsResponse & { tabs?: (RdpTabForm & { selected?: boolean })[] };

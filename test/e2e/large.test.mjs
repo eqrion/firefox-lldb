@@ -19,7 +19,8 @@ import { findFirefoxBinary } from "../../src/rdp/firefox.ts";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WASM = path.join(HERE, "..", "fixtures", "large", "large.wasm");
 const BUILT = existsSync(WASM);
-const NIGHTLY = Boolean(findFirefoxBinary("nightly"));
+const NIGHTLY =
+  process.env.E2E_FIREFOX_CHANNEL === "nightly" || Boolean(findFirefoxBinary("nightly"));
 
 let s;
 before(async () => {

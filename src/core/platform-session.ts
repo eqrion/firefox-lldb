@@ -26,6 +26,7 @@ import { launchFirefox, type FirefoxChannel, type FirefoxHandle } from "../rdp/f
 import { startGdbServer } from "../gdb/worker/host.mjs";
 import { consoleLogger } from "../cli/logger.js";
 import { debugEnvEnabled } from "../config.js";
+import { FirefoxCompatibilityError } from "../rdp/firefox-compatibility.js";
 
 const MAX_TRACE_CHARS = 4096;
 
@@ -180,6 +181,7 @@ async function connectWithRetry(
     try {
       return await RdpWasmSession.start(rdpPort, "127.0.0.1", tabActor, logger);
     } catch (err) {
+      if (err instanceof FirefoxCompatibilityError) throw err;
       lastErr = err;
       await sleep(250);
     }
@@ -437,7 +439,14 @@ export async function startPlatformServer(
       // spawned before trusting anything it reports (issue: a leftover
       // Firefox from a previous run can otherwise silently intercept the
       // whole session).
-      await verifyFirefoxLaunchToken(args.rdpPort, "127.0.0.1", firefox.launchToken);
+      const runtime = await verifyFirefoxLaunchToken(
+        args.rdpPort,
+        "127.0.0.1",
+        firefox.launchToken
+      );
+      logger.info(
+        `launched Firefox ${runtime.version}${runtime.channel ? ` (${runtime.channel})` : ""}`
+      );
     } catch (err) {
       await firefox
         .close()
@@ -450,7 +459,6 @@ export async function startPlatformServer(
         );
       throw err;
     }
-    logger.info("launched Firefox");
   }
 
   // currentTabs is updated by the watcher below and read by the platform server

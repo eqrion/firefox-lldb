@@ -226,6 +226,16 @@ Required prefs (in the profile): `devtools.debugger.remote-enabled=true`,
 `devtools.chrome.enabled=true`, `devtools.debugger.prompt-connection=false`.
 RDP transport is length-prefixed JSON (`<byte-length>:<json>`).
 
+Before using the debugging actors, the bridge resolves
+`root.getRoot → deviceActor.getDescription` and checks the reported Firefox
+major against the range in `src/rdp/firefox-compatibility.ts`. This works for
+both a browser the tool launched and `--connect`. CI sets
+`FIREFOX_LLDB_ALLOW_UNSUPPORTED=1` so a newly-published channel is exercised
+before that validated range is advanced. The focused version e2e still fails
+when the detected build is outside the declared range, so the scheduled issue
+prompts a maintainer to review the other compatibility results and advance the
+bound when appropriate.
+
 ## Protocol mapping
 
 ### Address encoding (`wasm_addr_t`)
@@ -270,6 +280,13 @@ part of that surface serving it.
   multiple breakpoints + continue, struct/pointer/heap inspection, dynamic
   dispatch, every step mode, locals/args/globals, JS-frame debugging, source maps,
   wasm traps, and multithreading.
+- **Firefox compatibility matrix** (`.github/workflows/e2e.yml`) — runs the
+  full e2e suite against release and a focused RDP-surface suite against the
+  moving ESR, beta, and Nightly channels. This avoids multiplying the known
+  attach-setup flake across four full runs while still exercising actor
+  discovery, attach, stepping, workers, navigation, traps, JS evaluation, and
+  source maps. A weekly scheduled run files or updates one deduplicated GitHub
+  issue when a channel fails, and closes it after the matrix recovers.
 
 **Every significant change must land with an e2e test that exercises it.** A
 feature or fix the suite doesn't cover is treated as unverified.

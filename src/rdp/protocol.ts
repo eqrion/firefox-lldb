@@ -33,6 +33,8 @@ export const REQUESTS = {
   // root actor
   getRoot: "getRoot",
   listTabs: "listTabs",
+  // deviceActor
+  getDescription: "getDescription",
   // preferenceActor
   getCharPref: "getCharPref",
   // tab/target actor
@@ -70,6 +72,18 @@ export const REQUESTS = {
 
 export interface GetRootResponse {
   preferenceActor?: string;
+  deviceActor?: string;
+}
+
+export interface DeviceDescription {
+  apptype?: string;
+  version?: string;
+  channel?: string;
+  appbuildid?: string;
+}
+
+export interface GetDescriptionResponse {
+  value?: DeviceDescription;
 }
 
 /** `value` is the pref name being read (the response reuses the same field for the value). */

@@ -522,9 +522,16 @@ export class Session {
       session,
       (async () => {
         const rdpPort = await freePort();
+        const firefoxBinary = process.env.FIREFOX_BINARY;
         const args = parseCliArgs([
           "--launch",
-          ...(channel === "nightly" ? ["--nightly"] : channel === "beta" ? ["--beta"] : []),
+          ...(firefoxBinary
+            ? ["--firefox", firefoxBinary]
+            : channel === "nightly"
+              ? ["--nightly"]
+              : channel === "beta"
+                ? ["--beta"]
+                : []),
           ...(headless ? ["--headless"] : []),
           ...(process.env.E2E_VERBOSE ? ["--verbose"] : []),
           "--port",

@@ -114,3 +114,11 @@ one process is a known follow-up.
 
 Tests that mutate state (step/continue) are the only test in their file. Tests
 that only read state from one stopped session can share a `before()` attach.
+
+CI runs the full suite against Firefox release and `npm run test:e2e:compat`
+against ESR, beta, and Nightly. The focused compatibility suite covers the RDP
+handshake, attach, frames/locals, stepping, workers, navigation, traps, JS
+evaluation, and source maps without multiplying the known full-suite attach
+flake. The workflow passes the setup action's exact binary through
+`FIREFOX_BINARY`; the harness uses `--firefox` so channel tests cannot
+accidentally fall back to a different system installation.

@@ -34,6 +34,7 @@ watch time.
 | ----------------------------------------- | -------------------------------------------------------------------------------------- |
 | `root`                                    | the well-known actor of the initial connection                                         |
 | preference actor                          | `root`'s `getRoot` reply                                                               |
+| device actor                              | `root`'s `getRoot` reply                                                               |
 | tab / target actor                        | `root`'s `listTabs` reply (one per open tab)                                           |
 | watcher actor                             | a tab actor's `getWatcher` reply                                                       |
 | thread-config actor                       | the watcher's `getThreadConfigurationActor` reply                                      |
@@ -50,8 +51,9 @@ are sent per thread actor — the watcher does not broadcast them.
 
 | `type`                             | Sent to             | Purpose                                                                                                                                                                                |
 | ---------------------------------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `getRoot`                          | root                | fetch the preference actor                                                                                                                                                             |
+| `getRoot`                          | root                | fetch the preference and device actors                                                                                                                                                 |
 | `listTabs`                         | root                | enumerate open tabs                                                                                                                                                                    |
+| `getDescription`                   | device actor        | read Firefox version, build, and update-channel metadata for the compatibility gate                                                                                                    |
 | `getCharPref`                      | preference actor    | read a profile pref (used to verify the launch token)                                                                                                                                  |
 | `getWatcher`                       | tab/target actor    | get the watcher actor, with `isServerTargetSwitchingEnabled: true`                                                                                                                     |
 | `navigateTo`                       | tab/target actor    | navigate the tab, `{ url, waitForLoad }`                                                                                                                                               |
@@ -104,7 +106,7 @@ Unsolicited notifications, never treated as request replies (`EVENTS` in
 ## Response / event payload shapes
 
 Named interfaces in `protocol.ts`, used directly by `session.ts` (no ad-hoc
-casts): `GetRootResponse`, `GetCharPrefResponse`, `RdpTabForm`/`ListTabsResponse`,
+casts): `GetRootResponse`, `GetDescriptionResponse`, `GetCharPrefResponse`, `RdpTabForm`/`ListTabsResponse`,
 `GetWatcherResponse`, `GetThreadConfigurationActorResponse`, `SourceForm`/`SourcesResponse`/`ResourcesAvailableArrayEvent`,
 `SourceResponse`/`LongStringGrip`/`ArrayBufferGrip`, `SubstringResponse`,
 `ArrayBufferSliceResponse`, `BreakpointLocation`,

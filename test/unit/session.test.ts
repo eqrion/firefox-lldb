@@ -13,6 +13,7 @@ import { RdpWasmSession, type StoppedEvent, type PauseEvent } from "../../src/rd
 import { encodeRdpFrame, sliceRdpFrame } from "../../src/rdp/transport.js";
 import { EMPTY_WASM_MODULE } from "../../src/rdp/constants.js";
 import { noopLogger, type Logger } from "../../src/logging.js";
+import { MAX_SUPPORTED_FIREFOX_MAJOR } from "../../src/rdp/firefox-compatibility.js";
 
 // ---------------------------------------------------------------------------
 // Fake RDP server
@@ -49,6 +50,7 @@ class FakeRdpServer {
   readonly received: ReqPacket[] = [];
   private pendingConnect: (() => void) | null = null;
   port = 0;
+  firefoxVersion = "154.0";
 
   constructor() {
     this.srv = net.createServer((s) => {
@@ -79,6 +81,17 @@ class FakeRdpServer {
    * session init sequence, then return the live session. */
   async acceptSession(logger?: Logger): Promise<RdpWasmSession> {
     // Register init-sequence handlers before starting (they match in order).
+    this.#on(
+      (r) => r.to === "root" && r.type === "getRoot",
+      () => ({ from: "root", deviceActor: "device1" })
+    );
+    this.#on(
+      (r) => r.to === "device1" && r.type === "getDescription",
+      () => ({
+        from: "device1",
+        value: { apptype: "firefox", version: this.firefoxVersion, channel: "release" },
+      })
+    );
     this.#on(
       (r) => r.to === "root" && r.type === "listTabs",
       () => ({ from: "root", tabs: [{ actor: "tab1", selected: true }] })
@@ -224,7 +237,16 @@ test("RdpWasmSession.start closes its socket when initialization fails", async (
       const decoded = decodeAll(buf);
       buf = decoded.rest as Buffer<ArrayBuffer>;
       for (const packet of decoded.packets) {
-        if (packet.to === "root" && packet.type === "listTabs") {
+        if (packet.to === "root" && packet.type === "getRoot") {
+          socket.write(encodeRdpFrame({ from: "root", deviceActor: "device1" }));
+        } else if (packet.to === "device1" && packet.type === "getDescription") {
+          socket.write(
+            encodeRdpFrame({
+              from: "device1",
+              value: { apptype: "firefox", version: "154.0", channel: "release" },
+            })
+          );
+        } else if (packet.to === "root" && packet.type === "listTabs") {
           socket.write(encodeRdpFrame({ from: "root", tabs: [] }));
         }
       }
@@ -236,6 +258,20 @@ test("RdpWasmSession.start closes its socket when initialization fails", async (
   await assert.rejects(RdpWasmSession.start(port), /no Firefox tab found/);
   await closed;
   await new Promise<void>((resolve) => server.close(() => resolve()));
+});
+
+test("RdpWasmSession rejects a Firefox newer than the validated window", async () => {
+  const srv = new FakeRdpServer();
+  srv.firefoxVersion = `${MAX_SUPPORTED_FIREFOX_MAJOR + 1}.0a1`;
+  await srv.listen();
+  try {
+    await assert.rejects(
+      srv.acceptSession(),
+      /newer than firefox-lldb has validated.*FIREFOX_LLDB_ALLOW_UNSUPPORTED=1/
+    );
+  } finally {
+    srv.close();
+  }
 });
 
 // ---------------------------------------------------------------------------
