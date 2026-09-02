@@ -4,7 +4,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { retrySessionSetup } from "./harness.mjs";
+import net from "node:net";
+import { bridgeTcp, retrySessionSetup, tracingLogger, withDeadline } from "./harness.mjs";
 
 test("session setup retries with a fresh attempt after transient failures", async () => {
   let attempts = 0;
@@ -37,4 +38,77 @@ test("session setup reports every failure after exhausting retries", async () =>
       return true;
     }
   );
+});
+
+test("bridge diagnostics retain channel state and byte flow", async (t) => {
+  let peer;
+  let resolveTcpReceived;
+  const tcpReceived = new Promise((resolve) => {
+    resolveTcpReceived = resolve;
+  });
+  const server = net.createServer((socket) => {
+    peer = socket;
+    socket.on("data", (data) => resolveTcpReceived(data));
+    socket.write("from TCP");
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+
+  const sockets = new Set();
+  t.after(async () => {
+    peer?.destroy();
+    for (const socket of sockets) socket.destroy();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  let sendFromLldb;
+  let resolveLldbReceived;
+  const lldbReceived = new Promise((resolve) => {
+    resolveLldbReceived = resolve;
+  });
+  const client = {
+    createChannel: async () => 7,
+    bridgeChannel: async (_channelId, onData) => {
+      sendFromLldb = onData;
+    },
+    channelServerWrite: async (_channelId, data) => {
+      resolveLldbReceived(Buffer.from(data));
+      return data.length;
+    },
+  };
+  const trace = tracingLogger();
+  const port = server.address().port;
+  const channelId = await bridgeTcp(client, sockets, port, { trace, label: "platform" });
+  assert.equal(channelId, 7);
+
+  await lldbReceived;
+  sendFromLldb(new TextEncoder().encode("from LLDB"));
+  await tcpReceived;
+
+  const tail = trace.tail().join("\n");
+  assert.match(tail, /\[bridge platform\] first TCP->LLDB data \(8 bytes\)/);
+  assert.match(tail, /\[bridge platform\] first LLDB->TCP data \(9 bytes\)/);
+  assert.match(
+    tail,
+    /\[state\] bridge platform: channel=7 tcp=connected LLDB->TCP=1 chunks\/9 bytes TCP->LLDB=1 chunks\/8 bytes/
+  );
+});
+
+test("deadline diagnostics report the active stage and cleanup outcome", async () => {
+  const trace = tracingLogger();
+  trace.stage("submitting process attach attempt 1/4");
+  trace.state("bridge tab-1", "channel=2 tcp=connected LLDB->TCP=0 chunks/0 bytes");
+  const session = {
+    forceKillFirefox() {},
+    shutdown: async () => {},
+  };
+
+  await assert.rejects(withDeadline(session, new Promise(() => {}), 5, trace), (err) => {
+    assert.match(err.message, /\[state\] setup: submitting process attach attempt 1\/4/);
+    assert.match(err.message, /\[state\] bridge tab-1: channel=2 tcp=connected/);
+    assert.match(err.message, /cleanup: session shutdown completed/);
+    return true;
+  });
 });

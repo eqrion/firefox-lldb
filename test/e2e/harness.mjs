@@ -237,16 +237,35 @@ export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // elapsed": the last RDP exchange before it stopped making progress.
 export function tracingLogger(keep = 40) {
   const lines = [];
+  const states = new Map();
+  const bounded = (line) =>
+    line.length > 240 ? `${line.slice(0, 240)}… (${line.length} chars)` : line;
   const record = (line) => {
     // Trace lines carry whole RDP payloads: a `source`/`substring` reply is the
     // full text of a script. What matters here is which exchange came last, so
     // keep the head of each line — 28 untruncated blowouts would bury the log.
-    lines.push(line.length > 240 ? `${line.slice(0, 240)}… (${line.length} chars)` : line);
+    lines.push(bounded(line));
     if (lines.length > keep) lines.shift();
   };
   const echo = process.env.E2E_VERBOSE ? (level, m) => console.error(`[${level}] ${m}`) : () => {};
   return {
-    tail: () => lines,
+    // State summaries are evaluated when the deadline fires and always occupy
+    // the end of the retained tail. This keeps slow-moving facts such as the
+    // active setup stage and per-channel byte counts from being evicted by a
+    // burst of RDP packets immediately before a hang.
+    tail: () => {
+      const stateLines = [...states].map(([key, value]) =>
+        bounded(`[state] ${key}: ${typeof value === "function" ? value() : value}`)
+      );
+      return [...lines.slice(-Math.max(0, keep - stateLines.length)), ...stateLines].slice(-keep);
+    },
+    mark: (m) => record(m),
+    stage: (m) => {
+      states.set("setup", m);
+      record(`[setup] ${m}`);
+    },
+    state: (key, value) => states.set(key, value),
+    clearState: (key) => states.delete(key),
     debug: (m) => {
       record(m);
       echo("debug", m);
@@ -303,13 +322,56 @@ export const LLDB_FAILED_STATUS = 6;
 // Bridge a localhost TCP port to an in-process wasm-LLDB channel, tracking
 // the socket in `sockets` so callers can force-close it on shutdown. Shared
 // by both harnesses' platform/per-tab connections.
-export async function bridgeTcp(client, sockets, port) {
-  const channelId = await client.createChannel();
+export async function bridgeTcp(client, sockets, port, { trace, label = `tcp-${port}` } = {}) {
+  const startedAt = Date.now();
+  let channelId;
+  let tcpState = "creating";
+  let lldbToTcpChunks = 0;
+  let lldbToTcpBytes = 0;
+  let tcpToLldbChunks = 0;
+  let tcpToLldbBytes = 0;
+  let lastActivityAt = startedAt;
+  let lastError = "none";
+  const summary = () =>
+    `channel=${channelId ?? "pending"} tcp=${tcpState} ` +
+    `LLDB->TCP=${lldbToTcpChunks} chunks/${lldbToTcpBytes} bytes ` +
+    `TCP->LLDB=${tcpToLldbChunks} chunks/${tcpToLldbBytes} bytes ` +
+    `last-activity=${Date.now() - lastActivityAt}ms-ago error=${lastError}`;
+  trace?.state(`bridge ${label}`, summary);
+  trace?.mark(`[bridge ${label}] creating LLDB channel for TCP port ${port}`);
+
+  channelId = await client.createChannel();
+  trace?.mark(`[bridge ${label}] created LLDB channel ${channelId}`);
   const socket = net.connect(port, "127.0.0.1");
   sockets.add(socket);
   socket.setNoDelay(true);
-  socket.on("data", (d) => void client.channelServerWrite(channelId, new Uint8Array(d)));
-  socket.on("error", () => {});
+  socket.on("data", (d) => {
+    tcpToLldbChunks++;
+    tcpToLldbBytes += d.length;
+    lastActivityAt = Date.now();
+    if (tcpToLldbChunks === 1)
+      trace?.mark(`[bridge ${label}] first TCP->LLDB data (${d.length} bytes)`);
+    void client.channelServerWrite(channelId, new Uint8Array(d)).catch((err) => {
+      lastError = `TCP->LLDB write: ${err instanceof Error ? err.message : String(err)}`;
+      trace?.mark(`[bridge ${label}] ${lastError}`);
+    });
+  });
+  socket.on("connect", () => {
+    tcpState = "connected";
+    lastActivityAt = Date.now();
+    trace?.mark(`[bridge ${label}] TCP connected to 127.0.0.1:${port}`);
+  });
+  socket.on("close", () => {
+    tcpState = "closed";
+    lastActivityAt = Date.now();
+    trace?.mark(`[bridge ${label}] TCP closed`);
+  });
+  socket.on("error", (err) => {
+    tcpState = "error";
+    lastError = err.message;
+    lastActivityAt = Date.now();
+    trace?.mark(`[bridge ${label}] TCP error: ${err.message}`);
+  });
   // Register before bridgeChannel: on loopback the TCP handshake completes
   // while bridgeChannel awaits, and a post-await socket.once("connect") misses
   // the already-fired event, leaving the promise permanently unresolved.
@@ -317,26 +379,45 @@ export async function bridgeTcp(client, sockets, port) {
     socket.once("connect", resolve);
     socket.once("error", reject);
   });
-  await client.bridgeChannel(channelId, (data) => void socket.write(Buffer.from(data)));
+  await client.bridgeChannel(channelId, (data) => {
+    lldbToTcpChunks++;
+    lldbToTcpBytes += data.length;
+    lastActivityAt = Date.now();
+    if (lldbToTcpChunks === 1)
+      trace?.mark(`[bridge ${label}] first LLDB->TCP data (${data.length} bytes)`);
+    void socket.write(Buffer.from(data));
+  });
+  trace?.mark(`[bridge ${label}] LLDB channel ${channelId} drain registered`);
   await connected;
+  trace?.mark(`[bridge ${label}] active`);
   return channelId;
 }
 
 // Select the gdb-remote platform and connect it to a bridged channel.
-export async function platformConnect(client, channelId) {
+export async function platformConnect(client, channelId, trace) {
+  trace?.stage("submitting platform select");
   await client.sessionCommand("platform select remote-gdb-server");
+  trace?.stage(`submitting platform connect on channel ${channelId}`);
   const conn = await client.sessionCommand(`platform connect inprocess://${channelId}`);
   if (conn.status >= LLDB_FAILED_STATUS) throw new Error(`platform connect failed: ${conn.error}`);
+  trace?.stage(`platform connected on channel ${channelId}`);
 }
 
 // Cold launch + wasm load can exceed the attach timeout; retry a few times.
-export async function attachWithRetry(client, maxAttempts = 4) {
+export async function attachWithRetry(client, maxAttempts = 4, trace) {
   let lastErr = "";
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    trace?.stage(`submitting process attach attempt ${attempt + 1}/${maxAttempts}`);
     const res = await client.sessionCommand("process attach --plugin wasm --pid 1");
+    trace?.stage(
+      `process attach attempt ${attempt + 1}/${maxAttempts} returned status ${res.status}`
+    );
     if (res.status < LLDB_FAILED_STATUS) {
       const st = await client.sessionState();
-      if (st.reason !== "none" && st.reason !== "exited") return;
+      if (st.reason !== "none" && st.reason !== "exited") {
+        trace?.stage(`process attached and stopped (${st.reason})`);
+        return;
+      }
       lastErr = `attach left process in state ${st.reason}`;
     } else {
       lastErr = res.error;
@@ -401,7 +482,24 @@ export async function withDeadline(session, work, ms, trace) {
   } catch (err) {
     clearTimeout(timer);
     session.forceKillFirefox();
-    await Promise.race([session.shutdown(), sleep(10_000)]).catch(() => {});
+    trace?.mark("[cleanup] force-killed Firefox; starting graceful session shutdown");
+    let cleanupTimer;
+    const cleanupTimeout = new Promise((resolve) => {
+      cleanupTimer = setTimeout(() => resolve("timed out after 10000ms"), 10_000);
+    });
+    const cleanupOutcome = await Promise.race([
+      session
+        .shutdown()
+        .then(() => "completed")
+        .catch(
+          (cleanupErr) =>
+            `failed: ${cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)}`
+        ),
+      cleanupTimeout,
+    ]);
+    clearTimeout(cleanupTimer);
+    trace?.mark(`[cleanup] session shutdown ${cleanupOutcome}`);
+    if (err instanceof Error) err.message += `\ncleanup: session shutdown ${cleanupOutcome}`;
     throw err;
   }
 }
@@ -430,11 +528,14 @@ export class Session {
   #staticServer;
   #sockets = new Set();
   #rdpSession;
+  #trace;
+  #tabBridgeSerial = 0;
 
-  constructor(client, handle, staticServer) {
+  constructor(client, handle, staticServer, trace) {
     this.#client = client;
     this.#handle = handle;
     this.#staticServer = staticServer;
+    this.#trace = trace;
   }
 
   // Fire-and-forget JS evaluation on the page, for use *after* attach (the
@@ -492,8 +593,8 @@ export class Session {
     return `http://127.0.0.1:${this.#staticServer.port}/${rel}`;
   }
 
-  #bridgeTcp(port) {
-    return bridgeTcp(this.#client, this.#sockets, port);
+  #bridgeTcp(port, label = `tab-${++this.#tabBridgeSerial}`) {
+    return bridgeTcp(this.#client, this.#sockets, port, { trace: this.#trace, label });
   }
 
   // Launch headless Firefox at the fixture, attach via the platform, and
@@ -512,11 +613,12 @@ export class Session {
 
     const client = await LLDBClient.create();
     const trace = tracingLogger();
+    trace.stage("LLDB client ready");
     // Serve each module's separate DWARF file from the fixture's own server.
     // Nothing else is served: LLDB has no access to the host source tree here.
     const debugFiles = new DebugFileRegistry();
     client.setFileProvider((path) => debugFiles.read(path));
-    const session = new Session(client, null, staticServer);
+    const session = new Session(client, null, staticServer, trace);
 
     return withDeadline(
       session,
@@ -552,10 +654,11 @@ export class Session {
           },
         });
         session.#handle = handle;
+        trace.stage(`platform server ready on TCP port ${handle.port}`);
 
-        const c0 = await session.#bridgeTcp(handle.port);
-        await platformConnect(client, c0);
-        await attachWithRetry(client);
+        const c0 = await session.#bridgeTcp(handle.port, "platform");
+        await platformConnect(client, c0, trace);
+        await attachWithRetry(client, 4, trace);
         return session;
       })(),
       30_000,
@@ -575,7 +678,7 @@ export class Session {
       wrapConnectPort: (port) => session.#bridgeTcp(port),
     });
     session.#handle = handle;
-    const c0 = await session.#bridgeTcp(handle.port);
+    const c0 = await session.#bridgeTcp(handle.port, "platform");
     await platformConnect(client, c0);
     return session;
   }

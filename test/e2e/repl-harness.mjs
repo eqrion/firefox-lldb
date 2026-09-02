@@ -23,6 +23,7 @@ import {
   shutdownSession,
   forceKillFirefoxPid,
   retrySessionSetup,
+  tracingLogger,
 } from "./harness.mjs";
 
 const stripAnsi = (s) => s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
@@ -37,10 +38,12 @@ export class ReplSession {
   #out = "";
   #waiters = [];
   #triggerInterrupt;
+  #trace;
+  #tabBridgeSerial = 0;
   session;
 
-  #bridgeTcp(port) {
-    return bridgeTcp(this.#client, this.#sockets, port);
+  #bridgeTcp(port, label = `tab-${++this.#tabBridgeSerial}`) {
+    return bridgeTcp(this.#client, this.#sockets, port, { trace: this.#trace, label });
   }
 
   #settle() {
@@ -66,9 +69,12 @@ export class ReplSession {
     const url = `http://127.0.0.1:${staticServer.port}/index.html`;
 
     const client = await LLDBClient.create();
+    const trace = tracingLogger();
+    trace.stage("LLDB client ready");
     const rs = new ReplSession();
     rs.#client = client;
     rs.#staticServer = staticServer;
+    rs.#trace = trace;
     client.setFileProvider(() => Promise.resolve(null));
 
     const output = new Writable({
@@ -106,6 +112,7 @@ export class ReplSession {
         ]);
         const handle = await startPlatformServer(args, {
           wrapConnectPort: (port) => rs.#bridgeTcp(port),
+          logger: trace,
           onSession: (s, interrupt) => {
             rs.session = s;
             rs.#triggerInterrupt = interrupt;
@@ -113,20 +120,25 @@ export class ReplSession {
           },
         });
         rs.#handle = handle;
+        trace.stage(`platform server ready on TCP port ${handle.port}`);
 
-        const c0 = await rs.#bridgeTcp(handle.port);
-        await platformConnect(client, c0);
+        const c0 = await rs.#bridgeTcp(handle.port, "platform");
+        await platformConnect(client, c0, trace);
+        trace.stage("submitting attach command alias");
         await client.sessionCommand("command alias attach process attach --plugin wasm");
 
         // Attach is driven directly (not through the REPL) so the retry
         // policy is in one place; REPL command routing is what the tests
         // exercise afterwards.
-        await attachWithRetry(client);
+        await attachWithRetry(client, 4, trace);
+        trace.stage("starting REPL");
         rs.#repl.start();
         await rs.#settle();
+        trace.stage("REPL prompt ready");
         return rs;
       })(),
-      30_000
+      30_000,
+      trace
     );
   }
 
@@ -138,7 +150,7 @@ export class ReplSession {
   async type(line) {
     const mark = this.#out.length;
     this.#input.write(line + "\n");
-    await withDeadline(this, this.#settle(), 30_000);
+    await withDeadline(this, this.#settle(), 30_000, this.#trace);
     return stripAnsi(this.#out.slice(mark));
   }
 
