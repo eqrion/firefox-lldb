@@ -319,6 +319,55 @@ export async function retrySessionSetup(factory, maxAttempts = 3, { quiet = fals
 // and above are Failed/Quit. sessionCommand()'s `status` is that raw enum.
 export const LLDB_FAILED_STATUS = 6;
 
+// Retain packet summaries at the TCP bridge instead of enabling the gdbstub's
+// very verbose Rust trace. This stays close to the wire, has negligible impact
+// on timing, and records the last complete request and response even when RSP
+// packets are split across TCP chunks.
+function rspPacketTracer(trace, label, direction) {
+  let buffered = Buffer.alloc(0);
+  let lastPacket = "none";
+  trace?.state(`rsp ${label} ${direction}`, () => lastPacket);
+
+  return (data) => {
+    if (!trace) return;
+    buffered = Buffer.concat([buffered, Buffer.from(data)]);
+    for (;;) {
+      const start = buffered.indexOf(0x24); // '$'
+      if (start === -1) {
+        buffered = Buffer.alloc(0); // acknowledgements and interrupts
+        return;
+      }
+      if (start > 0) buffered = buffered.subarray(start);
+
+      let escaped = false;
+      let hash = -1;
+      for (let i = 1; i < buffered.length; i++) {
+        const byte = buffered[i];
+        if (escaped) {
+          escaped = false;
+        } else if (byte === 0x7d) {
+          escaped = true;
+        } else if (byte === 0x23) {
+          hash = i;
+          break;
+        }
+      }
+      if (hash === -1 || buffered.length < hash + 3) return;
+
+      const payload = buffered.subarray(1, hash).toString("latin1");
+      const printable = payload.replace(/[^\x20-\x7e]/g, ".");
+      const summary =
+        printable.length <= 160
+          ? printable
+          : `${printable.slice(0, 160)}… (${payload.length} byte payload)`;
+      const checksum = buffered.toString("latin1", hash + 1, hash + 3);
+      lastPacket = `$${summary}#${checksum}`;
+      trace.mark(`[bridge ${label}] ${direction} RSP ${lastPacket}`);
+      buffered = buffered.subarray(hash + 3);
+    }
+  };
+}
+
 // Bridge a localhost TCP port to an in-process wasm-LLDB channel, tracking
 // the socket in `sockets` so callers can force-close it on shutdown. Shared
 // by both harnesses' platform/per-tab connections.
@@ -330,15 +379,21 @@ export async function bridgeTcp(client, sockets, port, { trace, label = `tcp-${p
   let lldbToTcpBytes = 0;
   let tcpToLldbChunks = 0;
   let tcpToLldbBytes = 0;
+  let tcpToLldbWritesCompleted = 0;
+  let tcpToLldbBytesAccepted = 0;
+  let tcpToLldbWritesPending = 0;
   let lastActivityAt = startedAt;
   let lastError = "none";
   const summary = () =>
     `channel=${channelId ?? "pending"} tcp=${tcpState} ` +
     `LLDB->TCP=${lldbToTcpChunks} chunks/${lldbToTcpBytes} bytes ` +
     `TCP->LLDB=${tcpToLldbChunks} chunks/${tcpToLldbBytes} bytes ` +
+    `LLDB-writes=${tcpToLldbWritesCompleted} completed/${tcpToLldbBytesAccepted} bytes-accepted/${tcpToLldbWritesPending} pending ` +
     `last-activity=${Date.now() - lastActivityAt}ms-ago error=${lastError}`;
   trace?.state(`bridge ${label}`, summary);
   trace?.mark(`[bridge ${label}] creating LLDB channel for TCP port ${port}`);
+  const traceLldbToTcp = rspPacketTracer(trace, label, "LLDB->TCP");
+  const traceTcpToLldb = rspPacketTracer(trace, label, "TCP->LLDB");
 
   channelId = await client.createChannel();
   trace?.mark(`[bridge ${label}] created LLDB channel ${channelId}`);
@@ -351,10 +406,24 @@ export async function bridgeTcp(client, sockets, port, { trace, label = `tcp-${p
     lastActivityAt = Date.now();
     if (tcpToLldbChunks === 1)
       trace?.mark(`[bridge ${label}] first TCP->LLDB data (${d.length} bytes)`);
-    void client.channelServerWrite(channelId, new Uint8Array(d)).catch((err) => {
-      lastError = `TCP->LLDB write: ${err instanceof Error ? err.message : String(err)}`;
-      trace?.mark(`[bridge ${label}] ${lastError}`);
-    });
+    traceTcpToLldb(d);
+    tcpToLldbWritesPending++;
+    void client
+      .channelServerWrite(channelId, new Uint8Array(d))
+      .then((written) => {
+        tcpToLldbWritesPending--;
+        tcpToLldbWritesCompleted++;
+        tcpToLldbBytesAccepted += written;
+        if (written !== d.length) {
+          lastError = `TCP->LLDB partial write: accepted ${written}/${d.length} bytes`;
+          trace?.mark(`[bridge ${label}] ${lastError}`);
+        }
+      })
+      .catch((err) => {
+        tcpToLldbWritesPending--;
+        lastError = `TCP->LLDB write: ${err instanceof Error ? err.message : String(err)}`;
+        trace?.mark(`[bridge ${label}] ${lastError}`);
+      });
   });
   socket.on("connect", () => {
     tcpState = "connected";
@@ -385,6 +454,7 @@ export async function bridgeTcp(client, sockets, port, { trace, label = `tcp-${p
     lastActivityAt = Date.now();
     if (lldbToTcpChunks === 1)
       trace?.mark(`[bridge ${label}] first LLDB->TCP data (${data.length} bytes)`);
+    traceLldbToTcp(data);
     void socket.write(Buffer.from(data));
   });
   trace?.mark(`[bridge ${label}] LLDB channel ${channelId} drain registered`);

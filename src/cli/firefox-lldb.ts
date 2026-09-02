@@ -78,12 +78,20 @@ async function bridgeTcp(client: LLDBClient, port: number, logger: Logger): Prom
   });
   // server -> LLDB
   socket.on("data", (d) => {
-    void client.channelServerWrite(channelId, new Uint8Array(d)).catch((err) => {
-      logger.error(
-        `[bridge] server-to-LLDB write failed: ${err instanceof Error ? err.message : String(err)}`
-      );
-      socket.destroy();
-    });
+    logger.debug(`[bridge channel ${channelId}] server-to-LLDB queued ${d.length} bytes`);
+    void client
+      .channelServerWrite(channelId, new Uint8Array(d))
+      .then((written) => {
+        logger.debug(
+          `[bridge channel ${channelId}] server-to-LLDB accepted ${written}/${d.length} bytes`
+        );
+      })
+      .catch((err) => {
+        logger.error(
+          `[bridge] server-to-LLDB write failed: ${err instanceof Error ? err.message : String(err)}`
+        );
+        socket.destroy();
+      });
   });
   socket.on("error", (err) => logger.warn(`[bridge] socket error: ${err.message}`));
   // LLDB -> server

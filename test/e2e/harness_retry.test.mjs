@@ -49,7 +49,9 @@ test("bridge diagnostics retain channel state and byte flow", async (t) => {
   const server = net.createServer((socket) => {
     peer = socket;
     socket.on("data", (data) => resolveTcpReceived(data));
-    socket.write("from TCP");
+    // Write the response in pieces; TCP is allowed to coalesce them.
+    socket.write("+$E");
+    socket.write("79#b5");
   });
   await new Promise((resolve, reject) => {
     server.once("error", reject);
@@ -84,16 +86,19 @@ test("bridge diagnostics retain channel state and byte flow", async (t) => {
   assert.equal(channelId, 7);
 
   await lldbReceived;
-  sendFromLldb(new TextEncoder().encode("from LLDB"));
+  sendFromLldb(new TextEncoder().encode("$m40000001000001a1,400#65"));
   await tcpReceived;
+  await new Promise((resolve) => setImmediate(resolve));
 
   const tail = trace.tail().join("\n");
-  assert.match(tail, /\[bridge platform\] first TCP->LLDB data \(8 bytes\)/);
-  assert.match(tail, /\[bridge platform\] first LLDB->TCP data \(9 bytes\)/);
+  assert.match(tail, /\[bridge platform\] first TCP->LLDB data/);
+  assert.match(tail, /\[bridge platform\] first LLDB->TCP data \(25 bytes\)/);
   assert.match(
     tail,
-    /\[state\] bridge platform: channel=7 tcp=connected LLDB->TCP=1 chunks\/9 bytes TCP->LLDB=1 chunks\/8 bytes/
+    /\[state\] bridge platform: channel=7 tcp=connected LLDB->TCP=1 chunks\/25 bytes TCP->LLDB=\d+ chunks\/8 bytes LLDB-writes=\d+ completed\/8 bytes-accepted\/0 pending/
   );
+  assert.match(tail, /\[state\] rsp platform LLDB->TCP: \$m40000001000001a1,400#65/);
+  assert.match(tail, /\[state\] rsp platform TCP->LLDB: \$E79#b5/);
 });
 
 test("deadline diagnostics report the active stage and cleanup outcome", async () => {
