@@ -12,7 +12,6 @@ import assert from "node:assert/strict";
 import net from "node:net";
 import { parseCliArgs, startPlatformServer } from "../../src/core/platform-session.ts";
 import { freePort } from "../../src/platform/gdb-server-spawner.ts";
-import { findFirefoxBinary } from "../../src/rdp/firefox.ts";
 
 test("launch refuses when the RDP port is already occupied", async () => {
   const rdpPort = await freePort();
@@ -33,11 +32,7 @@ test("launch refuses when the RDP port is already occupied", async () => {
   }
 });
 
-test("a platform-port bind failure rolls back the Firefox launch", async (t) => {
-  if (!findFirefoxBinary()) {
-    t.skip("Firefox is not installed");
-    return;
-  }
+test("a platform-port bind failure does not launch Firefox", async () => {
   const platformPort = await freePort();
   const rdpPort = await freePort();
   const blocker = net.createServer();
@@ -53,7 +48,8 @@ test("a platform-port bind failure rolls back the Firefox launch", async (t) => 
     ]);
     await assert.rejects(() => startPlatformServer(args), /EADDRINUSE|address already in use/i);
 
-    // The detached child must be gone rather than surviving the rejected startup.
+    // Firefox must never have been launched after the deterministic bind
+    // failure, so nothing can be left accepting connections on its RDP port.
     await new Promise((resolve) => setTimeout(resolve, 200));
     await assert.rejects(
       new Promise((resolve, reject) => {

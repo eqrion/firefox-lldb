@@ -280,6 +280,12 @@ function createTabLauncher(
     // throws leaks the RDP watcher connection, and a retried qLaunchGDBServer
     // accumulates dead sessions against Firefox.
     try {
+      // watchTargets can acknowledge the subscription before delivering the
+      // initial top-level target. Navigating in that gap makes navigate() see
+      // generation 0 and lets the late about:blank event satisfy its
+      // "replacement target" wait. Establish the initial generation first.
+      await session.waitForTopLevelTarget();
+
       // Navigate to the target page when needed. The watcher connection runs
       // watchAndPrimeFirefoxTabs which sets observeWasm:true on the tab before
       // any page loads; pages navigated after that compile wasm in debug mode
@@ -418,49 +424,6 @@ export async function startPlatformServer(
   const logger = opts.logger ?? consoleLogger(consoleVerbose);
   const launching = !args.connect;
 
-  let firefox: FirefoxHandle | undefined;
-  if (launching) {
-    firefox = await launchFirefox({
-      rdpPort: args.rdpPort,
-      binary: args.firefox,
-      channel: args.channel,
-      defaultProfile: args.defaultProfile,
-      headless: args.headless,
-      marionettePort: args.marionettePort,
-      // NOTE: deliberately not passing url here. Firefox starts on about:blank;
-      // the tab is navigated to the page lazily on the first qLaunchGDBServer
-      // (see the launcher below). Launching Firefox directly at the page would
-      // make that navigate a redundant reload of an already-loaded tab.
-    });
-    try {
-      // The launch-time port check in launchFirefox is best-effort (a stale
-      // Firefox could grab the port between that check and this one binding
-      // it). Confirm the RDP port actually answers as the instance we just
-      // spawned before trusting anything it reports (issue: a leftover
-      // Firefox from a previous run can otherwise silently intercept the
-      // whole session).
-      const runtime = await verifyFirefoxLaunchToken(
-        args.rdpPort,
-        "127.0.0.1",
-        firefox.launchToken
-      );
-      logger.info(
-        `launched Firefox ${runtime.version}${runtime.channel ? ` (${runtime.channel})` : ""}`
-      );
-    } catch (err) {
-      await firefox
-        .close()
-        .catch((closeErr) =>
-          logger.error(
-            `failed to clean up Firefox after verification error: ${
-              closeErr instanceof Error ? closeErr.message : String(closeErr)
-            }`
-          )
-        );
-      throw err;
-    }
-  }
-
   // currentTabs is updated by the watcher below and read by the platform server
   // to satisfy `platform process list` and resolve `process attach --pid N`.
   let currentTabs: TabInfo[] = [];
@@ -488,12 +451,54 @@ export async function startPlatformServer(
   });
   const server = new RspServer(platformServer, { logger, singleConnection: true });
 
-  let bound: number;
+  // Reserve the user-facing platform port before starting Firefox. Besides
+  // failing faster, this prevents a transient Firefox startup problem from
+  // masking the deterministic EADDRINUSE error the caller needs to fix.
+  const bound = await server.listen(args.port);
+
+  let firefox: FirefoxHandle | undefined;
   try {
-    bound = await server.listen(args.port);
+    if (launching) {
+      firefox = await launchFirefox({
+        rdpPort: args.rdpPort,
+        binary: args.firefox,
+        channel: args.channel,
+        defaultProfile: args.defaultProfile,
+        headless: args.headless,
+        marionettePort: args.marionettePort,
+        // NOTE: deliberately not passing url here. Firefox starts on about:blank;
+        // the tab is navigated to the page lazily on the first qLaunchGDBServer
+        // (see the launcher above). Launching Firefox directly at the page would
+        // make that navigate a redundant reload of an already-loaded tab.
+      });
+
+      // The launch-time port check in launchFirefox is best-effort (a stale
+      // Firefox could grab the port between that check and this one binding
+      // it). Confirm the RDP port actually answers as the instance we just
+      // spawned before trusting anything it reports (issue: a leftover
+      // Firefox from a previous run can otherwise silently intercept the
+      // whole session).
+      const runtime = await verifyFirefoxLaunchToken(
+        args.rdpPort,
+        "127.0.0.1",
+        firefox.launchToken
+      );
+      logger.info(
+        `launched Firefox ${runtime.version}${runtime.channel ? ` (${runtime.channel})` : ""}`
+      );
+    }
   } catch (err) {
-    // Firefox is detached from this process, so process exit will not clean it
-    // up if a later startup step (most commonly the platform port bind) fails.
+    // Firefox is detached from this process, so every partially completed
+    // startup step must be explicitly rolled back.
+    await server
+      .close()
+      .catch((closeErr) =>
+        logger.error(
+          `failed to roll back platform server after startup error: ${
+            closeErr instanceof Error ? closeErr.message : String(closeErr)
+          }`
+        )
+      );
     await spawner
       .killAll()
       .catch((stopErr) =>
@@ -507,7 +512,9 @@ export async function startPlatformServer(
       ?.close()
       .catch((closeErr) =>
         logger.error(
-          `failed to roll back Firefox after startup error: ${closeErr instanceof Error ? closeErr.message : String(closeErr)}`
+          `failed to roll back Firefox after startup error: ${
+            closeErr instanceof Error ? closeErr.message : String(closeErr)
+          }`
         )
       );
     throw err;

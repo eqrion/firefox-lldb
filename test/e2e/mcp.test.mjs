@@ -74,6 +74,8 @@ async function missedStopDiagnostics(client) {
     "breakpoint list 1",
     "thread list",
     "image list",
+    "js p document.location.href",
+    "js p document.readyState",
     "js p document.getElementById('fac-result').textContent",
   ]) {
     await captureTool(command, "lldb_send", { command });
@@ -140,7 +142,7 @@ async function withSession(
 }
 
 test("MCP: launch, set a breakpoint, continue, hit it", async () => {
-  await withSession("factorial", async (client, fx) => {
+  await withSession("factorial", async (client, fx, banner) => {
     const bp = await send(client, "lldb_send", { command: `breakpoint set -n ${fx.breakFunc}` });
     assert.match(bp, /Breakpoint 1/, `breakpoint set output: ${bp}`);
 
@@ -150,7 +152,7 @@ test("MCP: launch, set a breakpoint, continue, hit it", async () => {
       assert.match(
         cont,
         new RegExp(fx.breakFunc),
-        `breakpoint set output: ${bp}\n\ncontinue/stop output: ${cont}\n\n${diagnostics}`
+        `launch banner: ${banner}\n\nbreakpoint set output: ${bp}\n\ncontinue/stop output: ${cont}\n\n${diagnostics}`
       );
     }
 

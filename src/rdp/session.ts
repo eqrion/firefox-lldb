@@ -487,6 +487,42 @@ export class RdpWasmSession extends EventEmitter {
     return [...this.#threads.values()].find((t) => t.isTopLevel)?.tid;
   }
 
+  /** Wait until watchTargets has announced the tab's initial top-level target.
+   * The watchTargets request can resolve before its target-available event is
+   * delivered. Callers that navigate immediately must not treat that late
+   * initial about:blank target as the replacement created by navigation. */
+  waitForTopLevelTarget(timeoutMs = 10_000): Promise<void> {
+    if (this.topLevelTid() !== undefined) return Promise.resolve();
+    if (this.#closed) {
+      return Promise.reject(
+        new Error("session closed while waiting for the initial top-level target")
+      );
+    }
+    return new Promise<void>((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout>;
+      const cleanup = () => {
+        clearTimeout(timer);
+        this.off("target", onTarget);
+        this.off("close", onClose);
+      };
+      const onTarget = (info: ThreadInfo) => {
+        if (!info.isTopLevel) return;
+        cleanup();
+        resolve();
+      };
+      const onClose = () => {
+        cleanup();
+        reject(new Error("session closed while waiting for the initial top-level target"));
+      };
+      timer = setTimeout(() => {
+        cleanup();
+        reject(new Error(`no initial top-level target within ${timeoutMs}ms`));
+      }, timeoutMs);
+      this.on("target", onTarget);
+      this.on("close", onClose);
+    });
+  }
+
   /** Connect, enable wasm observation, and start watching targets. */
   static async start(
     port = 6080,

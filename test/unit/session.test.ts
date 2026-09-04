@@ -297,6 +297,32 @@ test("target-available-form adds thread to listTids", async () => {
   srv.close();
 });
 
+test("waitForTopLevelTarget waits for the initial frame target", async () => {
+  const srv = new FakeRdpServer();
+  await srv.listen();
+  const session = await srv.acceptSession();
+
+  let resolved = false;
+  const ready = session.waitForTopLevelTarget(1_000).then(() => {
+    resolved = true;
+  });
+  await sleep(20);
+  assert.equal(resolved, false);
+
+  // A worker target is not sufficient: navigation is addressed to the tab's
+  // top-level frame and needs that frame's initial generation as its baseline.
+  srv.targetAvailable("worker");
+  await sleep(20);
+  assert.equal(resolved, false);
+
+  srv.targetAvailable("main", { isTopLevel: true, url: "about:blank" });
+  await ready;
+  assert.equal(session.topLevelUrl(), "about:blank");
+
+  session.close();
+  srv.close();
+});
+
 test("target-available-form with same actor is deduplicated", async () => {
   const srv = new FakeRdpServer();
   await srv.listen();
