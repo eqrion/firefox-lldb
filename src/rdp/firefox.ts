@@ -410,6 +410,13 @@ export async function launchFirefox(opts: {
   let closePromise: Promise<void> | undefined;
   const close = () =>
     (closePromise ??= (async () => {
+      // launchFirefox deliberately unrefs the detached browser so an abandoned
+      // handle cannot keep its caller alive forever. Once close() is awaited,
+      // however, the child exit event is the work the caller is waiting for;
+      // keep it referenced until that event arrives. Without this, a short
+      // standalone caller can exhaust its other handles after SIGKILL and Node
+      // exits with its close promise still pending.
+      child.ref();
       if (child.pid !== undefined) {
         try {
           process.kill(-child.pid, "SIGKILL");
