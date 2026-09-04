@@ -53,6 +53,34 @@ const send = async (client, name, args = {}, options) => {
   }
 };
 
+async function missedStopDiagnostics(client) {
+  const sections = [];
+  const captureTool = async (label, name, args = {}) => {
+    try {
+      sections.push(`${label}:\n${await send(client, name, args)}`);
+    } catch (error) {
+      sections.push(
+        `${label}:\n<failed: ${error instanceof Error ? error.message : String(error)}>`
+      );
+    }
+  };
+
+  // The continue request has returned without a prompt, so the target is
+  // still running. Stop it before asking LLDB/RDP for state; otherwise every
+  // subsequent REPL command would merely queue behind the outstanding run.
+  await captureTool("interrupt", "lldb_interrupt");
+  for (const command of [
+    "process status",
+    "breakpoint list 1",
+    "thread list",
+    "image list",
+    "js p document.getElementById('fac-result').textContent",
+  ]) {
+    await captureTool(command, "lldb_send", { command });
+  }
+  return sections.join("\n\n");
+}
+
 // Race `work` against a deadline. A hung MCP tool call (e.g. the launched
 // Firefox wedges) leaves node's own --test-timeout as the only thing that
 // eventually notices -- but that only abandons the promise, it doesn't kill
@@ -117,7 +145,14 @@ test("MCP: launch, set a breakpoint, continue, hit it", async () => {
     assert.match(bp, /Breakpoint 1/, `breakpoint set output: ${bp}`);
 
     const cont = await send(client, "lldb_send", { command: "continue", timeoutMs: 60000 });
-    assert.match(cont, new RegExp(fx.breakFunc), `continue/stop output: ${cont}`);
+    if (!new RegExp(fx.breakFunc).test(cont)) {
+      const diagnostics = await missedStopDiagnostics(client);
+      assert.match(
+        cont,
+        new RegExp(fx.breakFunc),
+        `breakpoint set output: ${bp}\n\ncontinue/stop output: ${cont}\n\n${diagnostics}`
+      );
+    }
 
     const frame = await send(client, "lldb_send", { command: "frame variable" });
     assert.ok(frame.length > 0, "frame variable returned output");
