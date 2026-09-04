@@ -17,6 +17,7 @@ import { FIXTURES, startStaticServer } from "./harness.mjs";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const MCP_LAUNCH_TIMEOUT_MS = 120_000;
+const MCP_TOOL_TIMEOUT_MARGIN_MS = 15_000;
 const SESSION_TIMEOUT_MS = 150_000;
 
 async function connect() {
@@ -38,11 +39,17 @@ async function connect() {
 }
 
 const send = async (client, name, args = {}, options) => {
+  const requestOptions =
+    options ??
+    (typeof args.timeoutMs === "number"
+      ? { timeout: args.timeoutMs + MCP_TOOL_TIMEOUT_MARGIN_MS }
+      : undefined);
   try {
-    const res = await client.callTool({ name, arguments: args }, undefined, options);
+    const res = await client.callTool({ name, arguments: args }, undefined, requestOptions);
     return (res.content ?? []).map((c) => c.text ?? "").join("");
   } catch (error) {
-    throw new Error(`${name} failed`, { cause: error });
+    const operation = name === "lldb_send" ? `${name}(${String(args.command)})` : name;
+    throw new Error(`${operation} failed`, { cause: error });
   }
 };
 
