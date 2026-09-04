@@ -671,13 +671,19 @@ export class Session {
   // return a Session. `fire` overrides the fixture's default fire expression
   // (used by JS tests that need a second deferred call, e.g.
   // "runFactorial(); setTimeout(...)").
-  static async attach(fxName, { headless = true, fire, channel = "release" } = {}) {
+  static async attach(
+    fxName,
+    { headless = true, fire, channel = "release", setupTimeoutMs = 30_000, setupAttempts = 3 } = {}
+  ) {
     const fx = FIXTURES[fxName];
     if (!fx) throw new Error(`unknown fixture: ${fxName}`);
-    return retrySessionSetup(() => Session.#attachOnce(fx, { headless, fire, channel }));
+    return retrySessionSetup(
+      () => Session.#attachOnce(fx, { headless, fire, channel, setupTimeoutMs }),
+      setupAttempts
+    );
   }
 
-  static async #attachOnce(fx, { headless, fire, channel }) {
+  static async #attachOnce(fx, { headless, fire, channel, setupTimeoutMs }) {
     const staticServer = await startStaticServer(fx.pageDir, { requireAuth: fx.requireAuth });
     const url = `http://127.0.0.1:${staticServer.port}/index.html`;
 
@@ -731,7 +737,7 @@ export class Session {
         await attachWithRetry(client, 4, trace);
         return session;
       })(),
-      30_000,
+      setupTimeoutMs,
       trace
     );
   }

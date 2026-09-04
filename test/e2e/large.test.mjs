@@ -25,7 +25,15 @@ const NIGHTLY =
 let s;
 before(async () => {
   if (!BUILT) return;
-  s = await Session.attach("large", { channel: NIGHTLY ? "nightly" : "release" });
+  // Loading SQLite's embedded sources transfers tens of megabytes over RSP.
+  // That is continuous useful work, but it can legitimately exceed the
+  // ordinary 30-second setup deadline on a loaded runner. Give this fixture
+  // one longer attempt instead of restarting the entire transfer three times.
+  s = await Session.attach("large", {
+    channel: NIGHTLY ? "nightly" : "release",
+    setupTimeoutMs: 120_000,
+    setupAttempts: 1,
+  });
 });
 after(async () => {
   await s?.shutdown();
