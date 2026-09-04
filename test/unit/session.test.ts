@@ -207,6 +207,15 @@ class FakeRdpServer {
     });
   }
 
+  tabNavigated(url: string, state?: "start" | "stop"): void {
+    this.send({
+      from: "tab1",
+      type: "tabNavigated",
+      url,
+      ...(state ? { state } : {}),
+    });
+  }
+
   paused(threadActor: string, why = "breakpoint"): void {
     this.send({ from: threadActor, type: "paused", why: { type: why } });
   }
@@ -1420,7 +1429,7 @@ test("navigate() resolves when the resulting page URL differs from the requested
   srv.close();
 });
 
-test("navigate() ignores an intermediate about:blank target", async () => {
+test("navigate() waits for tabNavigated stop after an intermediate about:blank target", async () => {
   const srv = new FakeRdpServer();
   await srv.listen();
   const session = await srv.acceptSession();
@@ -1433,18 +1442,19 @@ test("navigate() ignores an intermediate about:blank target", async () => {
     () => {
       srv.targetDestroyed("threadV0");
       srv.targetAvailable("threadTransient", { isTopLevel: true, url: "about:blank" });
-      setTimeout(() => {
-        srv.targetDestroyed("threadTransient");
-        srv.targetAvailable("threadPage", {
-          isTopLevel: true,
-          url: "http://example.com/page.html",
-        });
-      }, 20);
+      setTimeout(() => srv.tabNavigated("http://example.com/page.html", "start"), 10);
+      setTimeout(() => srv.tabNavigated("http://example.com/page.html", "stop"), 50);
       return { from: "tab1" };
     }
   );
 
-  await session.navigate("http://example.com/page.html");
+  let resolved = false;
+  const navigation = session.navigate("http://example.com/page.html").then(() => {
+    resolved = true;
+  });
+  await sleep(30);
+  assert.equal(resolved, false, "tabNavigated start must not complete navigation");
+  await navigation;
 
   assert.equal(session.topLevelUrl(), "http://example.com/page.html");
   assert.equal(session.listTids().length, 1);

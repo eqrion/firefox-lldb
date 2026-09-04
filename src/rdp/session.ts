@@ -663,6 +663,22 @@ export class RdpWasmSession extends EventEmitter {
         this.emit("target", info);
         break;
       }
+      case EVENTS.tabNavigated: {
+        const event = p as { url?: unknown; state?: unknown; target?: { url?: unknown } };
+        const url = typeof event.url === "string" ? event.url : event.target?.url;
+        if (typeof url !== "string") break;
+        // A process-switch navigation may first announce a replacement frame
+        // as about:blank, then complete that same target via tabNavigated
+        // without another target-available-form. Keep the target form current
+        // and let navigate() use the stop notification as its load barrier.
+        const currentTop = [...this.#threads.values()].find((t) => t.isTopLevel);
+        if (currentTop) currentTop.url = url;
+        this.emit("tab-navigated", {
+          url,
+          state: typeof event.state === "string" ? event.state : undefined,
+        });
+        break;
+      }
       case EVENTS.targetDestroyedForm: {
         // Unlike target-available-form, this payload carries the window/frame
         // target actor but not the thread actor — match on that instead, or a
@@ -767,24 +783,25 @@ export class RdpWasmSession extends EventEmitter {
     }
   }
 
-  /** Navigate the tab; resolves once a replacement top-level generation arrives. */
+  /** Navigate the tab; resolves once the destination top-level target is loaded. */
   async navigate(url: string): Promise<void> {
     // Do not mutate live target state before Firefox accepts the request. The
     // watcher events perform the generation swap transactionally; if navigateTo
     // is rejected, the existing generation remains usable.
     const startingGeneration = this.topLevelGeneration();
     const cleanupRef = { fn: null as (() => void) | null };
-    const target = new Promise<void>((resolve, reject) => {
+    const destination = new Promise<void>((resolve, reject) => {
       // navigateTo has already reported the load complete by the time this is
-      // awaited, so a replacement generation is due immediately. Bound the wait
-      // anyway: a Fission process swap can destroy and recreate the top-level
-      // target around this exact moment (see DETACH_GRACE_MS), and a swap missed
-      // in that window would otherwise hang the caller with no error to retry on.
+      // awaited, so either a destination target or tabNavigated stop is due
+      // immediately. Bound the wait anyway: a Fission process swap can lose a
+      // lifecycle event around this exact moment (see DETACH_GRACE_MS), which
+      // would otherwise hang the caller with no error to retry on.
       let timer: ReturnType<typeof setTimeout> | undefined;
       const cleanup = () => {
         cleanupRef.fn = null;
         clearTimeout(timer);
         this.off("target", onTarget);
+        this.off("tab-navigated", onTabNavigated);
         this.off("close", onClose);
       };
       cleanupRef.fn = cleanup;
@@ -800,15 +817,30 @@ export class RdpWasmSession extends EventEmitter {
           resolve();
         }
       };
+      const onTabNavigated = (event: { url: string; state?: string }) => {
+        // Firefox's tab actor emits start and stop notifications. Only stop is
+        // safe for attach-time primeStop: pausing the replacement at start can
+        // strand it on about:blank before the real document loads. Older
+        // versions omit state, in which case the sole notification is final.
+        if (event.state !== undefined && event.state !== "stop") return;
+        const transientBlank = url !== "about:blank" && event.url === "about:blank";
+        if (this.topLevelTid() !== undefined && !transientBlank) {
+          cleanup();
+          resolve();
+        }
+      };
       const onClose = () => {
         cleanup();
         reject(new Error("session closed during navigate"));
       };
       timer = setTimeout(() => {
         cleanup();
-        reject(new Error(`no replacement top-level target within ${NAVIGATE_TARGET_TIMEOUT_MS}ms`));
+        reject(
+          new Error(`no completed top-level navigation within ${NAVIGATE_TARGET_TIMEOUT_MS}ms`)
+        );
       }, NAVIGATE_TARGET_TIMEOUT_MS);
       this.on("target", onTarget);
+      this.on("tab-navigated", onTabNavigated);
       this.on("close", onClose);
     });
     // A pause during the load leaves navigateTo unanswerable: with
@@ -831,7 +863,7 @@ export class RdpWasmSession extends EventEmitter {
         url,
         waitForLoad: true,
       });
-      await target;
+      await destination;
     } catch (err) {
       cleanupRef.fn?.();
       throw err;
