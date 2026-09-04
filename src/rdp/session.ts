@@ -788,9 +788,14 @@ export class RdpWasmSession extends EventEmitter {
         this.off("close", onClose);
       };
       cleanupRef.fn = cleanup;
-      // Do not require the URL to match: redirects routinely change it.
+      // Do not require the URL to match: redirects routinely change it. But
+      // Firefox can announce an intermediate about:blank replacement before
+      // the requested page's real target arrives. Returning on that target
+      // lets attach-time primeStop pause the blank document and strand the
+      // navigation there indefinitely.
       const onTarget = (t: ThreadInfo) => {
-        if (t.isTopLevel && t.generation !== startingGeneration) {
+        const transientBlank = url !== "about:blank" && t.url === "about:blank";
+        if (t.isTopLevel && t.generation !== startingGeneration && !transientBlank) {
           cleanup();
           resolve();
         }

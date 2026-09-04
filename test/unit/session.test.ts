@@ -1420,6 +1420,39 @@ test("navigate() resolves when the resulting page URL differs from the requested
   srv.close();
 });
 
+test("navigate() ignores an intermediate about:blank target", async () => {
+  const srv = new FakeRdpServer();
+  await srv.listen();
+  const session = await srv.acceptSession();
+
+  srv.targetAvailable("threadV0", { isTopLevel: true, url: "about:blank" });
+  await sleep(200);
+
+  srv.onNext(
+    (r) => r.type === "navigateTo",
+    () => {
+      srv.targetDestroyed("threadV0");
+      srv.targetAvailable("threadTransient", { isTopLevel: true, url: "about:blank" });
+      setTimeout(() => {
+        srv.targetDestroyed("threadTransient");
+        srv.targetAvailable("threadPage", {
+          isTopLevel: true,
+          url: "http://example.com/page.html",
+        });
+      }, 20);
+      return { from: "tab1" };
+    }
+  );
+
+  await session.navigate("http://example.com/page.html");
+
+  assert.equal(session.topLevelUrl(), "http://example.com/page.html");
+  assert.equal(session.listTids().length, 1);
+
+  session.close();
+  srv.close();
+});
+
 test("navigate() same-URL reload does not emit 'detached' for the old target", async () => {
   const srv = new FakeRdpServer();
   await srv.listen();
