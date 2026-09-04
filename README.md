@@ -67,6 +67,39 @@ then attach:
 
 (`attach` is a shortcut for `process attach --plugin wasm`)
 
+### VS Code and other DAP clients
+
+`firefox-lldb-dap` exposes the upstream LLDB's Debug
+Adapter Protocol.
+
+For VS Code, install the official **LLDB DAP** extension and add an attach
+configuration like this to `.vscode/launch.json`:
+
+```json
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug in Firefox",
+      "type": "lldb-dap",
+      "request": "attach",
+      "debugAdapterExecutable": "${workspaceFolder}/node_modules/.bin/firefox-lldb-dap",
+      "debugAdapterArgs": ["--launch", "--port", "0", "--url", "http://localhost:8080/index.html"],
+      "attachCommands": ["process attach --plugin wasm --pid 1"]
+    }
+  ]
+}
+```
+
+Install `firefox-lldb` in the workspace for that path, or replace
+`debugAdapterExecutable` with the absolute path printed by
+`which firefox-lldb-dap` after a global install.
+
+Starting the configuration launches Firefox and attaches to the first tab.
+
+The REPL-only `js` commands and live browser-console stream are not exposed in
+DAP mode yet.
+
 ### Preparing your wasm
 
 Your module needs debug info for source-level debugging to work:
@@ -129,6 +162,7 @@ terminal as they happen, so you can correlate them with where you've stopped.
 | Drill into structs, pointers, and arrays (`p obj`, `p *ptr`)     | ✅     |                                            |
 | Read linear memory (`memory read`, `x`)                          | ✅     | Bounded to ~8 KB per read (see below)      |
 | Debug multithreaded wasm (pthreads / web workers)                | ✅     | All threads stop together                  |
+| Debug through VS Code or another DAP client                      | ✅     | Use `firefox-lldb-dap`                     |
 | Evaluate JavaScript in the page (`js p`)                         | ✅     | Over Firefox's remote protocol             |
 | Watch live console output                                        | ✅     |                                            |
 | Evaluate expressions over variables (`p n + 1`, `expr a > b`)    | ✅     | Arithmetic, comparisons, casts, temp vars  |

@@ -25,6 +25,7 @@
   ],
   "bin": {
     "firefox-lldb": "./dist/cli/firefox-lldb.js",
+    "firefox-lldb-dap": "./dist/cli/firefox-lldb-dap.js",
     "firefox-lldb-server": "./dist/cli/firefox-lldb-server.js",
     "firefox-lldb-mcp": "./dist/mcp/server.js"
   },
@@ -40,6 +41,7 @@
     "test:e2e": "node --import tsx --test --test-concurrency=${E2E_CONCURRENCY:-4} --test-timeout=180000 --test-reporter=./test/e2e/reporter.mjs test/e2e/*.test.mjs",
     "test:e2e:compat": "node --import tsx --test --test-concurrency=${E2E_CONCURRENCY:-4} --test-timeout=180000 --test-reporter=./test/e2e/reporter.mjs test/e2e/firefox_compatibility.test.mjs test/e2e/attach.test.mjs test/e2e/attach_paused_page.test.mjs test/e2e/authenticated_module.test.mjs test/e2e/breakpoint_by_line.test.mjs test/e2e/stepping.test.mjs test/e2e/threaded_dynamic.test.mjs test/e2e/threaded_worker_breakpoint.test.mjs test/e2e/nav_reload.test.mjs test/e2e/nav_while_running.test.mjs test/e2e/wasm_trap.test.mjs test/e2e/js_debugging.test.mjs test/e2e/sourcemap_stepping.test.mjs",
     "launch": "node --import tsx src/cli/firefox-lldb.ts --launch --rdp-port ${RDP_PORT:-6080} ${URL:+--url $URL}",
+    "launch:dap": "node --import tsx src/cli/firefox-lldb-dap.ts --launch --rdp-port ${RDP_PORT:-6080} ${URL:+--url $URL}",
     "launch-server": "node --import tsx src/cli/firefox-lldb-server.ts --launch --port ${PORT:-1234} --rdp-port ${RDP_PORT:-6080} ${URL:+--url $URL}",
     "connect": "node --import tsx src/cli/firefox-lldb-server.ts --connect --port ${PORT:-1234} --rdp-port ${RDP_PORT:-6080} ${URL:+--url $URL}",
     "mcp": "node --import tsx src/mcp/server.ts",

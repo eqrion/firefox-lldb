@@ -10,13 +10,13 @@ The bridge sits between two protocols:
   inbound, from the lldb client
 - **Firefox Remote Debug Protocol** (RDP) — outbound, to the browser
 
-The **primary** entry point is `firefox-lldb`, which embeds LLDB compiled to
-WebAssembly and runs everything (REPL, platform server, per-tab GDB server, RDP
-client) in a single Node process:
+The **primary** entry points are `firefox-lldb` and `firefox-lldb-dap`. Both
+embed LLDB compiled to WebAssembly and run everything (frontend, platform
+server, per-tab GDB server, RDP client) in a single Node process:
 
 ```
-REPL (src/cli/repl.ts)
-   │  drives
+REPL (src/cli/repl.ts) or DAP over stdio (upstream lldb-dap)
+   │
    ▼
 wasm LLDB (Worker)  ──RSP over inprocess://──►  attach-shim ──►  per-tab GDB server
                                                                         │
@@ -34,26 +34,40 @@ servers and listens on a real TCP port for an external native wasm-plugin lldb.
 The two paths share everything from the per-tab GDB server inward; they differ
 only in how the RSP bytes reach it.
 
-### Embedded wasm LLDB (`firefox-lldb`)
+### Embedded wasm LLDB (`firefox-lldb` and `firefox-lldb-dap`)
 
-The `firefox-lldb` command does not spawn a native lldb. It runs the platform
-server in-process and drives LLDB compiled to WebAssembly (the `lldb-wasm`
-package, built from `../llvm-project/lldb/tools/lldb-wasm`) as a real
-interactive `(lldb)` prompt. Because the wasm LLDB cannot open TCP sockets, each
-RSP connection it would normally make (the platform connection and every per-tab
-GDB server) is bridged through an in-memory channel: LLDB connects to
-`inprocess://<channelId>` and `firefox-lldb` pumps bytes between that channel and
-a localhost socket to the in-process server.
+Neither embedded command spawns a native lldb. They run the platform server
+in-process and drive LLDB compiled to WebAssembly (the `lldb-wasm` package,
+built from `../llvm-project/lldb/tools/lldb-wasm`). Because the wasm LLDB cannot
+open TCP sockets, each RSP connection it would normally make (the platform
+connection and every per-tab GDB server) is bridged through an in-memory
+channel. LLDB connects to `inprocess://<channelId>` and `EmbeddedLldbBridge`
+pumps bytes between that channel and a localhost socket to the in-process
+server.
 
 ```
 wasm LLDB (Worker)  ──inprocess://N──►  channel N  ◄──pump──►  net.Socket  ──►  platform / per-tab server (same process)
 ```
 
-This requires the wasm LLDB to select the `wasm` platform (`platform select
-wasm`), which routes `platform connect` through `PlatformWasmRemoteGDBServer`;
-its `MakeUrl` turns the per-tab port returned by `qLaunchGDBServer` into an
-`inprocess://` URL. See the package's own docs for the interpreter and transport
-internals.
+This requires the wasm LLDB to select `remote-gdb-server`, whose wasm build
+routes connections through `PlatformWasmRemoteGDBServer`; its `MakeUrl` turns
+the per-tab port returned by `qLaunchGDBServer` into an `inprocess://` URL. See
+the package's own docs for the interpreter and transport internals.
+
+### DAP frontend (`src/cli/firefox-lldb-dap.ts`)
+
+`firefox-lldb-dap` starts the builtin `lldb-dap` loop on a pthread inside
+`lldb-wasm`, then pumps its framed byte stream between the DAP session and
+process stdin/stdout. The pthread is essential: attach, stepping, and other
+LLDB operations make synchronous GDB-remote round trips, while the JavaScript
+worker must remain free to pump the in-process channel bytes that complete
+those operations.
+
+The adapter pre-initializes LLDB with the bridged platform connection. A client
+then uses `attachCommands: ["process attach --plugin wasm --pid 1"]`; ordinary
+pid attach does not know to select the wasm process plugin. After that, request
+handling and IDE-facing capabilities are upstream LLDB-DAP. All launcher and
+RDP diagnostics stay on stderr so stdout remains a protocol-only stream.
 
 ### REPL (`src/cli/repl.ts`)
 

@@ -45,6 +45,7 @@ test("--log captures a full transcript while keeping the terminal clean", async 
 
   const fx = FIXTURES.factorial;
   const staticServer = await startStaticServer(fx.pageDir);
+  const platformPort = await freePort();
   const rdpPort = await freePort();
 
   // --log has no path argument (auto-named, relative to cwd), so run with cwd
@@ -59,6 +60,8 @@ test("--log captures a full transcript while keeping the terminal clean", async 
       "--launch",
       "--headless",
       "--log",
+      "--port",
+      String(platformPort),
       "--rdp-port",
       String(rdpPort),
       "--url",

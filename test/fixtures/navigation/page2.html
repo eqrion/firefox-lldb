@@ -18,6 +18,16 @@
     function runFactorial() {
       return factorial(10);
     }
+
+    if (new URLSearchParams(location.search).has('dap')) {
+      (function poll() {
+        if (!factorial) return setTimeout(poll, 20);
+        // The first hit lets LLDB consume the module change and rebind the
+        // source breakpoint; the second is the user-visible stop.
+        runFactorial();
+        setTimeout(runFactorial, 1000);
+      })();
+    }
   </script>
 </body>
 </html>

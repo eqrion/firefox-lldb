@@ -27,6 +27,10 @@ Requires Firefox installed in a standard location (see `findFirefoxBinary` in
    session pthread so blocking GDB-remote round-trips don't stall the worker that
    pumps the bridge.
 
+`dap-harness.mjs` instead spawns the real `firefox-lldb-dap` stdio adapter and
+speaks framed DAP to it. This covers the second embedded frontend without
+bypassing its CLI or transport plumbing.
+
 ## Tests
 
 ### Infrastructure (no Firefox required)
@@ -40,6 +44,38 @@ Requires Firefox installed in a standard location (see `findFirefoxBinary` in
 ### Channel launch
 
 - `launch_nightly.test.mjs` — when Firefox Nightly is installed, `--nightly` launches it, verifies its RDP endpoint, and cleans it up without hanging.
+
+### DAP frontend
+
+- `dap.test.mjs` — initialize/attach/configuration handshake, function breakpoint, stopped/continued events, threads, stack, scopes, locals, and disconnect.
+- `dap_source_breakpoints.test.mjs` — verified C++ source breakpoint and exact source location.
+- `dap_stepping.test.mjs` — source-level `stepIn`, `next`, and `stepOut` requests.
+- `dap_variables.test.mjs` — nested variables, evaluate success/error, graceful mutation failure, and linear-memory reads.
+- `dap_breakpoint_options.test.mjs` — conditional logpoints, hit conditions, and output events.
+- `dap_trap.test.mjs` — trap stop, `exceptionInfo`, stack, and locals in the trapping frame.
+- `dap_threaded.test.mjs` — worker-thread breakpoint, thread enumeration, stack, and continue.
+- `dap_separate_dwarf.test.mjs` — source and named locals from a separately fetched debug file.
+- `dap_setup_retry.test.mjs` — failed setup observes and cleans up its still-pending attach request before a successful retry.
+- `dap_sourcemap.test.mjs` — source-map-derived locations and synthesized variable-name behavior.
+- `dap_navigation.test.mjs` — target replacement, module re-sync, and source-breakpoint rebinding.
+- `dap_lifecycle.test.mjs` — invalid attach failure and clean disconnect.
+- `dap_pause.test.mjs` — the current `SBProcess::Stop()` timeout is reported as a structured DAP failure; the TUI's direct RDP interrupt remains the working pause path.
+- `dap_breakpoint_updates.test.mjs` — replaces function and source breakpoints while stopped, including conditions across recursive calls.
+- `dap_disassembly.test.mjs` — disassembles the live wasm PC, installs an instruction breakpoint from the result, and stops at its exact address.
+- `dap_parallel_queries.test.mjs` — correlates concurrent evaluate, threads, modules, stack, debug-console, and completion requests.
+- `dap_thread_instruction_step.test.mjs` — instruction-steps a pthread and continues it to a dynamically replaced source breakpoint.
+- `dap_disconnect_running.test.mjs` — the running-target detach timeout is returned as a structured DAP failure rather than hanging or corrupting the stream.
+
+These tests intentionally drive framed stdin/stdout directly rather than a
+specific editor. The `lldb-wasm` package integration suite separately covers
+fragmented and coalesced frames, output larger than its drain buffer, malformed
+input/EOF, duplicate lifecycle operations, and client destruction.
+
+The modules request currently reports LLDB's nonzero `totalModules`, but its
+`modules` array is empty because the synthetic wasm modules do not provide the
+module identifiers expected by upstream lldb-dap. The parallel-query test
+records that behavior explicitly so improving it later produces a deliberate
+test update.
 
 ### Core (call stack, locals, control flow)
 

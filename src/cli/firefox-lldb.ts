@@ -12,7 +12,6 @@
 // servers through in-memory channels: LLDB connects to "inprocess://<id>" and
 // we pump bytes between channel <id> and a localhost socket.
 
-import net from "node:net";
 import { readFile } from "node:fs/promises";
 import { LLDBClient } from "lldb-wasm";
 import { parseCliArgs, startPlatformServer } from "../core/platform-session.js";
@@ -23,7 +22,7 @@ import { captureFatalErrors, defaultLogPath, openSessionLog } from "./session-lo
 import { runRepl } from "./repl.js";
 import type { RdpWasmSession } from "../rdp/session.js";
 import { debugEnvEnabled } from "../config.js";
-import type { Logger } from "../logging.js";
+import { EmbeddedLldbBridge } from "./embedded-lldb.js";
 
 // lldb::ReturnStatus values at or above this are failures. Keep the automatic
 // attach retry local to the CLI: an uncontrolled page reload can invalidate the
@@ -57,49 +56,6 @@ async function attachWithRetry(
   throw new Error(`automatic attach failed after ${AUTO_ATTACH_ATTEMPTS} attempts: ${lastError}`);
 }
 
-// Open bridge sockets, tracked so we can tear them down on exit (otherwise
-// net.Server.close() blocks on the live connections).
-const bridgeSockets = new Set<net.Socket>();
-
-// Bridge a localhost TCP RSP server to an in-process channel the wasm LLDB
-// connects to via "inprocess://<id>". Returns the channel ID.
-async function bridgeTcp(client: LLDBClient, port: number, logger: Logger): Promise<number> {
-  const channelId = await client.createChannel();
-  const socket = net.connect(port, "127.0.0.1");
-  bridgeSockets.add(socket);
-  socket.on("close", () => bridgeSockets.delete(socket));
-  socket.setNoDelay(true);
-  // Capture the connect result now: the loopback connect can complete during the
-  // bridgeChannel await below, and a listener attached after that would miss the
-  // one-shot "connect" event and hang forever.
-  const connected = new Promise<void>((resolve, reject) => {
-    socket.once("connect", resolve);
-    socket.once("error", reject);
-  });
-  // server -> LLDB
-  socket.on("data", (d) => {
-    logger.debug(`[bridge channel ${channelId}] server-to-LLDB queued ${d.length} bytes`);
-    void client
-      .channelServerWrite(channelId, new Uint8Array(d))
-      .then((written) => {
-        logger.debug(
-          `[bridge channel ${channelId}] server-to-LLDB accepted ${written}/${d.length} bytes`
-        );
-      })
-      .catch((err) => {
-        logger.error(
-          `[bridge] server-to-LLDB write failed: ${err instanceof Error ? err.message : String(err)}`
-        );
-        socket.destroy();
-      });
-  });
-  socket.on("error", (err) => logger.warn(`[bridge] socket error: ${err.message}`));
-  // LLDB -> server
-  await client.bridgeChannel(channelId, (data) => void socket.write(Buffer.from(data)));
-  await connected;
-  return channelId;
-}
-
 async function main(): Promise<void> {
   const args = parseCliArgs(process.argv.slice(2));
   const verbose = args.verbose || debugEnvEnabled();
@@ -113,6 +69,7 @@ async function main(): Promise<void> {
   const logger = createLogger({ verbose, quiet: true, sessionLog });
 
   const client = await LLDBClient.create();
+  const bridge = new EmbeddedLldbBridge(client, logger);
   // A module's separate DWARF file is fetched from the page's server; anything
   // else LLDB opens (source text, a local symbol file) comes off local disk.
   const debugFiles = new DebugFileRegistry(logger);
@@ -125,7 +82,7 @@ async function main(): Promise<void> {
   const cleanup = async (code = 0) => {
     if (exiting) return;
     exiting = true;
-    for (const s of bridgeSockets) s.destroy();
+    bridge.close();
     for (const work of [handle?.shutdown(), client.destroy()]) {
       try {
         await work;
@@ -168,7 +125,7 @@ async function main(): Promise<void> {
   // wasm LLDB connects to inprocess://<id> (PlatformWasmRemoteGDBServer::MakeUrl).
   try {
     handle = await startPlatformServer(args, {
-      wrapConnectPort: (port) => bridgeTcp(client, port, logger),
+      wrapConnectPort: (port) => bridge.bridgeTcp(port),
       logger,
       debugFiles,
       onTab: (tab, pid) => repl.print(`tab available: ${tab.url}\n  attach --pid ${pid}`),
@@ -210,7 +167,7 @@ async function main(): Promise<void> {
     // Bridge the platform connection itself, then drive the platform setup the
     // native wrapper used to pass via `-o`. These produce noisy connect chatter,
     // so we run them quietly and only surface the attach / tab list.
-    const platformChannel = await bridgeTcp(client, handle.port, logger);
+    const platformChannel = await bridge.bridgeTcp(handle.port);
     await client.sessionCommand("platform select remote-gdb-server");
     await client.sessionCommand(`platform connect inprocess://${platformChannel}`);
     await client.sessionCommand("command alias attach process attach --plugin wasm");
