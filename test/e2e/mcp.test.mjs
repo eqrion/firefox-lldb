@@ -16,6 +16,8 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { FIXTURES, startStaticServer } from "./harness.mjs";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+const MCP_LAUNCH_TIMEOUT_MS = 120_000;
+const SESSION_TIMEOUT_MS = 150_000;
 
 async function connect() {
   const transport = new StdioClientTransport({
@@ -35,9 +37,13 @@ async function connect() {
   return client;
 }
 
-const send = async (client, name, args = {}) => {
-  const res = await client.callTool({ name, arguments: args });
-  return (res.content ?? []).map((c) => c.text ?? "").join("");
+const send = async (client, name, args = {}, options) => {
+  try {
+    const res = await client.callTool({ name, arguments: args }, undefined, options);
+    return (res.content ?? []).map((c) => c.text ?? "").join("");
+  } catch (error) {
+    throw new Error(`${name} failed`, { cause: error });
+  }
 };
 
 // Race `work` against a deadline. A hung MCP tool call (e.g. the launched
@@ -67,15 +73,23 @@ async function withSession(
   try {
     await withDeadline(
       (async () => {
-        const banner = await send(client, "lldb_launch", {
-          url,
-          headless: true,
-          fire: fire ?? fx.fire,
-        });
+        // PtyRepl allows startup to take 90 seconds, so override the MCP
+        // SDK's 60-second request default. A loaded CI runner can cross the
+        // SDK deadline while the launch is still making valid progress.
+        const banner = await send(
+          client,
+          "lldb_launch",
+          {
+            url,
+            headless: true,
+            fire: fire ?? fx.fire,
+          },
+          { timeout: MCP_LAUNCH_TIMEOUT_MS }
+        );
         assert.match(banner, /marionette-port \d+/, `launch banner: ${banner}`);
         await fn(client, fx, banner);
       })(),
-      90_000
+      SESSION_TIMEOUT_MS
     );
   } finally {
     // A graceful shutdown RPC depends on the (possibly wedged) server
