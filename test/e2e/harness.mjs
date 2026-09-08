@@ -703,8 +703,8 @@ export class Session {
     const staticServer = await startStaticServer(fx.pageDir, { requireAuth: fx.requireAuth });
     const url = `http://127.0.0.1:${staticServer.port}/index.html`;
 
-    const client = await LLDBClient.create();
     const trace = tracingLogger();
+    const client = await LLDBClient.create({ logger: trace });
     trace.stage("LLDB client ready");
     // Serve each module's separate DWARF file from the fixture's own server.
     // Nothing else is served: LLDB has no access to the host source tree here.
@@ -762,16 +762,18 @@ export class Session {
   // link. Exercises the off-worker session + transport bridge end-to-end
   // without needing a real wasm tab. Used by the infrastructure smoke test.
   static async platformOnly() {
-    const client = await LLDBClient.create();
-    const session = new Session(client, null, null);
+    const trace = tracingLogger();
+    const client = await LLDBClient.create({ logger: trace });
+    const session = new Session(client, null, null, trace);
     const rdpPort = await freePort();
     const args = parseCliArgs(["--connect", "--port", "0", "--rdp-port", String(rdpPort)]);
     const handle = await startPlatformServer(args, {
       wrapConnectPort: (port) => session.#bridgeTcp(port),
+      logger: trace,
     });
     session.#handle = handle;
     const c0 = await session.#bridgeTcp(handle.port, "platform");
-    await platformConnect(client, c0);
+    await platformConnect(client, c0, trace);
     return session;
   }
 

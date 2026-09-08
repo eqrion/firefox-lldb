@@ -76,7 +76,7 @@ async function main(): Promise<void> {
   if (persistentLog) process.stderr.write(`logging this session to ${sessionLog.path}\n`);
   const logger = createLogger({ verbose, quiet: true, sessionLog });
 
-  const client = await LLDBClient.create();
+  const client = await LLDBClient.create({ logger });
   const bridge = new EmbeddedLldbBridge(client, logger);
   // A module's separate DWARF file is fetched from the page's server; anything
   // else LLDB opens (source text, a local symbol file) comes off local disk.

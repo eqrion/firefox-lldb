@@ -68,8 +68,8 @@ export class ReplSession {
     const staticServer = await startStaticServer(fx.pageDir);
     const url = `http://127.0.0.1:${staticServer.port}/index.html`;
 
-    const client = await LLDBClient.create();
     const trace = tracingLogger();
+    const client = await LLDBClient.create({ logger: trace });
     trace.stage("LLDB client ready");
     const rs = new ReplSession();
     rs.#client = client;

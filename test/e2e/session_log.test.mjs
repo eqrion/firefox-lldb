@@ -147,9 +147,12 @@ test("--log captures a full transcript while keeping the terminal clean", async 
     assert.match(contents, new RegExp(`stdin\\s+breakpoint set -n ${fx.breakFunc}$`, "m"));
     assert.match(contents, /stdout\s+Breakpoint 1/m);
     assert.match(contents, /debug\s+\[rdp] >>/m);
+    assert.match(contents, /debug\s+\[lldb-wasm] worker\.started /m);
+    assert.match(contents, /debug\s+\[lldb-wasm] operation\.completed /m);
 
     // The debug trace that went to the file must never have reached the pty.
     assert.doesNotMatch(stripAnsi(out), /\[debug]\s*\[rdp]/);
+    assert.doesNotMatch(stripAnsi(out), /\[lldb-wasm]/);
   } catch (err) {
     // The log is a full RDP transcript of whatever went wrong, and this test is
     // one of the few that drives a real attach with no retry. Keep it where CI's

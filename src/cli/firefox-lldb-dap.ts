@@ -37,7 +37,7 @@ async function main(): Promise<void> {
     quiet: true,
     sessionLog,
   });
-  const client = await LLDBClient.create();
+  const client = await LLDBClient.create({ logger });
   const bridge = new EmbeddedLldbBridge(client, logger);
   const debugFiles = new DebugFileRegistry(logger);
   client.setFileProvider(
