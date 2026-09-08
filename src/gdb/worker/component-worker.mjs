@@ -14,17 +14,28 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { WASIShim } from "@bytecodealliance/preview2-shim/instantiation";
 import { instantiate } from "../generated/gdbstub.js";
-import { encode, decode, CTRL_STATE, CTRL_LEN, STATE_IDLE, STATE_REQUEST } from "./wire.mjs";
+import {
+  encode,
+  decode,
+  CTRL_STATE,
+  CTRL_LEN,
+  STATE_IDLE,
+  STATE_REQUEST,
+  STATE_RESPONSE,
+} from "./wire.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const GEN = path.join(here, "../generated");
 
 const ctrl = new Int32Array(workerData.sab, 0, 4);
 const data = new Uint8Array(workerData.sab, 16);
+let nextSequence = 1;
 
 // Synchronous RPC: write request, signal main, block until the response lands.
 function rpc(type, id, method, args) {
-  const msg = encode({ type, id, method, args });
+  const sequence = nextSequence++;
+  const operation = `${type}.${method}#${sequence}`;
+  const msg = encode({ sequence, type, id, method, args });
   if (msg.length > data.length) {
     const err = new Error("out-of-bounds");
     err.payload = "out-of-bounds";
@@ -34,16 +45,36 @@ function rpc(type, id, method, args) {
   Atomics.store(ctrl, CTRL_LEN, msg.length);
   Atomics.store(ctrl, CTRL_STATE, STATE_REQUEST);
   parentPort.postMessage(1);
-  Atomics.wait(ctrl, CTRL_STATE, STATE_REQUEST);
+  let waitResult;
+  while (Atomics.load(ctrl, CTRL_STATE) === STATE_REQUEST) {
+    waitResult = Atomics.wait(ctrl, CTRL_STATE, STATE_REQUEST);
+  }
+  const state = Atomics.load(ctrl, CTRL_STATE);
   const len = Atomics.load(ctrl, CTRL_LEN);
-  const resp = decode(data.subarray(0, len));
+  let resp;
+  try {
+    resp = decode(data.subarray(0, len));
+  } catch (cause) {
+    throw new Error(
+      `could not decode gdb RPC response for ${operation} ` +
+        `(wait=${waitResult ?? "not-waited"}, state=${state}, len=${len})`,
+      { cause }
+    );
+  }
   Atomics.store(ctrl, CTRL_STATE, STATE_IDLE);
+  if (state !== STATE_RESPONSE || resp?.sequence !== sequence || typeof resp?.ok !== "boolean") {
+    throw new Error(
+      `invalid gdb RPC response for ${operation} ` +
+        `(wait=${waitResult ?? "not-waited"}, state=${state}, len=${len}, ` +
+        `responseSequence=${String(resp?.sequence)}, keys=${Object.keys(resp ?? {}).join(",")})`
+    );
+  }
   if (!resp.ok) {
     // jco lifts a thrown error into a WIT `result` Err only via `.payload`
     // (which must be the error enum's tag, e.g. "out-of-bounds"); a bare Error
     // is re-thrown. Attach payload so debuggee methods can signal Err.
-    const err = new Error(resp.error || "rpc error");
-    err.payload = resp.error;
+    const err = new Error(`${operation}: ${resp.error || "rpc error"}`);
+    if (resp.error) err.payload = resp.error;
     throw err;
   }
   return wrap(resp.value);

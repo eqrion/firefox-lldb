@@ -51,6 +51,7 @@ async function main(): Promise<void> {
   let exitCode = 0;
   let failureReported = false;
   const reportFailure = (error: unknown): void => {
+    if (failureReported) return;
     session?.logState("error");
     logger.error(formatErrorWithLog(error, sessionLog));
     failureReported = true;
@@ -104,6 +105,10 @@ async function main(): Promise<void> {
         debugFiles,
         onRdpSession: (rdpSession) => {
           session = rdpSession;
+        },
+        onGdbWorkerFailure: (error) => {
+          reportFailure(error);
+          void (dap?.close() ?? Promise.resolve()).finally(() => cleanup(1));
         },
       }
     );

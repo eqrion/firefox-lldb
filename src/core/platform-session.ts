@@ -231,6 +231,9 @@ export interface StartOptions {
    * The second argument interrupts the running target: sends RDP pauses to all
    * threads and immediately unblocks the gdbstub's EventFuture.finish. */
   onSession?: (session: RdpWasmSession, interrupt: () => void) => void;
+  /** Called when a per-tab gdbstub worker crashes. Embedded frontends use this
+   * to fail promptly and retain their diagnostic transcript. */
+  onGdbWorkerFailure?: (error: Error) => void;
 }
 
 export interface PlatformServerHandle {
@@ -366,6 +369,7 @@ function createTabLauncher(
         onInfo: (m: string) => logger.debug(`[component] ${m}`),
         onTrace: (m: string) => logger.debug(`[gdbstub] ${boundedTrace(m)}`),
         onError: (m: string) => logger.error(m),
+        onFailure: opts.onGdbWorkerFailure,
         verbose: debugEnabled,
       });
       await gdbServer.ready;

@@ -25,9 +25,10 @@ import {
  * @param {(msg: string) => void} [opts.onInfo]
  * @param {(msg: string) => void} [opts.onTrace]
  * @param {(msg: string) => void} [opts.onError]  Defaults to console.error.
+ * @param {(error: Error) => void} [opts.onFailure] Called when the worker crashes.
  * @param {boolean} [opts.verbose]
  */
-export function startGdbServer({ dispatch, port, onInfo, onTrace, onError, verbose }) {
+export function startGdbServer({ dispatch, port, onInfo, onTrace, onError, onFailure, verbose }) {
   const reportError = onError ?? ((msg) => console.error(msg));
   const sab = new SharedArrayBuffer(16 + DATA_BYTES);
   const ctrl = new Int32Array(sab, 0, CTRL_WORDS);
@@ -49,11 +50,15 @@ export function startGdbServer({ dispatch, port, onInfo, onTrace, onError, verbo
     if (m === 1) {
       let out;
       let req;
+      const started = performance.now();
       try {
         const len = Atomics.load(ctrl, CTRL_LEN);
         if (len < 0 || len > data.length) throw new Error("invalid worker request length");
         req = decode(data.subarray(0, len));
-        out = encode({ ok: true, value: await dispatch(req) });
+        onTrace?.(
+          `[rpc] request ${req.sequence ?? "?"} ${req.type}.${req.method} resource=${req.id}`
+        );
+        out = encode({ ok: true, sequence: req.sequence, value: await dispatch(req) });
       } catch (e) {
         // Only the message crosses the wire and the worker re-throws it as a
         // fresh Error, so the stack a user sees points at that re-throw and
@@ -67,21 +72,31 @@ export function startGdbServer({ dispatch, port, onInfo, onTrace, onError, verbo
           // The message must stay verbatim: the worker assigns it to
           // `err.payload`, which jco matches against the WIT error enum tag
           // (see the "out-of-bounds" thrower in rdp-debuggee.ts).
-          out = encode({ ok: false, error: String(e?.message || e) });
+          out = encode({
+            ok: false,
+            sequence: req?.sequence,
+            error: String(e?.message || e),
+          });
         } catch {
-          out = encode({ ok: false, error: "rpc failure" });
+          out = encode({ ok: false, sequence: req?.sequence, error: "rpc failure" });
         }
       }
       if (out.length > data.length) {
         // A response that overflows the shared buffer (e.g. an unreasonable
         // memory read produced by a non-wasm-plugin session) would throw on
         // data.set and kill the worker. Reply with an error instead.
-        out = encode({ ok: false, error: "out-of-bounds" });
+        out = encode({ ok: false, sequence: req?.sequence, error: "out-of-bounds" });
       }
       data.set(out, 0);
       Atomics.store(ctrl, CTRL_LEN, out.length);
       Atomics.store(ctrl, CTRL_STATE, STATE_RESPONSE);
       Atomics.notify(ctrl, CTRL_STATE);
+      if (req) {
+        onTrace?.(
+          `[rpc] response ${req.sequence ?? "?"} ${req.type}.${req.method} ` +
+            `ok=${String(decode(out).ok)} durationMs=${Math.round(performance.now() - started)}`
+        );
+      }
     } else if (m && m.info) {
       onInfo?.(m.info);
       // The component prints "Debugger listening on 127.0.0.1:PORT" once the
@@ -113,6 +128,7 @@ export function startGdbServer({ dispatch, port, onInfo, onTrace, onError, verbo
     // the caller who is awaiting gdbServer.ready.
     rejectReady?.(e);
     rejectReady = null;
+    onFailure?.(e);
   });
   // Also reject ready on clean exit (e.g. stop() called before 'listening').
   worker.on("exit", () => {

@@ -298,6 +298,10 @@ export class DAPFixtureSession {
     return this.#client.waitForEvent(event, predicate, timeoutMs);
   }
 
+  stderr() {
+    return this.#client.stderr();
+  }
+
   async continueAndWait(threadId) {
     const stopped = this.waitForEvent("stopped");
     await this.requestOk("continue", { threadId });

@@ -43,4 +43,5 @@ test("DAP stepIn, stepOut, and next preserve source-level state", async () => {
   const outside = await topStack(session, threadId);
   assert.ok(outside.length > 0);
   assert.equal(outside[0].source.path.endsWith("math.cpp"), true);
+  assert.doesNotMatch(session.stderr(), /\[gdb worker error\]/);
 });
