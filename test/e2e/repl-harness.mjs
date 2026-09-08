@@ -113,6 +113,9 @@ export class ReplSession {
         const handle = await startPlatformServer(args, {
           wrapConnectPort: (port) => rs.#bridgeTcp(port),
           logger: trace,
+          onRdpSession: (s) => {
+            rs.session = s;
+          },
           onSession: (s, interrupt) => {
             rs.session = s;
             rs.#triggerInterrupt = interrupt;
@@ -177,6 +180,10 @@ export class ReplSession {
 
   output() {
     return stripAnsi(this.#out);
+  }
+
+  logState(event = "snapshot") {
+    this.session?.logState(event);
   }
 
   shutdown() {

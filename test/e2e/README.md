@@ -37,6 +37,12 @@ bypassing its CLI or transport plumbing.
 
 - `session_smoke.test.mjs` — platform connect, `version`, process state before attach.
 
+### CLI diagnostics
+
+- `session_log.test.mjs` — failed default runs retain their temporary transcript
+  and print its tail/path; `--log` persists the complete interactive transcript
+  while keeping debug traffic out of the terminal (the latter case uses Firefox).
+
 ### Launch safety (Firefox binary must be present, but none is spawned)
 
 - `launch_port_conflict.test.mjs` — launch refuses an occupied RDP port and rolls Firefox back when the platform port bind fails.

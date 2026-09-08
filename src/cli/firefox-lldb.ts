@@ -18,7 +18,13 @@ import { parseCliArgs, startPlatformServer } from "../core/platform-session.js";
 import { DebugFileRegistry } from "../core/debug-files.js";
 import { focusFirefoxWindow } from "../rdp/firefox.js";
 import { createLogger } from "./logger.js";
-import { captureFatalErrors, defaultLogPath, openSessionLog } from "./session-log.js";
+import {
+  captureFatalErrors,
+  defaultLogPath,
+  formatErrorWithLog,
+  openSessionLog,
+  temporaryLogPath,
+} from "./session-log.js";
 import { runRepl } from "./repl.js";
 import type { RdpWasmSession } from "../rdp/session.js";
 import { debugEnvEnabled } from "../config.js";
@@ -60,12 +66,14 @@ async function main(): Promise<void> {
   const args = parseCliArgs(process.argv.slice(2));
   const verbose = args.verbose || debugEnvEnabled();
 
-  const sessionLog = args.log ? openSessionLog(defaultLogPath(), process.argv.slice(2)) : undefined;
-  if (sessionLog) {
-    sessionLog.captureStdio();
-    captureFatalErrors(sessionLog);
-    process.stderr.write(`logging this session to ${sessionLog.path}\n`);
-  }
+  const persistentLog = args.log;
+  const sessionLog = openSessionLog(
+    persistentLog ? defaultLogPath() : temporaryLogPath(),
+    process.argv.slice(2)
+  );
+  sessionLog.captureStdio();
+  captureFatalErrors(sessionLog);
+  if (persistentLog) process.stderr.write(`logging this session to ${sessionLog.path}\n`);
   const logger = createLogger({ verbose, quiet: true, sessionLog });
 
   const client = await LLDBClient.create();
@@ -78,21 +86,41 @@ async function main(): Promise<void> {
   );
 
   let handle: Awaited<ReturnType<typeof startPlatformServer>> | undefined;
+  let session: RdpWasmSession | undefined;
   let exiting = false;
+  let exitCode = 0;
+  let failureReported = false;
+  const reportFailure = (err: unknown) => {
+    session?.logState("error");
+    logger.error(formatErrorWithLog(err, sessionLog));
+    failureReported = true;
+  };
   const cleanup = async (code = 0) => {
+    exitCode ||= code;
+    process.exitCode = exitCode;
     if (exiting) return;
     exiting = true;
+    // LLDB worker teardown can release Node's final referenced handle before
+    // this async function reaches process.exit(). Preserve the intended status
+    // if the runtime exits naturally while cleanup is still settling.
+    const cleanupKeepalive = setInterval(() => {}, 1000);
     bridge.close();
     for (const work of [handle?.shutdown(), client.destroy()]) {
       try {
         await work;
       } catch (err) {
         logger.error(`[cleanup] ${err instanceof Error ? err.message : String(err)}`);
-        code = code || 1;
+        exitCode ||= 1;
+        process.exitCode = exitCode;
       }
     }
-    sessionLog?.close();
-    process.exit(code);
+    if (exitCode !== 0 && !failureReported) {
+      session?.logState("cleanup-failed");
+      logger.error(formatErrorWithLog(new Error("session cleanup failed"), sessionLog));
+    }
+    sessionLog.close({ remove: exitCode === 0 && !persistentLog });
+    clearInterval(cleanupKeepalive);
+    process.exit(exitCode);
   };
   process.on("SIGTERM", () => void cleanup(0));
   process.on("SIGHUP", () => void cleanup(0));
@@ -107,7 +135,6 @@ async function main(): Promise<void> {
 
   // The REPL owns the terminal; `js` commands and console streaming need the
   // live RDP session, which the platform server hands us via onSession.
-  let session: RdpWasmSession | undefined;
   let triggerInterrupt: (() => void) | undefined;
   const repl = runRepl({
     client,
@@ -124,39 +151,45 @@ async function main(): Promise<void> {
   // platform server returns the channel ID as the connection "port" and the
   // wasm LLDB connects to inprocess://<id> (PlatformWasmRemoteGDBServer::MakeUrl).
   try {
-    handle = await startPlatformServer(args, {
-      wrapConnectPort: (port) => bridge.bridgeTcp(port),
-      logger,
-      debugFiles,
-      onTab: (tab, pid) => repl.print(`tab available: ${tab.url}\n  attach --pid ${pid}`),
-      onSession: (s, interrupt) => {
-        session = s;
-        triggerInterrupt = interrupt;
-        void s.streamConsole((m) => repl.printConsole(m));
-        // "navigated" fires as soon as the old top-level target is gone, before
-        // the new one (if any) arrives — too early to know the destination URL.
-        // Wait for the next top-level "target" to report where the page landed;
-        // if none ever arrives, "detached" below reports the tab closed instead.
-        let awaitingNavigationTarget = false;
-        s.on("navigated", () => {
-          repl.print("page navigating; re-syncing debug session...");
-          awaitingNavigationTarget = true;
-        });
-        s.on("target", (info) => {
-          if (!info.isTopLevel || !awaitingNavigationTarget) return;
-          awaitingNavigationTarget = false;
-          repl.print(`page navigated to ${info.url}`);
-        });
-        s.on("detached", () => {
-          repl.print("the attached tab was closed; detaching.");
-          session = undefined;
-          triggerInterrupt = undefined;
-          void client
-            .sessionCommand("process detach")
-            .catch((err) => logger.debug(`[cleanup] LLDB detach failed: ${String(err)}`));
-        });
-      },
-    });
+    handle = await startPlatformServer(
+      { ...args, log: true },
+      {
+        wrapConnectPort: (port) => bridge.bridgeTcp(port),
+        logger,
+        debugFiles,
+        onRdpSession: (rdpSession) => {
+          session = rdpSession;
+        },
+        onTab: (tab, pid) => repl.print(`tab available: ${tab.url}\n  attach --pid ${pid}`),
+        onSession: (s, interrupt) => {
+          session = s;
+          triggerInterrupt = interrupt;
+          void s.streamConsole((m) => repl.printConsole(m));
+          // "navigated" fires as soon as the old top-level target is gone, before
+          // the new one (if any) arrives — too early to know the destination URL.
+          // Wait for the next top-level "target" to report where the page landed;
+          // if none ever arrives, "detached" below reports the tab closed instead.
+          let awaitingNavigationTarget = false;
+          s.on("navigated", () => {
+            repl.print("page navigating; re-syncing debug session...");
+            awaitingNavigationTarget = true;
+          });
+          s.on("target", (info) => {
+            if (!info.isTopLevel || !awaitingNavigationTarget) return;
+            awaitingNavigationTarget = false;
+            repl.print(`page navigated to ${info.url}`);
+          });
+          s.on("detached", () => {
+            repl.print("the attached tab was closed; detaching.");
+            session = undefined;
+            triggerInterrupt = undefined;
+            void client
+              .sessionCommand("process detach")
+              .catch((err) => logger.debug(`[cleanup] LLDB detach failed: ${String(err)}`));
+          });
+        },
+      }
+    );
 
     // Quit when a launched Firefox goes away (#24).
     void handle.firefoxExited?.then(() => {
@@ -184,7 +217,7 @@ async function main(): Promise<void> {
     }
     repl.start(intro);
   } catch (err) {
-    logger.error(err instanceof Error ? (err.stack ?? err.message) : String(err));
+    reportFailure(err);
     await cleanup(1);
   }
 }

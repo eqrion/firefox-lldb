@@ -11,26 +11,49 @@ import { pathToFileURL } from "node:url";
 import { parseCliArgs, startPlatformServer } from "../core/platform-session.js";
 import { exitWhenOrphaned, debugEnvEnabled } from "../config.js";
 import { createLogger } from "./logger.js";
-import { captureFatalErrors, defaultLogPath, openSessionLog } from "./session-log.js";
+import {
+  captureFatalErrors,
+  defaultLogPath,
+  formatErrorWithLog,
+  openSessionLog,
+  temporaryLogPath,
+} from "./session-log.js";
+import type { RdpWasmSession } from "../rdp/session.js";
 
 async function main(): Promise<void> {
   const args = parseCliArgs(process.argv.slice(2));
   const verbose = args.verbose || debugEnvEnabled();
 
-  const sessionLog = args.log ? openSessionLog(defaultLogPath(), process.argv.slice(2)) : undefined;
-  if (sessionLog) {
-    sessionLog.captureStdio({ stdout: true });
-    captureFatalErrors(sessionLog);
-    process.stderr.write(`logging this session to ${sessionLog.path}\n`);
-  }
+  const persistentLog = args.log;
+  const sessionLog = openSessionLog(
+    persistentLog ? defaultLogPath() : temporaryLogPath(),
+    process.argv.slice(2)
+  );
+  sessionLog.captureStdio({ stdout: true });
+  captureFatalErrors(sessionLog);
+  if (persistentLog) process.stderr.write(`logging this session to ${sessionLog.path}\n`);
   const logger = createLogger({ verbose, quiet: false, sessionLog });
 
   let handle: Awaited<ReturnType<typeof startPlatformServer>>;
+  let session: RdpWasmSession | undefined;
+  const reportFailure = (error: unknown): void => {
+    session?.logState("error");
+    logger.error(formatErrorWithLog(error, sessionLog));
+  };
   try {
-    handle = await startPlatformServer(args, { logger });
+    handle = await startPlatformServer(
+      { ...args, log: true },
+      {
+        logger,
+        onRdpSession: (rdpSession) => {
+          session = rdpSession;
+        },
+      }
+    );
   } catch (err) {
-    sessionLog?.close();
-    throw err;
+    reportFailure(err);
+    sessionLog.close();
+    process.exit(1);
   }
   // Stdout is the control channel for the firefox-lldb wrapper; stderr carries logs.
   process.stdout.write(`platform server ready on connect://localhost:${handle.port}\n`);
@@ -41,12 +64,12 @@ async function main(): Promise<void> {
     shuttingDown = true;
     void handle.shutdown().then(
       () => {
-        sessionLog?.close();
+        sessionLog.close({ remove: !persistentLog });
         process.exit(0);
       },
       (err) => {
-        console.error(err);
-        sessionLog?.close();
+        reportFailure(err);
+        sessionLog.close();
         process.exit(1);
       }
     );

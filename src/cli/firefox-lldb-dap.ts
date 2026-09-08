@@ -13,10 +13,30 @@ import { DebugFileRegistry } from "../core/debug-files.js";
 import { debugEnvEnabled } from "../config.js";
 import { createLogger } from "./logger.js";
 import { EmbeddedLldbBridge } from "./embedded-lldb.js";
+import type { RdpWasmSession } from "../rdp/session.js";
+import {
+  captureFatalErrors,
+  defaultLogPath,
+  formatErrorWithLog,
+  openSessionLog,
+  temporaryLogPath,
+} from "./session-log.js";
 
 async function main(): Promise<void> {
   const args = parseCliArgs(process.argv.slice(2));
-  const logger = createLogger({ verbose: args.verbose || debugEnvEnabled(), quiet: true });
+  const persistentLog = args.log;
+  const sessionLog = openSessionLog(
+    persistentLog ? defaultLogPath() : temporaryLogPath(),
+    process.argv.slice(2)
+  );
+  sessionLog.captureStdio();
+  captureFatalErrors(sessionLog);
+  if (persistentLog) process.stderr.write(`logging this session to ${sessionLog.path}\n`);
+  const logger = createLogger({
+    verbose: args.verbose || debugEnvEnabled(),
+    quiet: true,
+    sessionLog,
+  });
   const client = await LLDBClient.create();
   const bridge = new EmbeddedLldbBridge(client, logger);
   const debugFiles = new DebugFileRegistry(logger);
@@ -26,24 +46,43 @@ async function main(): Promise<void> {
 
   let handle: Awaited<ReturnType<typeof startPlatformServer>> | undefined;
   let dap: DAPSession | undefined;
+  let session: RdpWasmSession | undefined;
   let exiting = false;
+  let exitCode = 0;
+  let failureReported = false;
+  const reportFailure = (error: unknown): void => {
+    session?.logState("error");
+    logger.error(formatErrorWithLog(error, sessionLog));
+    failureReported = true;
+  };
   const cleanup = async (code: number): Promise<void> => {
+    exitCode ||= code;
+    process.exitCode = exitCode;
     if (exiting) return;
     exiting = true;
+    const cleanupKeepalive = setInterval(() => {}, 1000);
     bridge.close();
     try {
       await handle?.shutdown();
     } catch (error) {
       logger.error(`[cleanup] ${error instanceof Error ? error.message : String(error)}`);
-      code ||= 1;
+      exitCode ||= 1;
+      process.exitCode = exitCode;
     }
     try {
       await client.destroy();
     } catch (error) {
       logger.error(`[cleanup] ${error instanceof Error ? error.message : String(error)}`);
-      code ||= 1;
+      exitCode ||= 1;
+      process.exitCode = exitCode;
     }
-    process.exit(code);
+    if (exitCode !== 0 && !failureReported) {
+      session?.logState("cleanup-failed");
+      logger.error(formatErrorWithLog(new Error("session cleanup failed"), sessionLog));
+    }
+    sessionLog.close({ remove: exitCode === 0 && !persistentLog });
+    clearInterval(cleanupKeepalive);
+    process.exit(exitCode);
   };
 
   for (const signal of ["SIGTERM", "SIGHUP", "SIGINT"] as const) {
@@ -57,11 +96,17 @@ async function main(): Promise<void> {
   orphanCheck.unref();
 
   try {
-    handle = await startPlatformServer(args, {
-      wrapConnectPort: (port) => bridge.bridgeTcp(port),
-      logger,
-      debugFiles,
-    });
+    handle = await startPlatformServer(
+      { ...args, log: true },
+      {
+        wrapConnectPort: (port) => bridge.bridgeTcp(port),
+        logger,
+        debugFiles,
+        onRdpSession: (rdpSession) => {
+          session = rdpSession;
+        },
+      }
+    );
     const platformChannel = await bridge.bridgeTcp(handle.port);
     dap = await client.startDAP({
       preInitCommands: [
@@ -74,7 +119,7 @@ async function main(): Promise<void> {
     dap.onData((data) => process.stdout.write(data));
     process.stdin.on("data", (data: Buffer) => {
       void dap!.write(new Uint8Array(data)).catch((error) => {
-        logger.error(error instanceof Error ? error.message : String(error));
+        reportFailure(error);
         void cleanup(1);
       });
     });
@@ -86,7 +131,7 @@ async function main(): Promise<void> {
     await new Promise<void>((resolve) => process.stdout.write("", () => resolve()));
     await cleanup(0);
   } catch (error) {
-    logger.error(error instanceof Error ? (error.stack ?? error.message) : String(error));
+    reportFailure(error);
     await cleanup(1);
   }
 }

@@ -108,11 +108,17 @@ test("deadline diagnostics report the active stage and cleanup outcome", async (
   const session = {
     forceKillFirefox() {},
     shutdown: async () => {},
+    logState: (event) =>
+      trace.debug(
+        `[state] rdp.${event} {"current":{"closed":false,"activeGeneration":0,"threadCount":0}}`
+      ),
   };
 
   await assert.rejects(withDeadline(session, new Promise(() => {}), 5, trace), (err) => {
     assert.match(err.message, /\[state\] setup: submitting process attach attempt 1\/4/);
     assert.match(err.message, /\[state\] bridge tab-1: channel=2 tcp=connected/);
+    assert.match(err.message, /\[state\] rdp.deadline/);
+    assert.match(err.message, /"activeGeneration":0/);
     assert.match(err.message, /cleanup: session shutdown completed/);
     return true;
   });

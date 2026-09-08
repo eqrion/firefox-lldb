@@ -6,6 +6,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { findFirefoxBinary, launchFirefox } from "../../src/rdp/firefox.js";
 import net from "node:net";
+import { chmod, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 async function freePort(): Promise<number> {
   const server = net.createServer();
@@ -58,4 +61,33 @@ test("launchFirefox rejects a spawn failure instead of emitting an unhandled chi
     }),
     /could not start Firefox/
   );
+});
+
+test("launchFirefox creates its configured log directory and bounds normal cleanup", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("fixture uses a POSIX shell script");
+    return;
+  }
+  const root = await mkdtemp(join(tmpdir(), "firefox-lldb-launch-test-"));
+  const binary = join(root, "fake-firefox");
+  const logDir = join(root, "nested", "logs");
+  const previousLogDir = process.env.FIREFOX_LLDB_LOG_DIR;
+  let firefox: Awaited<ReturnType<typeof launchFirefox>> | undefined;
+  try {
+    await writeFile(binary, "#!/bin/sh\nwhile :; do sleep 60; done\n");
+    await chmod(binary, 0o755);
+    process.env.FIREFOX_LLDB_LOG_DIR = logDir;
+    firefox = await launchFirefox({
+      rdpPort: await freePort(),
+      binary,
+      headless: true,
+    });
+    assert.equal((await stat(logDir)).isDirectory(), true);
+    await firefox.close();
+  } finally {
+    await firefox?.close().catch(() => {});
+    if (previousLogDir === undefined) delete process.env.FIREFOX_LLDB_LOG_DIR;
+    else process.env.FIREFOX_LLDB_LOG_DIR = previousLogDir;
+    await rm(root, { recursive: true, force: true });
+  }
 });

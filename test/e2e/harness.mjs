@@ -235,7 +235,7 @@ export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // by the console logger unless verbose, so recording here costs nothing in a
 // normal run and gives an attach that times out something to say beyond "30s
 // elapsed": the last RDP exchange before it stopped making progress.
-export function tracingLogger(keep = 40) {
+export function tracingLogger(keep = 20) {
   const lines = [];
   const states = new Map();
   const bounded = (line) =>
@@ -534,15 +534,16 @@ export function forceKillFirefoxPid(pid) {
 // that's wedged in the first place. forceKillFirefox() is called first as an
 // unconditional, direct SIGKILL that doesn't depend on that chain completing;
 // the graceful shutdown is still attempted afterward, bounded, best-effort.
-export async function withDeadline(session, work, ms, trace) {
+export async function withDeadline(session, work, ms, trace, operation = "Firefox") {
   let timer;
   const timeout = new Promise((_, reject) => {
     timer = setTimeout(() => {
+      session?.logState?.("deadline");
       const tail = trace?.tail() ?? [];
       const where = tail.length
         ? `; last ${tail.length} trace lines:\n${tail.join("\n")}`
         : " (no trace captured)";
-      reject(new Error(`timed out after ${ms}ms waiting for Firefox${where}`));
+      reject(new Error(`timed out after ${ms}ms waiting for ${operation}${where}`));
     }, ms);
   });
   try {
@@ -551,6 +552,13 @@ export async function withDeadline(session, work, ms, trace) {
     return result;
   } catch (err) {
     clearTimeout(timer);
+    session?.logState?.("error");
+    if (err instanceof Error && !err.message.includes("trace lines:\n")) {
+      const tail = trace?.tail() ?? [];
+      if (tail.length) {
+        err.message += `\nlast ${tail.length} trace lines:\n${tail.join("\n")}`;
+      }
+    }
     session.forceKillFirefox();
     trace?.mark("[cleanup] force-killed Firefox; starting graceful session shutdown");
     let cleanupTimer;
@@ -656,6 +664,14 @@ export class Session {
     return this.#rdpSession.topLevelTid();
   }
 
+  logState(event = "snapshot") {
+    this.#rdpSession?.logState(event);
+  }
+
+  diagnosticTail() {
+    return this.#trace?.tail() ?? [];
+  }
+
   // An absolute URL for another file served by this fixture's static server
   // — session.navigate() takes a real URL, not a page-relative path.
   pageUrl(rel) {
@@ -725,7 +741,7 @@ export class Session {
           wrapConnectPort: (port) => session.#bridgeTcp(port),
           debugFiles,
           logger: trace,
-          onSession: (rdpSession) => {
+          onRdpSession: (rdpSession) => {
             session.#rdpSession = rdpSession;
           },
         });
@@ -790,20 +806,7 @@ export class Session {
   // mid-test, nothing catches it until node's own --test-timeout abandons
   // the test, leaking Firefox (see project_ci_e2e_firefox_leak memory).
   async #withCommandDeadline(promise, ms = 30_000, operation = "RDP command") {
-    let timer;
-    const timeout = new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`${operation} timed out after ${ms}ms`)), ms);
-    });
-    try {
-      const result = await Promise.race([promise, timeout]);
-      clearTimeout(timer);
-      return result;
-    } catch (err) {
-      clearTimeout(timer);
-      this.forceKillFirefox();
-      await Promise.race([this.shutdown(), sleep(10_000)]).catch(() => {});
-      throw err;
-    }
+    return withDeadline(this, promise, ms, this.#trace, operation);
   }
 
   command(cmd) {

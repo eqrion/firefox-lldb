@@ -14,8 +14,6 @@ import { findFirefoxBinary, launchFirefox } from "../../src/rdp/firefox.ts";
 import { verifyFirefoxLaunchToken } from "../../src/rdp/session.ts";
 import { freePort } from "../../src/platform/gdb-server-spawner.ts";
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
 async function closeWithin(firefox, ms) {
   let timer;
   const timeout = new Promise((_, reject) => {
@@ -58,8 +56,9 @@ test("--nightly launches and shuts down cleanly", async (t) => {
     closed = true;
   } finally {
     if (!closed) {
-      // Ensure the detached Firefox process does not leak into other e2e files.
-      await Promise.race([firefox.close(), sleep(15_000)]);
+      // close() has its own bounded group/direct-PID SIGKILL fallback. Retain
+      // this outer guard so the test also catches regressions in that bound.
+      await closeWithin(firefox, 15_000).catch(() => {});
     }
   }
 });

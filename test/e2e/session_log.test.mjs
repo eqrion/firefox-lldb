@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 import { spawn as ptySpawn } from "node-pty";
 import { findFirefoxBinary } from "../../src/rdp/firefox.ts";
 import { freePort } from "../../src/platform/gdb-server-spawner.ts";
@@ -36,6 +37,38 @@ function waitFor(getOutput, pred, ms = 60_000) {
     poll();
   });
 }
+
+test("a failed default CLI run retains its temporary transcript and prints the tail", () => {
+  const result = spawnSync(
+    process.execPath,
+    [
+      "--import",
+      "tsx",
+      "src/cli/firefox-lldb.ts",
+      "--launch",
+      "--headless",
+      "--firefox",
+      "/definitely/not/a/firefox-binary",
+      "--port",
+      "0",
+      "--rdp-port",
+      "6080",
+    ],
+    { cwd: REPO, env: process.env, encoding: "utf8", timeout: 30_000 }
+  );
+  const output = `${result.stdout}${result.stderr}`;
+  assert.equal(result.status, 1, output);
+  assert.match(output, /Last \d+ session log lines:/);
+  const match = output.match(/Full session log retained at (\S+\.log)/);
+  assert.ok(match, output);
+  const logPath = match[1];
+  try {
+    assert.equal(existsSync(logPath), true);
+    assert.match(readFileSync(logPath, "utf8"), /could not start Firefox/);
+  } finally {
+    rmSync(logPath, { force: true });
+  }
+});
 
 test("--log captures a full transcript while keeping the terminal clean", async (t) => {
   if (!findFirefoxBinary()) {

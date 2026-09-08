@@ -25,6 +25,13 @@ after(async () => {
 test("driven navigate() re-syncs and the breakpoint refires on the new page", async () => {
   await s.navigate(s.pageUrl("page2.html"));
 
+  // The production navigation path records both independently ordered facts:
+  // Firefox accepted navigateTo and a non-transient destination became ready.
+  const diagnosticTail = s.diagnosticTail().join("\n");
+  assert.match(diagnosticTail, /\[state\] navigation\.request-replied/);
+  assert.match(diagnosticTail, /\[state\] navigation\.destination-ready/);
+  assert.match(diagnosticTail, /\[state\] navigation\.complete/);
+
   // page2 doesn't auto-run — calling it eagerly races the debugger's own
   // breakpoint re-application (#applyBreakpoints) against the page's script.
   // Settle first, matching self_redirect.test.mjs.

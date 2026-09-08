@@ -4,12 +4,12 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { openSessionLog } from "../../src/cli/session-log.js";
+import { formatErrorWithLog, openSessionLog, temporaryLogPath } from "../../src/cli/session-log.js";
 
 const HELPER = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -60,6 +60,38 @@ test("strips ANSI escapes and splits multi-line records", () => {
     assert.match(contents, /stdout\s+line one$/m);
     assert.match(contents, /stdout\s+line two$/m);
   });
+});
+
+test("retains a recent tail for error reporting", () => {
+  withTmpDir((dir) => {
+    const path = join(dir, "session.log");
+    const log = openSessionLog(path, []);
+    log.record("debug", "first");
+    log.record("debug", "second");
+    log.record("debug", "third");
+
+    assert.deepEqual(
+      log.tail(2).map((line) => line.replace(/^\S+\s+debug\s+/, "")),
+      ["second", "third"]
+    );
+    const report = formatErrorWithLog(new Error("failed"), log, 2);
+    assert.match(report, /Last 2 session log lines:/);
+    assert.match(report, /second/);
+    assert.match(report, /third/);
+    assert.match(report, new RegExp(`Full session log retained at ${path}`));
+    log.close();
+  });
+});
+
+test("temporary logs can be removed on clean shutdown", () => {
+  withTmpDir((dir) => {
+    const path = join(dir, "session.log");
+    const log = openSessionLog(path, []);
+    log.record("debug", "clean run");
+    log.close({ remove: true });
+    assert.equal(existsSync(path), false);
+  });
+  assert.equal(temporaryLogPath().startsWith(process.env.FIREFOX_LLDB_LOG_DIR ?? tmpdir()), true);
 });
 
 test("captureStdio mirrors stderr into the log without dropping the original write", () => {

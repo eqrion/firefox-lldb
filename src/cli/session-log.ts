@@ -7,16 +7,21 @@
 // prompt, all in one file. Records are written synchronously (buffered) because
 // both CLIs exit via process.exit(), which truncates an async write stream.
 
-import { closeSync, openSync, readFileSync, writeSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, rmSync, writeSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { firefoxLogDir } from "../config.js";
 
 export type LogKind = "stdin" | "stdout" | "stderr" | "debug";
 
 export interface SessionLog {
   path: string;
   record(kind: LogKind, text: string): void;
+  /** Most recent formatted records, newest last. */
+  tail(limit?: number): string[];
   /** Mirror process.stderr writes (and stdout when asked) into the log. */
   captureStdio(opts?: { stdout?: boolean }): void;
-  close(): void;
+  close(opts?: { remove?: boolean }): void;
 }
 
 const FLUSH_THRESHOLD_BYTES = 8 * 1024;
@@ -31,6 +36,13 @@ export function defaultLogPath(): string {
     `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}` +
     `-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
   return `firefox-lldb-${stamp}-${process.pid}.log`;
+}
+
+/** Default always-on transcript location. Removed after a clean run. */
+export function temporaryLogPath(): string {
+  const dir = firefoxLogDir() ?? tmpdir();
+  mkdirSync(dir, { recursive: true });
+  return join(dir, defaultLogPath());
 }
 
 function toolVersion(): string {
@@ -48,6 +60,8 @@ export function openSessionLog(path: string, argv: string[]): SessionLog {
   let buffer = "";
   let bufferedBytes = 0;
   let closed = false;
+  const recent: string[] = [];
+  const keepRecent = 100;
 
   const flush = (): void => {
     if (!buffer) return;
@@ -78,7 +92,10 @@ export function openSessionLog(path: string, argv: string[]): SessionLog {
     )}`;
     // One line per record so the file stays greppable.
     for (const line of clean.replace(/\n$/, "").split("\n")) {
-      append(`${stamp} ${kind.padEnd(6)} ${line}\n`);
+      const formatted = `${stamp} ${kind.padEnd(6)} ${line}`;
+      append(`${formatted}\n`);
+      recent.push(formatted);
+      if (recent.length > keepRecent) recent.splice(0, recent.length - keepRecent);
     }
   };
 
@@ -126,11 +143,14 @@ export function openSessionLog(path: string, argv: string[]): SessionLog {
   return {
     path,
     record,
+    tail(limit = 20) {
+      return recent.slice(-Math.max(0, limit));
+    },
     captureStdio(opts) {
       mirror(process.stderr, "stderr");
       if (opts?.stdout) mirror(process.stdout, "stdout");
     },
-    close() {
+    close(opts) {
       if (closed) return;
       for (const restore of restores.splice(0).reverse()) restore();
       clearInterval(timer);
@@ -138,8 +158,19 @@ export function openSessionLog(path: string, argv: string[]): SessionLog {
       flush();
       closed = true;
       closeSync(fd);
+      if (opts?.remove) rmSync(path, { force: true });
     },
   };
+}
+
+/** Render an error with the tail and the location of the complete transcript. */
+export function formatErrorWithLog(error: unknown, sessionLog: SessionLog, keep = 20): string {
+  const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
+  const tail = sessionLog.tail(keep);
+  const recent = tail.length
+    ? `\nLast ${tail.length} session log lines:\n${tail.join("\n")}`
+    : "\nSession log has no diagnostic records.";
+  return `${message}${recent}\nFull session log retained at ${sessionLog.path}`;
 }
 
 /**
@@ -152,8 +183,9 @@ export function captureFatalErrors(sessionLog: SessionLog): void {
   const handle = (err: unknown): void => {
     const text = err instanceof Error ? (err.stack ?? err.message) : String(err);
     sessionLog.record("stderr", text);
-    sessionLog.close();
     console.error(err);
+    console.error(`Full session log retained at ${sessionLog.path}`);
+    sessionLog.close();
     process.exit(1);
   };
   process.on("uncaughtException", handle);

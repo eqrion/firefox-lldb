@@ -332,6 +332,29 @@ test("waitForTopLevelTarget waits for the initial frame target", async () => {
   srv.close();
 });
 
+test("waitForTopLevelTarget timeout reports structured lifecycle state", async () => {
+  const srv = new FakeRdpServer();
+  await srv.listen();
+  const debug: string[] = [];
+  const session = await srv.acceptSession({
+    ...noopLogger,
+    debug: (message) => debug.push(message),
+  });
+
+  await assert.rejects(
+    session.waitForTopLevelTarget(10),
+    /no initial top-level target within 10ms/
+  );
+  const tail = debug.slice(-2).join("\n");
+  assert.match(tail, /\[state\] target\.initial-target-wait-started/);
+  assert.match(tail, /\[state\] rdp\.wait-timeout/);
+  assert.match(tail, /"activeGeneration":0/);
+  assert.match(tail, /"threadCount":0/);
+
+  session.close();
+  srv.close();
+});
+
 test("target-available-form with same actor is deduplicated", async () => {
   const srv = new FakeRdpServer();
   await srv.listen();
@@ -1391,6 +1414,7 @@ test("navigate() rejection preserves the current target generation", async () =>
   );
 
   await assert.rejects(session.navigate("http://example.com/rejected.html"), /navigationRejected/);
+  assert.equal(session.listenerCount("lifecycle-state"), 0, "failed navigation cancels its waiter");
   assert.equal(session.topLevelTid(), tid);
   assert.equal(session.topLevelGeneration(), generation);
   assert.equal(session.topLevelUrl(), "http://example.com/original.html");
@@ -1458,6 +1482,101 @@ test("navigate() waits for tabNavigated stop after an intermediate about:blank t
 
   assert.equal(session.topLevelUrl(), "http://example.com/page.html");
   assert.equal(session.listTids().length, 1);
+
+  session.close();
+  srv.close();
+});
+
+test("navigate() requires both the request reply and destination across either ordering", async (t) => {
+  for (const completionFirst of [true, false]) {
+    await t.test(
+      completionFirst ? "destination before reply" : "reply before destination",
+      async () => {
+        const srv = new FakeRdpServer();
+        await srv.listen();
+        const debug: string[] = [];
+        const session = await srv.acceptSession({
+          ...noopLogger,
+          debug: (message) => debug.push(message),
+        });
+        srv.targetAvailable("threadV0", {
+          isTopLevel: true,
+          url: "http://example.com/original.html",
+        });
+        await sleep(20);
+
+        const destinationUrl = "http://example.com/destination.html";
+        srv.onNext(
+          (request) => request.type === "navigateTo",
+          () => {
+            if (completionFirst) {
+              srv.tabNavigated(destinationUrl, "stop");
+              setTimeout(() => srv.send({ from: "tab1" }), 30);
+              return null;
+            }
+            setTimeout(() => srv.tabNavigated(destinationUrl, "stop"), 30);
+            return { from: "tab1" };
+          }
+        );
+
+        let resolved = false;
+        const navigation = session.navigate(destinationUrl).then(() => {
+          resolved = true;
+        });
+        await sleep(10);
+        assert.equal(resolved, false, "one half of navigation completion is insufficient");
+        await navigation;
+
+        const stateLines = debug.filter((line) => line.startsWith("[state] navigation."));
+        assert.equal(
+          stateLines.some((line) => line.includes(".destination-ready ")),
+          true
+        );
+        assert.equal(
+          stateLines.some((line) => line.includes(".request-replied ")),
+          true
+        );
+        assert.match(stateLines.at(-1) ?? "", /\[state\] navigation\.complete/);
+        assert.match(stateLines.at(-1) ?? "", /"phase":"complete"/);
+
+        session.close();
+        srv.close();
+      }
+    );
+  }
+});
+
+test("navigate() rejects a concurrent operation without replacing the active state", async () => {
+  const srv = new FakeRdpServer();
+  await srv.listen();
+  const debug: string[] = [];
+  const session = await srv.acceptSession({
+    ...noopLogger,
+    debug: (message) => debug.push(message),
+  });
+  srv.targetAvailable("threadV0", { isTopLevel: true, url: "http://example.com/" });
+  await sleep(20);
+
+  srv.onNext(
+    (request) => request.type === "navigateTo",
+    () => {
+      setTimeout(() => {
+        srv.tabNavigated("http://example.com/first.html", "stop");
+        srv.send({ from: "tab1" });
+      }, 30);
+      return null;
+    }
+  );
+
+  const first = session.navigate("http://example.com/first.html");
+  await assert.rejects(
+    session.navigate("http://example.com/second.html"),
+    /navigation 1 is already in progress/
+  );
+  assert.match(debug.at(-1) ?? "", /\[state\] navigation\.concurrent-request-rejected/);
+  assert.match(debug.at(-1) ?? "", /"navigation":\{"id":1,"phase":"waiting"/);
+  await first;
+  assert.equal(session.topLevelUrl(), "http://example.com/first.html");
 
   session.close();
   srv.close();

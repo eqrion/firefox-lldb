@@ -170,15 +170,18 @@ terminal as they happen, so you can correlate them with where you've stopped.
 
 ## Reporting bugs
 
-If you hit a bug, reproduce it with `--log`:
+The CLI always records a full debug transcript in the system temporary
+directory. A successful session removes that file. On failure, the error shows
+the last 20 records and the path of the retained transcript.
+
+Use `--log` to keep the transcript in the current directory even after a
+successful session:
 
 ```sh
 firefox-lldb --url http://localhost:8080/index.html --log
 ```
 
-This will capture internal logging information and save it to a file for
-debugging. The log can contain page content, console output, and raw protocol
-data, so review it before making it public.
+The log can contain page content, console output, and raw protocol data.
 
 ## License
 

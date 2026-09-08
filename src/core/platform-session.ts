@@ -222,8 +222,12 @@ export interface StartOptions {
   /** Where each module's separate DWARF file is registered, for the file
    * provider to serve to LLDB (see DebugFileRegistry). */
   debugFiles?: DebugFileRegistry;
+  /** Called as soon as a per-tab RDP session connects, before initial-target,
+   * navigation, and prime-stop setup. Intended for diagnostics; debugger
+   * operations should continue to use onSession below. */
+  onRdpSession?: (session: RdpWasmSession) => void;
   /** Called with each per-tab RDP session as it is created (the in-process
-   * embedding uses this to drive `js` commands and console streaming).
+   * embedding uses this after setup to drive `js` commands and console streaming).
    * The second argument interrupts the running target: sends RDP pauses to all
    * threads and immediately unblocks the gdbstub's EventFuture.finish. */
   onSession?: (session: RdpWasmSession, interrupt: () => void) => void;
@@ -280,6 +284,7 @@ function createTabLauncher(
     // throws leaks the RDP watcher connection, and a retried qLaunchGDBServer
     // accumulates dead sessions against Firefox.
     try {
+      opts.onRdpSession?.(session);
       // watchTargets can acknowledge the subscription before delivering the
       // initial top-level target. Navigating in that gap makes navigate() see
       // generation 0 and lets the late about:blank event satisfy its
@@ -455,10 +460,19 @@ export async function startPlatformServer(
   // failing faster, this prevents a transient Firefox startup problem from
   // masking the deterministic EADDRINUSE error the caller needs to fix.
   const bound = await server.listen(args.port);
+  logger.debug(`[state] platform.listening {"port":${bound}}`);
 
   let firefox: FirefoxHandle | undefined;
   try {
     if (launching) {
+      logger.debug(
+        `[state] browser.launch-started ${JSON.stringify({
+          binary: args.firefox,
+          channel: args.channel,
+          headless: args.headless,
+          rdpPort: args.rdpPort,
+        })}`
+      );
       firefox = await launchFirefox({
         rdpPort: args.rdpPort,
         binary: args.firefox,
@@ -482,6 +496,14 @@ export async function startPlatformServer(
         args.rdpPort,
         "127.0.0.1",
         firefox.launchToken
+      );
+      logger.debug(
+        `[state] browser.rdp-ready ${JSON.stringify({
+          pid: firefox.pid,
+          version: runtime.version,
+          channel: runtime.channel,
+          rdpPort: args.rdpPort,
+        })}`
       );
       logger.info(
         `launched Firefox ${runtime.version}${runtime.channel ? ` (${runtime.channel})` : ""}`

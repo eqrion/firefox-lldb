@@ -7,7 +7,7 @@
 // debug real wasm in a real browser without touching the user's Firefox.
 
 import { spawn, execFileSync, type ChildProcess, type StdioOptions } from "node:child_process";
-import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
 import { accessSync, existsSync, readFileSync, createWriteStream } from "node:fs";
 import { connect as netConnect } from "node:net";
 import { tmpdir, homedir } from "node:os";
@@ -265,6 +265,24 @@ export interface FirefoxHandle {
   pid: number | undefined;
 }
 
+// Two waits are possible; keep their combined bound below the harness's
+// independent 10-second best-effort shutdown deadline.
+const FIREFOX_CLOSE_GRACE_MS = 3_000;
+
+async function exitsWithin(exited: Promise<void>, timeoutMs: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      exited.then(() => true),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function launchFirefox(opts: {
   rdpPort: number;
   binary?: string;
@@ -361,7 +379,20 @@ export async function launchFirefox(opts: {
   // detached: true makes the child a process group leader so we can kill
   // the whole group (Firefox + plugin-container children) with -pid on close.
   const logDir = firefoxLogDir();
-  const stdio: StdioOptions = logDir ? ["ignore", "pipe", "pipe"] : "ignore";
+  let captureOutput = false;
+  if (logDir) {
+    try {
+      await mkdir(logDir, { recursive: true });
+      captureOutput = true;
+    } catch (err) {
+      process.stderr.write(
+        `warning: could not create Firefox log directory ${logDir}: ${
+          err instanceof Error ? err.message : String(err)
+        }\n`
+      );
+    }
+  }
+  const stdio: StdioOptions = captureOutput ? ["ignore", "pipe", "pipe"] : "ignore";
   let child: ChildProcess;
   try {
     child = spawn(binary, args, { stdio, detached: true });
@@ -385,13 +416,24 @@ export async function launchFirefox(opts: {
       child.once("error", () => resolve());
     }
   });
-  if (logDir) {
-    const out = createWriteStream(join(logDir, `firefox-${launchToken}.log`));
-    out.on("error", (err) => {
+  let outputLog: ReturnType<typeof createWriteStream> | undefined;
+  let outputClosed: Promise<void> = Promise.resolve();
+  if (captureOutput && logDir) {
+    outputLog = createWriteStream(join(logDir, `firefox-${launchToken}.log`));
+    outputClosed = new Promise<void>((resolve) => {
+      outputLog!.once("close", resolve);
+      outputLog!.once("error", () => resolve());
+    });
+    outputLog.on("error", (err) => {
       process.stderr.write(`warning: could not write Firefox log: ${err.message}\n`);
     });
-    child.stdout?.pipe(out);
-    child.stderr?.pipe(out);
+    // Two readable streams share this destination. Neither owns its end: close
+    // it once the child exits so one stream cannot end it while the other still
+    // has buffered diagnostics, and so the write stream never keeps Node alive
+    // after the browser is gone.
+    child.stdout?.pipe(outputLog, { end: false });
+    child.stderr?.pipe(outputLog, { end: false });
+    void exited.then(() => outputLog?.end());
   }
   try {
     await started;
@@ -417,16 +459,47 @@ export async function launchFirefox(opts: {
       // standalone caller can exhaust its other handles after SIGKILL and Node
       // exits with its close promise still pending.
       child.ref();
+      let groupKillFailed = false;
       if (child.pid !== undefined) {
         try {
           process.kill(-child.pid, "SIGKILL");
         } catch {
-          // Process may have already exited.
+          groupKillFailed = true;
+        }
+        // A launcher can move out of the process group it originally led.
+        // Fall back to its direct PID when the group no longer exists.
+        if (groupKillFailed) {
+          try {
+            child.kill("SIGKILL");
+          } catch {
+            // Process may have already exited.
+          }
         }
       }
       // Wait for the process to actually die before returning, so a subsequent
       // launch in the same process doesn't race a still-alive Firefox.
-      await exited;
+      let didExit = await exitsWithin(exited, FIREFOX_CLOSE_GRACE_MS);
+      if (!didExit) {
+        // A successful process-group signal still does not guarantee that the
+        // original launcher will deliver an exit event. Try the direct child
+        // once, then make failure bounded and release every referenced pipe.
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // Process may have already exited.
+        }
+        didExit = await exitsWithin(exited, FIREFOX_CLOSE_GRACE_MS);
+      }
+      if (!didExit) {
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        outputLog?.destroy();
+        child.unref();
+        throw new Error(
+          `Firefox process ${child.pid ?? "unknown"} did not exit after two SIGKILL attempts`
+        );
+      }
+      await outputClosed;
       if (opts.defaultProfile) {
         await removeUserJsBlock(profileDir);
       } else {

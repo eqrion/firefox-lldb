@@ -22,6 +22,9 @@ All RDP wire traffic is confined to [`src/rdp/`](../src/rdp/):
   coordination, console/eval. Top-level target incarnations receive explicit
   generation numbers; workers, source actors, pauses, and cached breakpoint
   positions are retired with their owning generation across navigation.
+- [`session.ts`](../src/rdp/session.ts) also emits each authoritative lifecycle
+  transition and the resulting state through the normal debug logger, so the
+  session transcript and timeout trace share the same diagnostic history.
 
 No other module in the codebase builds or parses an RDP packet.
 

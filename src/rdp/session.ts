@@ -272,6 +272,26 @@ export interface ThreadInfo {
   isTopLevel: boolean;
 }
 
+interface NavigationProgress {
+  id: number;
+  phase: "waiting" | "destination-ready" | "complete" | "failed";
+  requestedUrl: string;
+  startingGeneration: number;
+  completion?: "target" | "tab-navigated";
+  lastUrl?: string;
+}
+
+interface LifecycleLogEntry {
+  domain: "rdp" | "target" | "navigation" | "pause" | "cleanup";
+  event: string;
+  actor?: string;
+  generation?: number;
+  tid?: number;
+  url?: string;
+  state?: string;
+  detail?: string;
+}
+
 export class RdpWasmSession extends EventEmitter {
   #client: RdpClient;
   #logger: Logger;
@@ -284,6 +304,8 @@ export class RdpWasmSession extends EventEmitter {
   #nextTid = 1;
   #nextGeneration = 1;
   #activeGeneration = 0;
+  #nextNavigationId = 1;
+  #navigation: NavigationProgress | undefined;
 
   // tid of the thread that triggered the most recent all-stop pause
   #stoppedTid = 1;
@@ -328,6 +350,42 @@ export class RdpWasmSession extends EventEmitter {
   #pendingDetachChecks = new Set<ReturnType<typeof setTimeout>>();
   #closed = false;
 
+  #record(entry: LifecycleLogEntry): void {
+    const { domain, event, ...detail } = entry;
+    this.#logger.debug(
+      `[state] ${domain}.${event} ${JSON.stringify({ ...detail, current: this.#currentState() })}`
+    );
+    this.emit("lifecycle-state");
+  }
+
+  #currentState(): object {
+    const top = [...this.#threads.values()].find((thread) => thread.isTopLevel);
+    return {
+      closed: this.#closed,
+      tabActor: this.#tabActor || undefined,
+      watcherActor: this.#watcher || undefined,
+      activeGeneration: this.#activeGeneration,
+      topLevel: top
+        ? {
+            actor: top.targetActor,
+            generation: top.generation,
+            tid: top.tid,
+            url: top.url,
+          }
+        : undefined,
+      threadCount: this.#threads.size,
+      pausedTids: [...this.#pausedTids].sort((a, b) => a - b),
+      unwitnessedPausedTids: [...this.#unwitnessedPausedTids].sort((a, b) => a - b),
+      pendingTopLevelTid: this.#pendingTopLevelTid,
+      navigation: this.#navigation ? { ...this.#navigation } : undefined,
+    };
+  }
+
+  /** Put the current authoritative RDP state at the end of the normal log. */
+  logState(event = "snapshot"): void {
+    this.#record({ domain: "rdp", event });
+  }
+
   #clearPendingDetachChecks(): void {
     for (const timer of this.#pendingDetachChecks) clearTimeout(timer);
     this.#pendingDetachChecks.clear();
@@ -363,6 +421,15 @@ export class RdpWasmSession extends EventEmitter {
     this.#pausedTids.delete(info.tid);
     this.#unwitnessedPausedTids.delete(info.tid);
     this.#pausePacketByTid.delete(info.tid);
+    this.#record({
+      domain: "target",
+      event: "thread-removed",
+      actor: info.targetActor,
+      generation: info.generation,
+      tid: info.tid,
+      url: info.url,
+      state: info.isTopLevel ? "top-level" : "worker",
+    });
     this.emit(`target-destroyed:${info.targetActor}`, info);
   }
 
@@ -393,6 +460,14 @@ export class RdpWasmSession extends EventEmitter {
   // stop) even when a Fission process-swap replacement is on its way.
   #onTopLevelGone(info?: ThreadInfo): void {
     this.#invalidateActorCaches();
+    this.#record({
+      domain: "target",
+      event: "top-level-gone",
+      actor: info?.targetActor,
+      generation: info?.generation,
+      tid: info?.tid,
+      url: info?.url,
+    });
     this.emit("navigated", info);
   }
 
@@ -401,13 +476,18 @@ export class RdpWasmSession extends EventEmitter {
     this.#client = client;
     this.#logger = logger;
     this.#moduleByteProvider = moduleByteProvider;
+    this.#record({ domain: "rdp", event: "session-created" });
     // Forward transport close so consumers can unblock pending promises.
     client.on("close", () => {
       this.#closed = true;
       this.#clearPendingDetachChecks();
+      this.#record({ domain: "rdp", event: "transport-closed" });
       this.emit("close");
     });
-    client.on("error", (err: Error) => this.#logger.error(`[rdp] transport error: ${err.message}`));
+    client.on("error", (err: Error) => {
+      this.#record({ domain: "rdp", event: "transport-error", detail: err.message });
+      this.#logger.error(`[rdp] transport error: ${err.message}`);
+    });
   }
 
   // --- public accessors ---
@@ -487,39 +567,92 @@ export class RdpWasmSession extends EventEmitter {
     return [...this.#threads.values()].find((t) => t.isTopLevel)?.tid;
   }
 
-  /** Wait until watchTargets has announced the tab's initial top-level target.
-   * The watchTargets request can resolve before its target-available event is
-   * delivered. Callers that navigate immediately must not treat that late
-   * initial about:blank target as the replacement created by navigation. */
-  waitForTopLevelTarget(timeoutMs = 10_000): Promise<void> {
-    if (this.topLevelTid() !== undefined) return Promise.resolve();
-    if (this.#closed) {
-      return Promise.reject(
-        new Error("session closed while waiting for the initial top-level target")
-      );
-    }
+  #waitForState(
+    predicate: () => boolean,
+    timeoutMs: number,
+    timeoutMessage: string,
+    closeMessage: string,
+    signal?: AbortSignal
+  ): Promise<void> {
+    if (predicate()) return Promise.resolve();
+    if (this.#closed) return Promise.reject(new Error(closeMessage));
+    if (signal?.aborted) return Promise.reject(new Error("lifecycle wait cancelled"));
     return new Promise<void>((resolve, reject) => {
       let timer: ReturnType<typeof setTimeout>;
       const cleanup = () => {
         clearTimeout(timer);
-        this.off("target", onTarget);
+        this.off("lifecycle-state", onState);
         this.off("close", onClose);
+        signal?.removeEventListener("abort", onAbort);
       };
-      const onTarget = (info: ThreadInfo) => {
-        if (!info.isTopLevel) return;
+      const onState = () => {
+        if (!predicate()) return;
         cleanup();
         resolve();
       };
       const onClose = () => {
         cleanup();
-        reject(new Error("session closed while waiting for the initial top-level target"));
+        reject(new Error(closeMessage));
+      };
+      const onAbort = () => {
+        cleanup();
+        reject(new Error("lifecycle wait cancelled"));
       };
       timer = setTimeout(() => {
         cleanup();
-        reject(new Error(`no initial top-level target within ${timeoutMs}ms`));
+        this.#record({ domain: "rdp", event: "wait-timeout", detail: timeoutMessage });
+        reject(new Error(timeoutMessage));
       }, timeoutMs);
-      this.on("target", onTarget);
+      this.on("lifecycle-state", onState);
       this.on("close", onClose);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      // Close the check-subscribe race if state changed between the initial
+      // predicate above and listener registration.
+      onState();
+    });
+  }
+
+  #completeNavigation(
+    completion: "target" | "tab-navigated",
+    url: string,
+    generation: number
+  ): void {
+    const navigation = this.#navigation;
+    if (!navigation || navigation.phase !== "waiting") return;
+    if (completion === "target" && generation === navigation.startingGeneration) return;
+    if (navigation.requestedUrl !== "about:blank" && url === "about:blank") return;
+    navigation.phase = "destination-ready";
+    navigation.completion = completion;
+    navigation.lastUrl = url;
+    this.#record({
+      domain: "navigation",
+      event: "destination-ready",
+      generation,
+      url,
+      state: completion,
+      detail: `navigation=${navigation.id}`,
+    });
+  }
+
+  /** Wait until watchTargets has announced the tab's initial top-level target.
+   * The watchTargets request can resolve before its target-available event is
+   * delivered. Callers that navigate immediately must not treat that late
+   * initial about:blank target as the replacement created by navigation. */
+  waitForTopLevelTarget(timeoutMs = 10_000): Promise<void> {
+    this.#record({ domain: "target", event: "initial-target-wait-started" });
+    return this.#waitForState(
+      () => this.topLevelTid() !== undefined,
+      timeoutMs,
+      `no initial top-level target within ${timeoutMs}ms`,
+      "session closed while waiting for the initial top-level target"
+    ).then(() => {
+      this.#record({
+        domain: "target",
+        event: "initial-target-ready",
+        generation: this.topLevelGeneration(),
+        tid: this.topLevelTid(),
+        url: this.topLevelUrl(),
+      });
     });
   }
 
@@ -540,13 +673,23 @@ export class RdpWasmSession extends EventEmitter {
       // Initialization is transactional: callers commonly retry while Firefox
       // is still starting, so retaining the failed socket would leak one RDP
       // connection per attempt.
+      session.#record({
+        domain: "rdp",
+        event: "initialization-failed",
+        detail: err instanceof Error ? err.message : String(err),
+      });
       client.close();
       throw err;
     }
   }
 
   async #init(tabActor?: string): Promise<void> {
-    await requireCompatibleFirefox(this.#client, this.#logger);
+    const runtime = await requireCompatibleFirefox(this.#client, this.#logger);
+    this.#record({
+      domain: "rdp",
+      event: "compatibility-verified",
+      detail: `${runtime.version}${runtime.channel ? ` ${runtime.channel}` : ""}`,
+    });
     const { tabs } = (await this.#client.request(ROOT_ACTOR, {
       type: REQUESTS.listTabs,
     })) as ListTabsResponse & { tabs?: (RdpTabForm & { selected?: boolean })[] };
@@ -556,6 +699,7 @@ export class RdpWasmSession extends EventEmitter {
       tabs?.[0];
     if (!tab) throw new Error("no Firefox tab found (Firefox may still be starting)");
     this.#tabActor = tab.actor;
+    this.#record({ domain: "rdp", event: "tab-selected", actor: this.#tabActor, url: tab.url });
 
     const watcherResp = (await this.#client.request(this.#tabActor, {
       type: REQUESTS.getWatcher,
@@ -564,6 +708,7 @@ export class RdpWasmSession extends EventEmitter {
     const watcher = watcherResp.actor;
     if (!watcher) throw new Error("Firefox did not return a watcher actor");
     this.#watcher = watcher;
+    this.#record({ domain: "rdp", event: "watcher-ready", actor: watcher });
 
     const cfg = (await this.#client.request(this.#watcher, {
       type: REQUESTS.getThreadConfigurationActor,
@@ -575,20 +720,24 @@ export class RdpWasmSession extends EventEmitter {
       type: REQUESTS.updateConfiguration,
       configuration: THREAD_CONFIG,
     });
+    this.#record({ domain: "rdp", event: "thread-configuration-applied", actor: configActor });
 
     this.#client.on("event", (p) => this.#onEvent(p));
     await this.#client.request(this.#watcher, {
       type: REQUESTS.watchTargets,
       targetType: "frame",
     });
+    this.#record({ domain: "rdp", event: "frame-target-watch-ready", actor: this.#watcher });
     await this.#client.request(this.#watcher, {
       type: REQUESTS.watchTargets,
       targetType: "worker",
     });
+    this.#record({ domain: "rdp", event: "worker-target-watch-ready", actor: this.#watcher });
     await this.#client.request(this.#watcher, {
       type: REQUESTS.watchResources,
       resourceTypes: ["source"],
     });
+    this.#record({ domain: "rdp", event: "source-watch-ready", actor: this.#watcher });
   }
 
   #onEvent(p: RdpPacket): void {
@@ -603,11 +752,28 @@ export class RdpWasmSession extends EventEmitter {
         };
         const targetActor = target?.actor;
         const threadActor = target?.threadActor;
-        if (!targetActor || !threadActor) break;
+        if (!targetActor || !threadActor) {
+          this.#record({
+            domain: "target",
+            event: "target-available-ignored",
+            detail: "missing target or thread actor",
+          });
+          break;
+        }
 
         // Check if this actor is already known (re-announce after navigation).
         const existing = [...this.#threads.values()].find((t) => t.targetActor === targetActor);
-        if (existing) break;
+        if (existing) {
+          this.#record({
+            domain: "target",
+            event: "target-available-duplicate",
+            actor: targetActor,
+            generation: existing.generation,
+            tid: existing.tid,
+            url: existing.url,
+          });
+          break;
+        }
 
         const isTopLevel = target.isTopLevelTarget ?? false;
         let tid: number;
@@ -650,6 +816,16 @@ export class RdpWasmSession extends EventEmitter {
           isTopLevel,
         };
         this.#threads.set(tid, info);
+        this.#record({
+          domain: "target",
+          event: "target-available",
+          actor: targetActor,
+          generation,
+          tid,
+          url: info.url,
+          state: isTopLevel ? "top-level" : "worker",
+        });
+        if (isTopLevel) this.#completeNavigation("target", info.url, generation);
 
         // Apply any buffered breakpoints to the new worker.
         void this.#applyBreakpoints(info).catch((err) =>
@@ -666,16 +842,36 @@ export class RdpWasmSession extends EventEmitter {
       case EVENTS.tabNavigated: {
         const event = p as { url?: unknown; state?: unknown; target?: { url?: unknown } };
         const url = typeof event.url === "string" ? event.url : event.target?.url;
-        if (typeof url !== "string") break;
+        if (typeof url !== "string") {
+          this.#record({
+            domain: "navigation",
+            event: "tab-navigated-ignored",
+            detail: "missing URL",
+          });
+          break;
+        }
         // A process-switch navigation may first announce a replacement frame
         // as about:blank, then complete that same target via tabNavigated
         // without another target-available-form. Keep the target form current
         // and let navigate() use the stop notification as its load barrier.
         const currentTop = [...this.#threads.values()].find((t) => t.isTopLevel);
         if (currentTop) currentTop.url = url;
+        const state = typeof event.state === "string" ? event.state : undefined;
+        this.#record({
+          domain: "navigation",
+          event: "tab-navigated",
+          actor: currentTop?.targetActor,
+          generation: currentTop?.generation,
+          tid: currentTop?.tid,
+          url,
+          state,
+        });
+        if (currentTop && (state === undefined || state === "stop")) {
+          this.#completeNavigation("tab-navigated", url, currentTop.generation);
+        }
         this.emit("tab-navigated", {
           url,
-          state: typeof event.state === "string" ? event.state : undefined,
+          state,
         });
         break;
       }
@@ -687,10 +883,26 @@ export class RdpWasmSession extends EventEmitter {
         // from #threads and a later all-stop interrupt hangs on the dead tid.
         const target = p.target as { actor?: string };
         const targetActor = target?.actor;
-        if (!targetActor) break;
+        if (!targetActor) {
+          this.#record({
+            domain: "target",
+            event: "target-destroyed-ignored",
+            detail: "missing target actor",
+          });
+          break;
+        }
         const entry = [...this.#threads.entries()].find(([, t]) => t.targetActor === targetActor);
         if (entry) {
           const [, info] = entry;
+          this.#record({
+            domain: "target",
+            event: "target-destroyed",
+            actor: targetActor,
+            generation: info.generation,
+            tid: info.tid,
+            url: info.url,
+            state: info.isTopLevel ? "top-level" : "worker",
+          });
           // The page's tab was closed or navigated away; let consumers react
           // (e.g. firefox-lldb detaches the lldb process). Give a Fission
           // process-swap replacement (see DETACH_GRACE_MS) a chance to arrive
@@ -714,6 +926,14 @@ export class RdpWasmSession extends EventEmitter {
               const hasTopLevel = [...this.#threads.values()].some((t) => t.isTopLevel);
               if (!hasTopLevel) {
                 this.#pendingTopLevelTid = undefined;
+                this.#record({
+                  domain: "target",
+                  event: "tab-detached",
+                  actor: info.targetActor,
+                  generation: info.generation,
+                  tid: info.tid,
+                  url: info.url,
+                });
                 this.emit("detached", info);
               }
             }, DETACH_GRACE_MS);
@@ -721,6 +941,12 @@ export class RdpWasmSession extends EventEmitter {
           } else {
             this.#removeThread(info);
           }
+        } else {
+          this.#record({
+            domain: "target",
+            event: "target-destroyed-unknown",
+            actor: targetActor,
+          });
         }
         break;
       }
@@ -763,6 +989,15 @@ export class RdpWasmSession extends EventEmitter {
         if ((this.#pauseWitnessCountByTid.get(tid) ?? 0) === 0) {
           this.#unwitnessedPausedTids.add(tid);
         }
+        const pauseType = (p as PauseEvent).why?.type;
+        this.#record({
+          domain: "pause",
+          event: "paused",
+          actor: fromActor,
+          generation: entry[1].generation,
+          tid,
+          state: typeof pauseType === "string" ? pauseType : "unknown",
+        });
         this.emit(`paused:${tid}`, p as PauseEvent);
         // Generic form for listeners that do not yet know which tids exist
         // (navigate() waiting out a load-time pause).
@@ -777,6 +1012,13 @@ export class RdpWasmSession extends EventEmitter {
           this.#pausedTids.delete(tid);
           this.#pausePacketByTid.delete(tid);
           this.#unwitnessedPausedTids.delete(tid);
+          this.#record({
+            domain: "pause",
+            event: "resumed",
+            actor: fromActor,
+            generation: entry[1].generation,
+            tid,
+          });
         }
         break;
       }
@@ -785,64 +1027,41 @@ export class RdpWasmSession extends EventEmitter {
 
   /** Navigate the tab; resolves once the destination top-level target is loaded. */
   async navigate(url: string): Promise<void> {
+    if (this.#navigation?.phase === "waiting" || this.#navigation?.phase === "destination-ready") {
+      this.#record({
+        domain: "navigation",
+        event: "concurrent-request-rejected",
+        url,
+        detail: `active-navigation=${this.#navigation.id}`,
+      });
+      throw new Error(`navigation ${this.#navigation.id} is already in progress`);
+    }
     // Do not mutate live target state before Firefox accepts the request. The
     // watcher events perform the generation swap transactionally; if navigateTo
     // is rejected, the existing generation remains usable.
     const startingGeneration = this.topLevelGeneration();
-    const cleanupRef = { fn: null as (() => void) | null };
-    const destination = new Promise<void>((resolve, reject) => {
-      // navigateTo has already reported the load complete by the time this is
-      // awaited, so either a destination target or tabNavigated stop is due
-      // immediately. Bound the wait anyway: a Fission process swap can lose a
-      // lifecycle event around this exact moment (see DETACH_GRACE_MS), which
-      // would otherwise hang the caller with no error to retry on.
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const cleanup = () => {
-        cleanupRef.fn = null;
-        clearTimeout(timer);
-        this.off("target", onTarget);
-        this.off("tab-navigated", onTabNavigated);
-        this.off("close", onClose);
-      };
-      cleanupRef.fn = cleanup;
-      // Do not require the URL to match: redirects routinely change it. But
-      // Firefox can announce an intermediate about:blank replacement before
-      // the requested page's real target arrives. Returning on that target
-      // lets attach-time primeStop pause the blank document and strand the
-      // navigation there indefinitely.
-      const onTarget = (t: ThreadInfo) => {
-        const transientBlank = url !== "about:blank" && t.url === "about:blank";
-        if (t.isTopLevel && t.generation !== startingGeneration && !transientBlank) {
-          cleanup();
-          resolve();
-        }
-      };
-      const onTabNavigated = (event: { url: string; state?: string }) => {
-        // Firefox's tab actor emits start and stop notifications. Only stop is
-        // safe for attach-time primeStop: pausing the replacement at start can
-        // strand it on about:blank before the real document loads. Older
-        // versions omit state, in which case the sole notification is final.
-        if (event.state !== undefined && event.state !== "stop") return;
-        const transientBlank = url !== "about:blank" && event.url === "about:blank";
-        if (this.topLevelTid() !== undefined && !transientBlank) {
-          cleanup();
-          resolve();
-        }
-      };
-      const onClose = () => {
-        cleanup();
-        reject(new Error("session closed during navigate"));
-      };
-      timer = setTimeout(() => {
-        cleanup();
-        reject(
-          new Error(`no completed top-level navigation within ${NAVIGATE_TARGET_TIMEOUT_MS}ms`)
-        );
-      }, NAVIGATE_TARGET_TIMEOUT_MS);
-      this.on("target", onTarget);
-      this.on("tab-navigated", onTabNavigated);
-      this.on("close", onClose);
+    const navigation: NavigationProgress = {
+      id: this.#nextNavigationId++,
+      phase: "waiting",
+      requestedUrl: url,
+      startingGeneration,
+    };
+    this.#navigation = navigation;
+    this.#record({
+      domain: "navigation",
+      event: "request-started",
+      generation: startingGeneration,
+      url,
+      detail: `navigation=${navigation.id}`,
     });
+    const destinationAbort = new AbortController();
+    const destination = this.#waitForState(
+      () => navigation.phase === "destination-ready",
+      NAVIGATE_TARGET_TIMEOUT_MS,
+      `no completed top-level navigation within ${NAVIGATE_TARGET_TIMEOUT_MS}ms`,
+      "session closed during navigate",
+      destinationAbort.signal
+    );
     // A pause during the load leaves navigateTo unanswerable: with
     // pauseOnExceptions armed, an uncaught exception in a loading script stops
     // the thread, the load event never fires, and waitForLoad holds the reply.
@@ -853,21 +1072,59 @@ export class RdpWasmSession extends EventEmitter {
     // its own stop afterwards (RdpDebuggee.primeStop).
     const onPausedDuringLoad = (tid: number) => {
       this.#logger.debug(`[rdp] resuming tid ${tid} paused during navigation to ${url}`);
+      this.#record({
+        domain: "navigation",
+        event: "load-pause-resumed",
+        generation: this.topLevelGeneration(),
+        tid,
+        url,
+        detail: `navigation=${navigation.id}`,
+      });
       const info = this.#threads.get(tid);
       if (info) this.#client.send(info.threadActor, { type: REQUESTS.resume });
     };
     this.on("paused", onPausedDuringLoad);
     try {
-      await this.#client.request(this.#tabActor, {
-        type: REQUESTS.navigateTo,
-        url,
-        waitForLoad: true,
+      const request = this.#client
+        .request(this.#tabActor, {
+          type: REQUESTS.navigateTo,
+          url,
+          waitForLoad: true,
+        })
+        .then(() => {
+          this.#record({
+            domain: "navigation",
+            event: "request-replied",
+            generation: this.topLevelGeneration(),
+            url: this.topLevelUrl(),
+            detail: `navigation=${navigation.id}`,
+          });
+        });
+      // Both facts are required, but either may arrive first. Waiting in
+      // parallel also lets the lifecycle deadline fail promptly if Firefox
+      // withholds the navigateTo reply after losing the completion event.
+      await Promise.all([request, destination]);
+      navigation.phase = "complete";
+      this.#record({
+        domain: "navigation",
+        event: "complete",
+        generation: this.topLevelGeneration(),
+        url: this.topLevelUrl(),
+        state: navigation.completion,
+        detail: `navigation=${navigation.id}`,
       });
-      await destination;
     } catch (err) {
-      cleanupRef.fn?.();
+      navigation.phase = "failed";
+      this.#record({
+        domain: "navigation",
+        event: "failed",
+        generation: this.topLevelGeneration(),
+        url: this.topLevelUrl(),
+        detail: err instanceof Error ? err.message : String(err),
+      });
       throw err;
     } finally {
+      destinationAbort.abort();
       this.off("paused", onPausedDuringLoad);
     }
   }
@@ -1664,6 +1921,7 @@ export class RdpWasmSession extends EventEmitter {
     if (this.#closed) return;
     this.#closed = true;
     this.#clearPendingDetachChecks();
+    this.#record({ domain: "cleanup", event: "session-close-requested" });
     this.#client.close();
   }
 }
