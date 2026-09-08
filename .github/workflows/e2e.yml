@@ -13,10 +13,10 @@ jobs:
   e2e:
     name: Firefox ${{ matrix.firefox.channel }} (${{ matrix.firefox.suite }})
     runs-on: ubuntu-24.04
-    # Temporarily raised while the attach hang is being diagnosed: ~28 blown 30s
-    # attach deadlines per run put the suite over 25 minutes, and a cancelled job
-    # never prints the failure summary that carries the RDP trace.
-    timeout-minutes: 40
+    # Each Release shard normally takes well under half of this. Keep enough
+    # headroom for bounded setup retries while preventing a wedged runner from
+    # consuming the old full-suite timeout.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -25,18 +25,27 @@ jobs:
             version: latest-esr
             suite: compatibility
             command: npm run test:e2e:compat
+            shard: 1/1
           - channel: release
             version: latest
-            suite: full
+            suite: full 1/2
             command: npm run test:e2e
+            shard: 1/2
+          - channel: release
+            version: latest
+            suite: full 2/2
+            command: npm run test:e2e
+            shard: 2/2
           - channel: beta
             version: latest-beta
             suite: compatibility
             command: npm run test:e2e:compat
+            shard: 1/1
           - channel: nightly
             version: latest-nightly
             suite: compatibility
             command: npm run test:e2e:compat
+            shard: 1/1
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -62,6 +71,7 @@ jobs:
         continue-on-error: true
         env:
           E2E_CONCURRENCY: 1
+          E2E_SHARD: ${{ matrix.firefox.shard }}
           E2E_FIREFOX_CHANNEL: ${{ matrix.firefox.channel }}
           FIREFOX_BINARY: ${{ steps.firefox.outputs.firefox-path }}
           FIREFOX_LLDB_ALLOW_UNSUPPORTED: 1
