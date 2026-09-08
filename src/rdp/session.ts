@@ -9,8 +9,8 @@
 //     server-side targets and applies thread-config session data at creation;
 //   - set observeWasm/observeAsmJS thread-config BEFORE navigation, so the
 //     page's own wasm compiles with debug support;
-//   - watchTargets("frame") + watchTargets("worker") + watchResources("source")
-//     to track all targets (top-level frame + web workers) and their sources;
+//   - watchTargets("frame") + watchTargets("worker") and watched source/document
+//     resources to track targets, sources, and navigation readiness;
 //   - per-thread setBreakpoint / frames / resume / interrupt, plus all-stop
 //     coordination on any pause (interrupt all other running threads).
 //
@@ -44,6 +44,7 @@ import {
   type SourceForm,
   type UrlSourceForm,
   type ResourcesAvailableArrayEvent,
+  type DocumentEventResource,
   type SourcesResponse,
   type SourceResponse,
   type ArrayBufferGrip,
@@ -277,7 +278,8 @@ interface NavigationProgress {
   phase: "waiting" | "destination-ready" | "complete" | "failed";
   requestedUrl: string;
   startingGeneration: number;
-  completion?: "target" | "tab-navigated";
+  completion?: "document-event" | "tab-navigated";
+  destinationGeneration?: number;
   lastUrl?: string;
 }
 
@@ -612,14 +614,29 @@ export class RdpWasmSession extends EventEmitter {
     });
   }
 
+  #observeNavigationTarget(url: string, generation: number): void {
+    const navigation = this.#navigation;
+    if (!navigation || navigation.phase !== "waiting") return;
+    if (generation === navigation.startingGeneration) return;
+    if (navigation.requestedUrl !== "about:blank" && url === "about:blank") return;
+    navigation.destinationGeneration = generation;
+    navigation.lastUrl = url;
+    this.#record({
+      domain: "navigation",
+      event: "destination-target",
+      generation,
+      url,
+      detail: `navigation=${navigation.id}`,
+    });
+  }
+
   #completeNavigation(
-    completion: "target" | "tab-navigated",
+    completion: "document-event" | "tab-navigated",
     url: string,
     generation: number
   ): void {
     const navigation = this.#navigation;
     if (!navigation || navigation.phase !== "waiting") return;
-    if (completion === "target" && generation === navigation.startingGeneration) return;
     if (navigation.requestedUrl !== "about:blank" && url === "about:blank") return;
     navigation.phase = "destination-ready";
     navigation.completion = completion;
@@ -735,7 +752,7 @@ export class RdpWasmSession extends EventEmitter {
     this.#record({ domain: "rdp", event: "worker-target-watch-ready", actor: this.#watcher });
     await this.#client.request(this.#watcher, {
       type: REQUESTS.watchResources,
-      resourceTypes: ["source"],
+      resourceTypes: ["source", "document-event"],
     });
     this.#record({ domain: "rdp", event: "source-watch-ready", actor: this.#watcher });
   }
@@ -825,7 +842,7 @@ export class RdpWasmSession extends EventEmitter {
           url: info.url,
           state: isTopLevel ? "top-level" : "worker",
         });
-        if (isTopLevel) this.#completeNavigation("target", info.url, generation);
+        if (isTopLevel) this.#observeNavigationTarget(info.url, generation);
 
         // Apply any buffered breakpoints to the new worker.
         void this.#applyBreakpoints(info).catch((err) =>
@@ -958,16 +975,41 @@ export class RdpWasmSession extends EventEmitter {
         const groups = (p as ResourcesAvailableArrayEvent).array;
         if (!groups) break;
         for (const group of groups) {
-          if (!Array.isArray(group) || group[0] !== "source" || !Array.isArray(group[1])) continue;
-          for (const source of group[1] as SourceForm[]) {
-            if (!source.actor || !this.#reportUsableSource(source)) continue;
-            const generation = this.#activeGeneration;
-            if (generation === 0) continue;
-            this.#sourceUrlByActor.set(source.actor, { url: source.url, generation });
-            if (source.introductionType === "wasm") {
-              this.#wasmActorByUrl.set(source.url, { actor: source.actor, generation });
-            } else {
-              this.#jsActorByUrl.set(source.url, { actor: source.actor, generation });
+          if (!Array.isArray(group) || !Array.isArray(group[1])) continue;
+          if (group[0] === "source") {
+            for (const source of group[1] as SourceForm[]) {
+              if (!source.actor || !this.#reportUsableSource(source)) continue;
+              const generation = this.#activeGeneration;
+              if (generation === 0) continue;
+              this.#sourceUrlByActor.set(source.actor, { url: source.url, generation });
+              if (source.introductionType === "wasm") {
+                this.#wasmActorByUrl.set(source.url, { actor: source.actor, generation });
+              } else {
+                this.#jsActorByUrl.set(source.url, { actor: source.actor, generation });
+              }
+            }
+          } else if (group[0] === "document-event") {
+            // Unlike source resources, document events identify their target
+            // through the packet's `from` actor. Tie readiness to that actor's
+            // generation so a late event from the retired document cannot
+            // complete the new navigation.
+            const fromActor = p.from as string;
+            const info = [...this.#threads.values()].find(
+              (thread) => thread.targetActor === fromActor && thread.isTopLevel
+            );
+            if (!info) continue;
+            for (const event of group[1] as DocumentEventResource[]) {
+              if (event.name !== "dom-interactive" && event.name !== "dom-complete") continue;
+              const eventUrl = event.url ?? info.url;
+              this.#record({
+                domain: "navigation",
+                event: `document-${event.name}`,
+                actor: fromActor,
+                generation: info.generation,
+                tid: info.tid,
+                url: eventUrl,
+              });
+              this.#completeNavigation("document-event", eventUrl, info.generation);
             }
           }
         }
@@ -1025,7 +1067,8 @@ export class RdpWasmSession extends EventEmitter {
     }
   }
 
-  /** Navigate the tab; resolves once the destination top-level target is loaded. */
+  /** Navigate the tab; resolves once Firefox accepts the request and the
+   * destination document reaches DOM interactive. */
   async navigate(url: string): Promise<void> {
     if (this.#navigation?.phase === "waiting" || this.#navigation?.phase === "destination-ready") {
       this.#record({
@@ -1062,14 +1105,9 @@ export class RdpWasmSession extends EventEmitter {
       "session closed during navigate",
       destinationAbort.signal
     );
-    // A pause during the load leaves navigateTo unanswerable: with
-    // pauseOnExceptions armed, an uncaught exception in a loading script stops
-    // the thread, the load event never fires, and waitForLoad holds the reply.
-    // That request going unanswered would take the whole connection down at the
-    // client's request timeout (replies are FIFO, so it closes rather than risk
-    // a late reply landing on the next request). Resume past such a pause so the
-    // load can finish; the page is only mid-load, and the attach sequence makes
-    // its own stop afterwards (RdpDebuggee.primeStop).
+    // A pause during navigation can arrive before the replacement target is
+    // announced. Resume past it so target discovery can finish; the attach
+    // sequence makes its own stop afterwards (RdpDebuggee.primeStop).
     const onPausedDuringLoad = (tid: number) => {
       this.#logger.debug(`[rdp] resuming tid ${tid} paused during navigation to ${url}`);
       this.#record({
@@ -1089,7 +1127,13 @@ export class RdpWasmSession extends EventEmitter {
         .request(this.#tabActor, {
           type: REQUESTS.navigateTo,
           url,
-          waitForLoad: true,
+          // Firefox Nightly can create the destination target and load all of
+          // its sources yet never answer a waitForLoad:true request. Ask only
+          // for navigation initiation and use the destination target's
+          // document-event as our independent readiness barrier. This also
+          // avoids deadlocking when pauseOnExceptions stops a loading script
+          // before `load` fires.
+          waitForLoad: false,
         })
         .then(() => {
           this.#record({

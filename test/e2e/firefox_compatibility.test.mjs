@@ -11,6 +11,7 @@ import { launchFirefox } from "../../src/rdp/firefox.ts";
 import { verifyFirefoxLaunchToken } from "../../src/rdp/session.ts";
 import { freePort } from "../../src/platform/gdb-server-spawner.ts";
 import { firefoxCompatibilityError } from "../../src/rdp/firefox-compatibility.ts";
+import { Session } from "./harness.mjs";
 
 test("detects the launched Firefox version over RDP", async () => {
   const rdpPort = await freePort();
@@ -31,5 +32,17 @@ test("detects the launched Firefox version over RDP", async () => {
     );
   } finally {
     await firefox.close();
+  }
+});
+
+test("the first platform attach does not require a whole-session retry", async () => {
+  const session = await Session.attach("factorial", {
+    channel: process.env.E2E_FIREFOX_CHANNEL ?? "release",
+    setupAttempts: 1,
+  });
+  try {
+    assert.ok(session.topLevelGeneration() > 0);
+  } finally {
+    await session.shutdown();
   }
 });

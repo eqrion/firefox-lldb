@@ -25,10 +25,12 @@ after(async () => {
 test("driven navigate() re-syncs and the breakpoint refires on the new page", async () => {
   await s.navigate(s.pageUrl("page2.html"));
 
-  // The production navigation path records both independently ordered facts:
-  // Firefox accepted navigateTo and a non-transient destination became ready.
+  // The retained tail records the destination document barrier and final
+  // completion. The request-replied marker may be older than the 20-line tail;
+  // navigation.complete itself is emitted only after both independently
+  // ordered facts have resolved (covered directly by the session unit test).
   const diagnosticTail = s.diagnosticTail().join("\n");
-  assert.match(diagnosticTail, /\[state\] navigation\.request-replied/);
+  assert.match(diagnosticTail, /\[state\] navigation\.document-dom-interactive/);
   assert.match(diagnosticTail, /\[state\] navigation\.destination-ready/);
   assert.match(diagnosticTail, /\[state\] navigation\.complete/);
 

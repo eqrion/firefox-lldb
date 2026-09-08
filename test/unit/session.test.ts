@@ -216,6 +216,14 @@ class FakeRdpServer {
     });
   }
 
+  documentInteractive(threadActor: string, url: string): void {
+    this.send({
+      from: `${threadActor}:target`,
+      type: "resources-available-array",
+      array: [["document-event", [{ name: "dom-interactive", url }]]],
+    });
+  }
+
   paused(threadActor: string, why = "breakpoint"): void {
     this.send({ from: threadActor, type: "paused", why: { type: why } });
   }
@@ -1440,6 +1448,7 @@ test("navigate() resolves when the resulting page URL differs from the requested
         isTopLevel: true,
         url: "https://www.example.com/",
       });
+      srv.documentInteractive("threadRedirected", "https://www.example.com/");
       return { from: "tab1" };
     }
   );
@@ -1448,6 +1457,37 @@ test("navigate() resolves when the resulting page URL differs from the requested
 
   assert.equal(session.listTids().length, 1);
   assert.equal(session.topLevelUrl(), "https://www.example.com/");
+
+  session.close();
+  srv.close();
+});
+
+test("navigate() waits for DOM interactive after the destination target is created", async () => {
+  const srv = new FakeRdpServer();
+  await srv.listen();
+  const session = await srv.acceptSession();
+
+  srv.targetAvailable("threadV0", { isTopLevel: true, url: "about:blank" });
+  await sleep(20);
+
+  const destinationUrl = "http://example.com/page.html";
+  srv.onNext(
+    (request) => request.type === "navigateTo",
+    () => {
+      srv.targetDestroyed("threadV0");
+      srv.targetAvailable("threadV1", { isTopLevel: true, url: destinationUrl });
+      setTimeout(() => srv.documentInteractive("threadV1", destinationUrl), 30);
+      return { from: "tab1" };
+    }
+  );
+
+  let resolved = false;
+  const navigation = session.navigate(destinationUrl).then(() => {
+    resolved = true;
+  });
+  await sleep(10);
+  assert.equal(resolved, false, "target creation alone must not complete navigation");
+  await navigation;
 
   session.close();
   srv.close();
@@ -1508,7 +1548,12 @@ test("navigate() requires both the request reply and destination across either o
         const destinationUrl = "http://example.com/destination.html";
         srv.onNext(
           (request) => request.type === "navigateTo",
-          () => {
+          (request) => {
+            assert.equal(
+              request.waitForLoad,
+              false,
+              "navigation completion must not depend on Firefox's load-event reply"
+            );
             if (completionFirst) {
               srv.tabNavigated(destinationUrl, "stop");
               setTimeout(() => srv.send({ from: "tab1" }), 30);
@@ -1605,6 +1650,7 @@ test("navigate() same-URL reload does not emit 'detached' for the old target", a
     () => {
       srv.targetDestroyed("threadV1");
       srv.targetAvailable("threadV2", { isTopLevel: true, url: PAGE_URL });
+      srv.documentInteractive("threadV2", PAGE_URL);
       return { from: "tab1" };
     }
   );
@@ -1677,6 +1723,7 @@ test("navigate() clears stale source-actor caches so post-navigation breakpoints
     () => {
       srv.targetDestroyed("thread1");
       srv.targetAvailable("thread2", { isTopLevel: true, url: "http://example.com/v2.html" });
+      srv.documentInteractive("thread2", "http://example.com/v2.html");
       return { from: "tab1" };
     }
   );

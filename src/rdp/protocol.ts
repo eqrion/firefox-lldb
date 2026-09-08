@@ -166,7 +166,12 @@ export function hasUrl(s: SourceForm): s is UrlSourceForm {
 }
 
 export interface ResourcesAvailableArrayEvent {
-  array?: Array<[resourceType: string, resources: SourceForm[]]>;
+  array?: Array<[resourceType: string, resources: unknown[]]>;
+}
+
+export interface DocumentEventResource {
+  name?: "will-navigate" | "dom-loading" | "dom-interactive" | "dom-complete" | string;
+  url?: string;
 }
 
 export interface SourcesResponse {

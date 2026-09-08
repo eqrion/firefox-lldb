@@ -237,11 +237,9 @@ export class RdpDebuggee {
 
     // Give the new page a chance to pause on its own (a buffered breakpoint
     // firing), then force it paused if it doesn't — see #scheduleResyncCheck.
-    // This must not happen synchronously/immediately: a driven navigate()
-    // is still awaiting Firefox's own navigateTo{waitForLoad:true} reply at
-    // this point, which only arrives once the new page's `load` event fires
-    // — interrupting the thread right now would freeze it before `load` can
-    // ever fire, deadlocking that await forever.
+    // This must not happen synchronously/immediately: give buffered
+    // breakpoints on the replacement page a chance to fire through the normal
+    // all-stop path before forcing the new target to stop.
     session.on("target", (info: ThreadInfo) => {
       if (info.isTopLevel) this.#scheduleResyncCheck(info.tid);
     });
