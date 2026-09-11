@@ -4,7 +4,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { findFirefoxBinary, launchFirefox } from "../../src/rdp/firefox.js";
+import { findFirefoxBinary, launchFirefox } from "../../src/core/firefox.js";
 import net from "node:net";
 import { chmod, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";

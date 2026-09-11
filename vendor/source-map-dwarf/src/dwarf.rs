@@ -25,6 +25,8 @@ pub struct DebugSection {
 }
 
 pub fn build(module: &ModuleInfo, sm: &SourceMap, opts: &Options) -> Result<Vec<DebugSection>> {
+    if sm.tokens().count() > 2_000_000 { return Err(crate::Error::Limit("2000000 mappings")); }
+    if sm.get_source_count() > 4096 { return Err(crate::Error::Limit("4096 source files")); }
     let encoding = gimli::Encoding {
         format: gimli::Format::Dwarf32,
         version: 4,
@@ -103,13 +105,10 @@ fn build_line_program(
         let fn_start = func.range_start as u64;
         let fn_end = func.range_end as u64;
 
-        let rows: Vec<_> = tokens
-            .iter()
-            .filter(|t| {
-                let col = t.get_dst_col() as u64;
-                col >= fn_start && col < fn_end
-            })
-            .collect();
+        // Tokens are sorted by file offset; visit only this function's rows.
+        let first = tokens.partition_point(|t| (t.get_dst_col() as u64) < fn_start);
+        let end = tokens.partition_point(|t| (t.get_dst_col() as u64) < fn_end);
+        let rows = &tokens[first..end];
 
         if rows.is_empty() {
             continue;
@@ -118,7 +117,7 @@ fn build_line_program(
         let first_addr = file_to_dwarf(rows[0].get_dst_col() as u64, body_start);
         program.begin_sequence(Some(Address::Constant(first_addr)));
 
-        for token in &rows {
+        for token in rows {
             let src = match token.get_source() {
                 Some(s) => s,
                 None => continue,

@@ -4,6 +4,12 @@ mod emit;
 mod resolve;
 mod sources;
 mod wasm;
+pub use wasm::{ModuleInfo, WasmValType};
+
+/// Typed locals/globals and file-relative function ranges from the browser's bytes.
+pub fn module_metadata(bytes: &[u8]) -> Result<ModuleInfo> {
+    wasm::parse(bytes)
+}
 
 use std::path::PathBuf;
 
@@ -27,6 +33,8 @@ pub enum Error {
     SourceMapFormat,
     #[error("invalid base64 in data: URL")]
     Base64,
+    #[error("symbol input exceeds {0} limit")]
+    Limit(&'static str),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

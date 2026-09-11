@@ -2,16 +2,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-// Post-transpile patch for the jco-generated component module.
-//
-// jco 1.24 has a codegen bug: trampoline catch-block debug logs reference a
-// bare `currentSubtask` that is only declared in some scopes, so when a debuggee
-// import throws/rejects (e.g. to signal a WIT `result` Err) the error path
-// raises `ReferenceError: currentSubtask is not defined` instead of lifting the
-// Err. We declare `currentSubtask` at the top of instantiate(); the legitimate
-// inner `let currentSubtask` declarations shadow it where they exist.
-//
-// Run after every `jco transpile` (wired into the justfile). Idempotent.
+// Apply the two jco 1.24.3 workarounds after npm run component:transpile.
+// Idempotent; changed/ambiguous anchors fail before writing. Removal criteria
+// and regression coverage are recorded in docs/COMPATIBILITY.md.
 
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -22,19 +15,33 @@ const file = path.join(
   "..",
   "src/gdb/generated/gdbstub.js"
 );
+// Catch-block diagnostics reference an undeclared currentSubtask in some
+// trampolines. Inner declarations shadow this fallback where they exist.
 const MARKER = "let currentSubtask; // jco-patch";
 const ANCHOR =
   "export function instantiate(getCoreModule, imports, instantiateCore = WebAssembly.instantiate) {";
 
-// Patch 2: AsyncSubtask inserted into cstate.handles but never removed.
-// When resolve() fires it calls removeSubtask() on the parent task's array
-// but never calls cstate.handles.remove(), so every completed async call leaks
-// one AsyncSubtask + Waitable + Promise into the RepTable forever. Streams and
-// futures already call cstate.handles.remove() at the equivalent point.
+// Completing an AsyncSubtask removes it from its parent but not the handle
+// table. Release that handle too, matching stream/future completion ownership.
 const MARKER2 = "this.#getComponentState().handles.remove(this.waitableRep()); // jco-patch";
 const ANCHOR2 = "this.#parentTask.removeSubtask(this);";
 
 let src = readFileSync(file, "utf8");
+
+// Refuse ambiguous output: silently patching one of several matches leaves a
+// build that looks regenerated but still contains an unfixed trampoline.
+for (const [name, anchor, marker] of [
+  ["currentSubtask", ANCHOR, MARKER],
+  ["AsyncSubtask", ANCHOR2, MARKER2],
+]) {
+  const anchors = src.split(anchor).length - 1;
+  const markers = src.split(marker).length - 1;
+  if (anchors !== 1 || markers > 1) {
+    throw new Error(
+      `patch-generated: ${name}: expected one anchor and at most one marker, got ${anchors}/${markers}`
+    );
+  }
+}
 
 if (!src.includes(MARKER)) {
   if (!src.includes(ANCHOR)) {
@@ -54,4 +61,6 @@ if (!src.includes(MARKER2)) {
   console.log("patch-generated: applied AsyncSubtask handles leak fix");
 }
 
-writeFileSync(file, src);
+// Generated whitespace has no semantic role; normalize it deterministically so
+// regenerated diffs can be checked with the same whitespace gate as source.
+writeFileSync(file, src.replace(/[\t ]+$/gm, ""));

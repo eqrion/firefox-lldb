@@ -9,16 +9,9 @@ wit_bindgen::generate!({
 });
 pub(crate) use bytecodealliance::wasmtime::debuggee::*;
 
-/// One "resumption", or period of execution, in the debuggee.
-///
-/// Upstream awaits the resumption through a `wasi:io/poll` pollable via wstd's
-/// reactor. We run this component inside a worker and bridge the `debuggee`
-/// interface to an async host (RDP) over a synchronous SharedArrayBuffer RPC,
-/// so `EventFuture::finish` already blocks until the next event arrives. We
-/// therefore drop the pollable/reactor machinery: `wait()` is a no-op and
-/// `result()` simply calls `finish()`. (The upstream reactor path also panics
-/// under jco, where `Reactor::current` is unavailable in gdbstub's synchronous
-/// resume() call.)
+/// Owns one execution future. `finish` blocks this worker on the host's SAB
+/// response; no wstd poll reactor participates. See docs/COMPATIBILITY.md for
+/// the resulting protocol-interrupt limitation.
 pub struct Resumption {
     future: EventFuture,
 }
@@ -35,8 +28,6 @@ impl Resumption {
             future: d.single_step(tid, r),
         }
     }
-
-    pub async fn wait(&mut self) {}
 
     pub fn result(self, d: &Debuggee) -> std::result::Result<Event, Error> {
         EventFuture::finish(self.future, d)

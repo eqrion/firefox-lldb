@@ -8,8 +8,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-// @ts-expect-error — .mjs file has no type declarations
 import { encode, decode } from "../../src/gdb/worker/wire.mjs";
+import { parseRequest } from "../../src/gdb/worker/contract.mjs";
 
 function roundTrip(value: unknown): unknown {
   const encoded = encode(value);
@@ -81,4 +81,45 @@ test("encode produces a Uint8Array", () => {
   const encoded = encode({ ok: true, value: 42 });
   assert.ok(encoded instanceof Uint8Array);
   assert.ok(encoded.length > 0);
+});
+
+test("wire numbers preserve NaN, infinities, and negative zero", () => {
+  for (const value of [NaN, Infinity, -Infinity, -0]) assert.ok(Object.is(roundTrip(value), value));
+});
+
+test("wire rejects truncated lengths, dangling blob references, and trailing bytes", () => {
+  const valid = encode({ data: new Uint8Array([1, 2, 3]) });
+  for (let end = 0; end < valid.length; end++) assert.throws(() => decode(valid.subarray(0, end)));
+  assert.throws(() => decode(new Uint8Array([...valid, 0])), /trailing/);
+  assert.throws(() => roundTrip({ $bin: 99 }), /binary reference/);
+  assert.throws(() => roundTrip({ $big: "not an integer" }), /bigint/);
+});
+
+test("wire bounds output allocation and recursive metadata", () => {
+  assert.throws(() => encode(new Uint8Array(32 * 1024 * 1024)), /32 MiB/);
+  const cyclic: { self?: unknown } = {};
+  cyclic.self = cyclic;
+  assert.throws(() => encode(cyclic), /nesting/);
+  assert.throws(() => encode("x".repeat(1024 * 1024 + 1)), /metadata limit/);
+});
+
+test("RPC request schema rejects unknown methods and unsupported resumptions", () => {
+  const request = {
+    sequence: 1,
+    type: "Debuggee",
+    id: 0,
+    method: "continue",
+    args: [{ tag: "normal" }],
+  };
+  assert.deepEqual(parseRequest(request), request);
+  for (const changed of [
+    { method: "constructor" },
+    { type: "Unknown" },
+    { id: 1 },
+    { args: [] },
+    { args: [{ tag: "inject-call", val: {} }] },
+    { type: "Frame", id: 1, method: "getLocal", args: [-1] },
+    { type: "Memory", id: 1, method: "getBytes", args: [0, 16] },
+  ])
+    assert.throws(() => parseRequest({ ...request, ...changed }), /invalid gdb RPC/);
 });

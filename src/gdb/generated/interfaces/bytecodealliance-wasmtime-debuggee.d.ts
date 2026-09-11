@@ -120,7 +120,7 @@ export class Frame {
   private constructor();
   getInstance(d: Debuggee): Instance;
   getPc(d: Debuggee): number;
-  getLocals(d: Debuggee): Array<WasmValue>;
+  getLocal(d: Debuggee, index: number): WasmValue;
   getStack(d: Debuggee): Array<WasmValue>;
   parentFrame(d: Debuggee): Frame | undefined;
 }

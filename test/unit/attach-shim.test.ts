@@ -5,8 +5,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import net from "node:net";
+import { once } from "node:events";
 import { startAttachShim } from "../../src/protocol/attach-shim.js";
 import { framePacket } from "../../src/protocol/packet.js";
+import { RspClient } from "./rsp-client.js";
 
 function checksum(s: string): number {
   let sum = 0;
@@ -38,7 +40,7 @@ function startFakeComponent(): Promise<{ port: number; close(): void }> {
   });
 }
 
-test("shim injects W00 when component closes after vAttach", async () => {
+test("shim does not invent a successful exit when component closes after vAttach", async () => {
   // Component that answers QStartNoAckMode and qProcessInfo (pre-attach), then
   // destroys the connection once vAttach arrives.
   const compServer = await new Promise<{ port: number; close(): void }>((resolve) => {
@@ -91,12 +93,11 @@ test("shim injects W00 when component closes after vAttach", async () => {
   lldb.write(framePacket("QStartNoAckMode"));
   await new Promise<void>((r) => setTimeout(r, 20));
   lldb.write(framePacket("vAttach;1"));
-  // Wait for the component to close (and for the shim to inject W00).
+  // Wait for the component's EOF to reach LLDB.
   const data = await received;
   const text = data.toString("latin1");
 
-  // The shim should have injected $W00#b7 before ending the connection.
-  assert.ok(text.includes("$W00#b7"), `expected W00 packet in: ${JSON.stringify(text)}`);
+  assert.doesNotMatch(text, /\$W00#/, "connection loss must not become a successful process exit");
 
   await shim.close();
   compServer.close();
@@ -118,37 +119,56 @@ test("shim does NOT inject W00 when component closes before vAttach", async () =
   compServer.close();
 });
 
-test("shim rejects vAttach for a PID the platform did not advertise", async () => {
-  let upstream = "";
-  const compServer = await new Promise<{ port: number; close(): void }>((resolve) => {
-    const srv = net.createServer((conn) => {
-      conn.on("data", (data) => (upstream += data.toString("latin1")));
-    });
-    srv.listen(0, "127.0.0.1", () => {
-      const port = (srv.address() as net.AddressInfo).port;
-      resolve({ port, close: () => srv.close() });
-    });
+test("shim preserves the component's actual exit status", { timeout: 5000 }, async (t) => {
+  const component = net.createServer((socket) => {
+    t.after(() => socket.destroy());
+    socket.once("data", () => socket.end(framePacket("W17")));
   });
+  component.listen(0, "127.0.0.1");
+  await once(component, "listening");
   const shim = await startAttachShim({
     listenPort: 0,
-    componentPort: compServer.port,
-    isValidPid: (pid) => pid === 1,
+    componentPort: (component.address() as net.AddressInfo).port,
   });
   const lldb = net.createConnection({ port: shim.port, host: "127.0.0.1" });
-  await new Promise<void>((resolve, reject) => {
-    lldb.once("connect", resolve);
-    lldb.once("error", reject);
+  t.after(async () => {
+    lldb.destroy();
+    await shim.close();
+    await new Promise<void>((resolve) => component.close(() => resolve()));
   });
-
-  const rejected = new Promise<Buffer>((resolve) => lldb.once("data", resolve));
-  lldb.write(framePacket("vAttach;3e7"));
-  const reply = (await rejected).toString("latin1");
-  assert.match(reply, /\$E01#/);
-
-  await new Promise<void>((resolve) => setTimeout(resolve, 20));
-  assert.doesNotMatch(upstream, /vAttach/, "invalid attach must not reach the component");
-
-  lldb.destroy();
-  await shim.close();
-  compServer.close();
+  const received = collectBytes(lldb);
+  lldb.write(framePacket("vAttach;1"));
+  assert.deepEqual(await received, framePacket("W17"));
 });
+
+test(
+  "shim rejects vAttach for a PID the platform did not advertise",
+  { timeout: 5000 },
+  async (t) => {
+    let upstream = "";
+    const compServer = await new Promise<{ port: number; close(): void }>((resolve) => {
+      const srv = net.createServer((conn) => {
+        conn.on("data", (data) => (upstream += data.toString("latin1")));
+      });
+      srv.listen(0, "127.0.0.1", () => {
+        const port = (srv.address() as net.AddressInfo).port;
+        resolve({ port, close: () => srv.close() });
+      });
+    });
+    const shim = await startAttachShim({
+      listenPort: 0,
+      componentPort: compServer.port,
+      isValidPid: (pid) => pid === 1,
+    });
+    const lldb = await RspClient.connect(shim.port);
+    t.after(async () => {
+      lldb.close();
+      await shim.close();
+      compServer.close();
+    });
+    assert.equal(await lldb.requestText("vAttach;3e7"), "E01");
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    assert.doesNotMatch(upstream, /vAttach/, "invalid attach must not reach the component");
+  }
+);

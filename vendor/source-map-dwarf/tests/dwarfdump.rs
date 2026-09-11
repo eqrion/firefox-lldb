@@ -1,6 +1,5 @@
 /// Integration test that runs `llvm-dwarfdump --verify` on converted output.
 /// Skipped if llvm-dwarfdump is not found on PATH.
-
 use arbitrary::Unstructured;
 use source_map_dwarf::{Options, SourceMapInput, convert};
 use sourcemap::SourceMapBuilder;
@@ -56,7 +55,9 @@ fn generate_module(seed: u64) -> Vec<u8> {
     config.simd_enabled = false;
     config.relaxed_simd_enabled = false;
     config.min_funcs = 1;
-    Module::new(config, &mut u).expect("generate module").to_bytes()
+    Module::new(config, &mut u)
+        .expect("generate module")
+        .to_bytes()
 }
 
 fn make_source_map(wasm: &[u8], body_start: u64) -> Vec<u8> {
@@ -102,9 +103,13 @@ fn dwarfdump_verify() {
         return;
     };
 
+    let mut verified = 0;
+    let mut unsupported_inputs = 0;
     for seed in 0..256 {
         let wasm = generate_module(seed);
-        let Some(body_start) = code_section_body_start(&wasm) else { continue };
+        let Some(body_start) = code_section_body_start(&wasm) else {
+            continue;
+        };
 
         let sm_bytes = make_source_map(&wasm, body_start);
         let opts = Options {
@@ -114,31 +119,43 @@ fn dwarfdump_verify() {
 
         let out = convert(&wasm, &opts).unwrap_or_else(|e| panic!("seed={seed}: {e}"));
 
-        let tmp = std::env::temp_dir().join(format!("smd_test_{seed}.wasm"));
-        std::fs::write(&tmp, &out).unwrap();
-
-        let output = std::process::Command::new(&dwarfdump)
-            .arg("--verify")
-            .arg(&tmp)
-            .output()
-            .expect("run llvm-dwarfdump");
-
-        std::fs::remove_file(&tmp).ok();
-
-        let stderr = String::from_utf8_lossy(&output.stderr);
-
-        // LLVM's wasm object reader crashes on some valid-but-unusual constructs
-        // (e.g. GC types in globals). That's an LLVM bug unrelated to our DWARF;
-        // skip those seeds rather than failing the test.
-        if stderr.contains("LLVM ERROR") || stderr.contains("Stack dump:") {
-            eprintln!("seed={seed}: llvm-dwarfdump crashed (LLVM bug), skipping");
+        let tmp = std::env::temp_dir().join(format!("smd_test_{}_{seed}.wasm", std::process::id()));
+        let verify = |bytes: &[u8]| {
+            std::fs::write(&tmp, bytes).unwrap();
+            let output = std::process::Command::new(&dwarfdump)
+                .arg("--verify")
+                .arg(&tmp)
+                .output()
+                .expect("run llvm-dwarfdump");
+            std::fs::remove_file(&tmp).unwrap();
+            output
+        };
+        // Some wasm-smith inputs exceed this verifier's object-reader support.
+        // Establish that on the original bytes; never excuse a converter-only crash.
+        let baseline = verify(&wasm);
+        let baseline_stderr = String::from_utf8_lossy(&baseline.stderr);
+        if baseline_stderr.contains("LLVM ERROR") || baseline_stderr.contains("Stack dump:") {
+            unsupported_inputs += 1;
+            eprintln!("seed={seed}: verifier also crashes on original wasm; not verified");
             continue;
         }
+        assert!(
+            baseline.status.success(),
+            "seed={seed}: input verification failed: {baseline_stderr}"
+        );
 
+        let output = verify(&out);
+        let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
             output.status.success(),
             "seed={seed}: llvm-dwarfdump --verify failed\nstdout: {}\nstderr: {stderr}",
             String::from_utf8_lossy(&output.stdout),
         );
+        verified += 1;
     }
+    assert!(
+        verified > 0,
+        "no converted modules reached DWARF verification"
+    );
+    eprintln!("verified={verified}, unsupported_inputs={unsupported_inputs}");
 }

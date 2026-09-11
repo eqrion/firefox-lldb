@@ -124,11 +124,7 @@ impl<'a> CurrentActivePid for Debugger<'a> {
 
 impl<'a> MultiThreadBase for Debugger<'a> {
     fn read_registers(&mut self, regs: &mut WasmRegisters, tid: Tid) -> TargetResult<(), Self> {
-        regs.pc = self
-            .threads
-            .get(&tid)
-            .map(|ts| ts.current_pc.as_raw())
-            .unwrap_or(0);
+        regs.pc = self.validated_pc(tid).ok_or(TargetError::NonFatal)?.as_raw();
         Ok(())
     }
 
@@ -214,11 +210,7 @@ impl<'a> SingleRegisterAccess<Tid> for Debugger<'a> {
     ) -> TargetResult<usize, Self> {
         match reg_id {
             WasmRegId::Pc => {
-                let raw = self
-                    .threads
-                    .get(&tid)
-                    .map(|ts| ts.current_pc.as_raw())
-                    .unwrap_or(0);
+                let raw = self.validated_pc(tid).ok_or(TargetError::NonFatal)?.as_raw();
                 let bytes = raw.to_le_bytes();
                 let n = bytes.len().min(buf.len());
                 buf[..n].copy_from_slice(&bytes[..n]);
@@ -393,7 +385,13 @@ impl<'a> Libraries for Debugger<'a> {
     ) -> TargetResult<usize, Self> {
         let mut xml = String::from("<library-list>");
         for (m, addr) in self.addr_space.modules_with_addrs() {
-            let name = m.name();
+            let name = m
+                .name()
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+                .replace('"', "&quot;")
+                .replace('\'', "&apos;");
             xml.push_str(&format!(
                 "<library name=\"{name}\"><section address=\"{}\"/></library>",
                 addr.as_raw()
@@ -420,7 +418,10 @@ impl<'a> MemoryMap for Debugger<'a> {
         length: usize,
         buf: &mut [u8],
     ) -> TargetResult<usize, Self> {
-        let xml = self.addr_space.memory_map_xml(self.debuggee);
+        let xml = self
+            .addr_space
+            .memory_map_xml(self.debuggee)
+            .map_err(|_| TargetError::NonFatal)?;
         let xml_bytes = xml.as_bytes();
         let offset = usize::try_from(offset).unwrap();
         if offset >= xml_bytes.len() {
@@ -439,20 +440,22 @@ impl<'a> Wasm for Debugger<'a> {
             return Ok(());
         };
         let debuggee = self.debuggee;
+        let mut addresses = Vec::with_capacity(ts.frame_cache.len());
         for (i, f) in ts.frame_cache.iter().enumerate() {
-            // For non-innermost frames, report the return address
-            // (the instruction after the call) rather than the call
-            // instruction's PC. This matches the standard debugger
-            // convention and is needed for LLDB's `finish` command
-            // to set a breakpoint at the right address.
+            // Validate every frame before emitting anything. A target can arrive
+            // after stop publication, making the entire snapshot unavailable.
+            let Some(frame_pc) = self.addr_space.frame_to_pc(f, debuggee) else {
+                return Ok(());
+            };
             let pc = if i == 0 {
                 ts.current_pc
             } else {
-                self.addr_space
-                    .frame_to_return_addr(f, debuggee)
-                    .unwrap_or_else(|| self.addr_space.frame_to_pc(f, debuggee))
+                frame_pc
             };
-            callback(pc.as_raw());
+            addresses.push(pc.as_raw());
+        }
+        for pc in addresses {
+            callback(pc);
         }
         Ok(())
     }
@@ -470,13 +473,11 @@ impl<'a> Wasm for Debugger<'a> {
         let Some(f) = ts.frame_cache.get(frame_depth) else {
             return Ok(0);
         };
-        let Ok(locals) = f.get_locals(self.debuggee) else {
+        let Ok(index) = u32::try_from(index) else { return Ok(0); };
+        let Ok(val) = f.get_local(self.debuggee, index) else {
             return Ok(0);
         };
-        let Some(val) = locals.get(index) else {
-            return Ok(0);
-        };
-        let bytes = self.value_to_bytes(val.clone());
+        let bytes = self.value_to_bytes(val);
         buf[..bytes.len()].copy_from_slice(&bytes);
         Ok(bytes.len())
     }

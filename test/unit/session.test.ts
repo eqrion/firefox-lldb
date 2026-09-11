@@ -6,18 +6,100 @@
 // all-stop coordination, and breakpoint buffering. Uses a lightweight
 // fake RDP server so no real Firefox is required.
 
-import { test } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import net from "node:net";
+import { once } from "node:events";
 import { RdpWasmSession, type StoppedEvent, type PauseEvent } from "../../src/rdp/session.js";
 import { encodeRdpFrame, sliceRdpFrame } from "../../src/rdp/transport.js";
-import { EMPTY_WASM_MODULE } from "../../src/rdp/constants.js";
-import { noopLogger, type Logger } from "../../src/logging.js";
+import { noopLogger, type Logger } from "../../src/diagnostics/logger.js";
 import { MAX_SUPPORTED_FIREFOX_MAJOR } from "../../src/rdp/firefox-compatibility.js";
 
 // ---------------------------------------------------------------------------
 // Fake RDP server
 // ---------------------------------------------------------------------------
+
+test("retired target events cannot repopulate sources, URL, or stable TID", async (t) => {
+  const server = new FakeRdpServer();
+  await server.listen();
+  const session = await server.acceptSession();
+  server.onAll(
+    (packet) => packet.type === "sources",
+    (packet) => ({ from: packet.to, sources: [] })
+  );
+  t.after(() => {
+    session.close();
+    server.close();
+  });
+  let target = once(session, "target");
+  server.targetAvailable("old", { isTopLevel: true, url: "http://old/" });
+  await target;
+  const tid = session.topLevelTid();
+  target = once(session, "target");
+  server.targetAvailable("new", { isTopLevel: true, url: "http://new/" });
+  await target;
+  const generation = session.topLevelGeneration();
+  server.targetAvailable("old", { isTopLevel: true, url: "http://old/" });
+  server.send({ from: "old:target", type: "tabNavigated", url: "http://old/", state: "stop" });
+  server.send({
+    from: "old:target",
+    type: "resources-available-array",
+    array: [
+      ["source", [{ actor: "oldSource", url: "http://old/mod.wasm", introductionType: "wasm" }]],
+    ],
+  });
+  // This FIFO round trip is a barrier after all three injected old events.
+  await session.wasmSources();
+  assert.equal(session.topLevelGeneration(), generation);
+  assert.equal(session.topLevelTid(), tid);
+  assert.equal(session.topLevelUrl(), "http://new/");
+  assert.equal(session.urlForSourceActor("oldSource"), undefined);
+});
+
+test("navigation ignores the old document and requires a same-target start/stop sequence", async (t) => {
+  const server = new FakeRdpServer();
+  await server.listen();
+  const session = await server.acceptSession();
+  server.onAll(
+    (packet) => packet.type === "sources",
+    (packet) => ({ from: packet.to, sources: [] })
+  );
+  t.after(() => {
+    session.close();
+    server.close();
+  });
+  const target = once(session, "target");
+  const url = "http://page/";
+  server.targetAvailable("main", { isTopLevel: true, url });
+  await target;
+  let accepted!: () => void;
+  const request = new Promise<void>((resolve) => {
+    accepted = resolve;
+  });
+  server.onNext(
+    (packet) => packet.type === "navigateTo",
+    () => {
+      server.documentInteractive("main", url);
+      server.tabNavigated(url, "stop");
+      accepted();
+      return { from: "tab1" };
+    }
+  );
+  let complete = false;
+  const navigation = session.navigate(url).then(() => {
+    complete = true;
+  });
+  await request;
+  await session.wasmSources();
+  assert.equal(complete, false);
+  let diagnosticWakes = 0;
+  session.on("lifecycle-state", () => diagnosticWakes++);
+  session.logState();
+  assert.equal(diagnosticWakes, 0);
+  server.tabNavigated(url, "start");
+  server.tabNavigated(url, "stop");
+  await navigation;
+});
 
 function decodeAll(buf: Buffer): { packets: Record<string, unknown>[]; rest: Buffer } {
   const packets: Record<string, unknown>[] = [];
@@ -32,6 +114,10 @@ function decodeAll(buf: Buffer): { packets: Record<string, unknown>[]; rest: Buf
 
 type ReqPacket = Record<string, unknown>;
 type HandlerFn = (req: ReqPacket) => object | null;
+const servers = new Set<FakeRdpServer>();
+after(() => {
+  for (const server of servers) server.close();
+});
 
 /**
  * Minimal fake Firefox RDP server.
@@ -53,6 +139,7 @@ class FakeRdpServer {
   firefoxVersion = "154.0";
 
   constructor() {
+    servers.add(this);
     this.srv = net.createServer((s) => {
       this.sock = s;
       this.pendingConnect?.();
@@ -94,7 +181,7 @@ class FakeRdpServer {
     );
     this.#on(
       (r) => r.to === "root" && r.type === "listTabs",
-      () => ({ from: "root", tabs: [{ actor: "tab1", selected: true }] })
+      () => ({ from: "root", tabs: [{ actor: "tab1", browserId: 10, selected: true }] })
     );
     this.#on(
       (r) => r.to === "tab1" && r.type === "getWatcher",
@@ -384,9 +471,10 @@ test("resources-available-array maps worker source actors to their URLs", async 
   const session = await srv.acceptSession();
 
   srv.targetAvailable("mainThread", { isTopLevel: true });
+  srv.targetAvailable("workerThread");
   await sleep(200);
   srv.send({
-    from: "workerTarget",
+    from: "workerThread:target",
     type: "resources-available-array",
     array: [
       [
@@ -602,6 +690,98 @@ test("destroying a paused target discards its unwitnessed-pause marker", async (
 
   session.close();
   srv.close();
+});
+
+test("a worker arriving during collection joins the same stop operation", async (t) => {
+  const server = new FakeRdpServer();
+  await server.listen();
+  const session = await server.acceptSession();
+  t.after(() => {
+    session.close();
+    server.close();
+  });
+  server.onAll(
+    (p) => p.type === "sources",
+    (p) => ({ from: p.to, sources: [] })
+  );
+  let target = once(session, "target");
+  server.targetAvailable("main", { isTopLevel: true });
+  await target;
+  target = once(session, "target");
+  server.targetAvailable("firstWorker");
+  await target;
+  let firstInterrupted!: () => void;
+  let newInterrupted!: () => void;
+  const first = new Promise<void>((resolve) => {
+    firstInterrupted = resolve;
+  });
+  const added = new Promise<void>((resolve) => {
+    newInterrupted = resolve;
+  });
+  server.onAll(
+    (p) => p.type === "interrupt",
+    (p) => {
+      if (p.to === "firstWorker") firstInterrupted();
+      if (p.to === "newWorker") newInterrupted();
+      return null;
+    }
+  );
+  const operation = session.armAllStop();
+  server.paused("main");
+  await first;
+  server.targetAvailable("newWorker");
+  await added;
+  server.paused("firstWorker");
+  await session.wasmSources();
+  assert.equal(operation.pending, true);
+  server.paused("newWorker");
+  const event = await operation.promise;
+  assert.equal(event.stopId, operation.id);
+  assert.equal(event.generation, session.topLevelGeneration());
+  assert.deepEqual(event.pausedTids, session.listTids());
+});
+
+test("retiring the all-stop trigger keeps the execution wait for the replacement", async (t) => {
+  const server = new FakeRdpServer();
+  await server.listen();
+  const session = await server.acceptSession();
+  t.after(() => {
+    session.close();
+    server.close();
+  });
+  server.onAll(
+    (p) => p.type === "sources",
+    (p) => ({ from: p.to, sources: [] })
+  );
+  let target = once(session, "target");
+  server.targetAvailable("oldMain", { isTopLevel: true });
+  await target;
+  target = once(session, "target");
+  server.targetAvailable("oldWorker");
+  await target;
+  let interrupted!: () => void;
+  const collecting = new Promise<void>((resolve) => {
+    interrupted = resolve;
+  });
+  server.onAll(
+    (p) => p.type === "interrupt",
+    () => {
+      interrupted();
+      return null;
+    }
+  );
+  const operation = session.armAllStop();
+  const oldGeneration = session.topLevelGeneration();
+  server.paused("oldMain");
+  await collecting;
+  server.targetAvailable("newMain", { isTopLevel: true });
+  await session.wasmSources();
+  assert.equal(operation.pending, true);
+  server.paused("newMain");
+  const event = await operation.promise;
+  assert.ok(event.generation > oldGeneration);
+  assert.equal(event.pausePacket.from, "newMain");
+  assert.deepEqual(event.pausedTids, [session.topLevelTid()]);
 });
 
 test("all-stop reuses its pause listener when navigation reuses a tid", async () => {
@@ -859,6 +1039,29 @@ test("allStop does not send interrupt to already-paused thread", async () => {
 // Tests: breakpoint buffering
 // ---------------------------------------------------------------------------
 
+async function advertiseWasm(
+  srv: FakeRdpServer,
+  session: RdpWasmSession,
+  actor: string,
+  offset: number
+): Promise<void> {
+  srv.onNext(
+    (request) => request.type === "sources",
+    () => ({
+      from: actor,
+      sources: [{ actor: `${actor}:wasm`, url: "http://host/mod.wasm", introductionType: "wasm" }],
+    })
+  );
+  srv.onAll(
+    (request) => request.type === "getBreakpointPositionsCompressed",
+    (request) => ({
+      from: request.to,
+      positions: { [offset]: [1] },
+    })
+  );
+  await session.wasmSources();
+}
+
 test("setWasmBreakpoint buffers breakpoint and applies it to new workers", async () => {
   const srv = new FakeRdpServer();
   await srv.listen();
@@ -882,6 +1085,8 @@ test("setWasmBreakpoint buffers breakpoint and applies it to new workers", async
 
   // Now a new worker appears.
   srv.targetAvailable("workerT", { consoleActor: "consoleW" });
+  await sleep(20);
+  await advertiseWasm(srv, session, "workerT", 1234);
   await sleep(700);
 
   // The setBreakpoint request should have been sent to workerT.
@@ -909,6 +1114,7 @@ test("setWasmBreakpoint sends to all existing threads at call time", async () =>
     (r) => ({ from: r.to as string })
   );
 
+  await advertiseWasm(srv, session, "threadA", 999);
   await session.setWasmBreakpoint("http://host/mod.wasm", 999);
 
   const bps = srv.received.filter((r) => r.type === "setBreakpoint");
@@ -963,13 +1169,13 @@ test("a wasm source with no URL is skipped instead of poisoning the session", as
 
 // Defence at the WIT boundary: Module.bytecode has no error case, so any throw
 // out of it is fatal to the worker. Degrade to an empty module instead.
-test("fetchModuleBytes degrades instead of throwing when the URL is not a string", async () => {
+test("fetchModuleBytes reports unavailable when the URL is not a string", async () => {
   const srv = new FakeRdpServer();
   await srv.listen();
   const session = await srv.acceptSession();
 
   const bytes = await session.fetchModuleBytes(null as unknown as string);
-  assert.deepEqual(bytes, EMPTY_WASM_MODULE);
+  assert.equal(bytes, undefined);
 
   session.close();
   srv.close();
@@ -1025,9 +1231,7 @@ test("removeWasmBreakpoint uses same offset wire as setWasmBreakpoint", async ()
     (r) => ({ from: r.to as string })
   );
 
-  // No wasmActorByUrl entry → #snapOffset returns offset unchanged.
-  // Verify set and remove both send the same offset (42) so a real snapped
-  // remove would also use the snapped value rather than the original.
+  await advertiseWasm(srv, session, "threadA", 42);
   await session.setWasmBreakpoint("http://host/mod.wasm", 42);
   await session.removeWasmBreakpoint("http://host/mod.wasm", 42);
 
@@ -1058,6 +1262,7 @@ test("removeWasmBreakpoint sends to all threads and removes from buffer", async 
     (r) => ({ from: r.to as string })
   );
 
+  await advertiseWasm(srv, session, "threadA", 42);
   await session.setWasmBreakpoint("http://host/mod.wasm", 42);
   await session.removeWasmBreakpoint("http://host/mod.wasm", 42);
 
@@ -1555,10 +1760,12 @@ test("navigate() requires both the request reply and destination across either o
               "navigation completion must not depend on Firefox's load-event reply"
             );
             if (completionFirst) {
+              srv.tabNavigated(destinationUrl, "start");
               srv.tabNavigated(destinationUrl, "stop");
               setTimeout(() => srv.send({ from: "tab1" }), 30);
               return null;
             }
+            srv.tabNavigated(destinationUrl, "start");
             setTimeout(() => srv.tabNavigated(destinationUrl, "stop"), 30);
             return { from: "tab1" };
           }
@@ -1606,6 +1813,7 @@ test("navigate() rejects a concurrent operation without replacing the active sta
     (request) => request.type === "navigateTo",
     () => {
       setTimeout(() => {
+        srv.tabNavigated("http://example.com/first.html", "start");
         srv.tabNavigated("http://example.com/first.html", "stop");
         srv.send({ from: "tab1" });
       }, 30);
@@ -1822,14 +2030,9 @@ test("uncontrolled top-level target swap (no navigate()) invalidates stale wasm 
   srv.targetAvailable("thread2", { isTopLevel: true, url: "http://example.com/v1.html" });
   await sleep(700);
 
-  // thread2's source actors never resolved (the poll above exhausted) — the
-  // re-applied breakpoint must fall back to the unsnapped offset rather
-  // than hang or crash trying to reach the now-dead wasmActorOld.
-  assert.equal(
-    secondSetLine,
-    12,
-    "breakpoint re-applied right away (before the next stop's sources refresh) must degrade to unsnapped, not touch the dead actor"
-  );
+  // No current-generation source means replay remains pending. In particular,
+  // it must neither reuse a retired actor nor install an unsnapped location.
+  assert.equal(secondSetLine, undefined, "breakpoint replay waits for a current-generation source");
 
   // Once something does refresh sources for the new target (e.g. the next
   // stop's #allModules()), the stale actor must be gone and the new one used.

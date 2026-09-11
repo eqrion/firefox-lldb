@@ -3,11 +3,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-// MCP stdio server exposing the firefox-lldb REPL to a coding agent. It holds a
-// single debug session (a real CLI driven in a pty; see pty-repl.ts) and turns
-// REPL interaction into request/response tools. Page automation (navigate,
-// click, screenshot) is left to firefox-devtools-mcp, which connects to the
-// *same* Firefox over Marionette on `marionettePort` — call lldb_launch first.
+// Exposes one owned CLI/PTY lifetime through MCP. Page automation uses
+// firefox-devtools-mcp on the same Firefox via its reported Marionette port.
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -16,8 +13,8 @@ import {
   ListToolsRequestSchema,
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
-import { freePort } from "../platform/gdb-server-spawner.js";
-import { DEFAULT_SEND_TIMEOUT_MS, PtyRepl, type SendResult } from "./pty-repl.js";
+import { DEFAULT_SEND_TIMEOUT_MS, validateTimeout, type SendResult } from "./pty-repl.js";
+import { ReplOwner } from "./repl-owner.js";
 import { marionettePort } from "../config.js";
 
 // Fixed defaults so the firefox-devtools-mcp entry in .mcp.json can hard-code a
@@ -94,7 +91,7 @@ const TOOLS: Tool[] = [
   },
 ];
 
-let repl: PtyRepl | undefined;
+const owner = new ReplOwner();
 
 function text(s: string) {
   return { content: [{ type: "text" as const, text: s }] };
@@ -111,27 +108,21 @@ function sendText(r: SendResult): string {
 
 function timeoutArg(value: unknown, fallback: number): number {
   const timeout = Number(value ?? fallback);
-  if (!Number.isFinite(timeout) || timeout < 0) {
-    throw new Error(`timeoutMs must be a non-negative finite number, got ${String(value)}`);
-  }
+  validateTimeout(timeout);
   return timeout;
 }
 
 async function call(name: string, args: Record<string, unknown>) {
+  const repl = owner.active;
   switch (name) {
     case "lldb_launch": {
-      if (repl) {
-        await repl.shutdown();
-        repl = undefined;
-      }
-      repl = await PtyRepl.launch({
+      const launched = await owner.replace({
         url: String(args.url),
         headless: Boolean(args.headless ?? false),
-        rdpPort: await freePort(),
         marionettePort: MARIONETTE_PORT,
         fire: args.fire ? String(args.fire) : undefined,
       });
-      const banner = await repl.read(500);
+      const banner = await launched.read(0);
       return text(
         `Attached. firefox-devtools-mcp can --connect-existing --marionette-port ${MARIONETTE_PORT}.` +
           (banner ? `\n\n${banner}` : "")
@@ -154,9 +145,7 @@ async function call(name: string, args: Record<string, unknown>) {
       return text((await repl.read(timeoutArg(args.timeoutMs, 2000))) || "(no output)");
     }
     case "lldb_shutdown": {
-      if (!repl) return text("no session");
-      await repl.shutdown();
-      repl = undefined;
+      await owner.shutdown();
       return text("shut down");
     }
     default:
@@ -181,7 +170,7 @@ async function main(): Promise<void> {
 
   const shutdown = async () => {
     try {
-      await repl?.shutdown();
+      await owner.close();
       process.exit(0);
     } catch (err) {
       console.error(err);
@@ -190,6 +179,10 @@ async function main(): Promise<void> {
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
+  process.on("SIGHUP", shutdown);
+  server.onclose = () => {
+    void shutdown();
+  };
 
   // An MCP client that dies without cleanly closing stdio (e.g. killed via
   // SIGKILL, which doesn't cascade to children) never signals us, orphaning

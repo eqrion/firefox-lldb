@@ -41,10 +41,16 @@ export async function* report(
       }
       case "test:stdout":
       case "test:stderr": {
-        // Harness notices (a consumed setup retry) report on the run itself, so
-        // they print unconditionally; everything else is page/protocol chatter
-        // that only belongs in a verbose run.
-        if (verbose || /^\[harness\]/m.test(data.message)) writeDiagnostic(data.message);
+        // Consumed setup/attach attempts remain visible even after recovery.
+        // Ordinary page/protocol chatter belongs only in a verbose run.
+        if (
+          verbose ||
+          /^\[harness\]/m.test(data.message) ||
+          /^\[warn\] \[(?:attach|launch)\] (?:failed attempt=|reacquiring lost startup target)/m.test(
+            data.message
+          )
+        )
+          writeDiagnostic(data.message);
         break;
       }
       case "test:pass": {

@@ -49,6 +49,8 @@ pub struct Func {
 
 #[derive(Debug)]
 pub struct ModuleInfo {
+    pub globals: Vec<WasmValType>,
+    pub memory_count: u32,
     /// File byte offset of the first byte of the code section body payload
     /// (the function-count LEB128). All DWARF addresses are relative to this.
     pub code_section_body_start: u64,
@@ -72,6 +74,8 @@ pub fn parse(wasm: &[u8]) -> Result<ModuleInfo> {
     let mut type_params: Vec<Vec<WasmValType>> = Vec::new();
     let mut func_type_indices: Vec<u32> = Vec::new();
     let mut import_func_count: u32 = 0;
+    let mut globals = Vec::new();
+    let mut memory_count = 0;
 
     let mut code_section_body_start: Option<u64> = None;
     let mut raw_bodies: Vec<(u32, std::ops::Range<usize>, Vec<(u32, ValType)>)> = Vec::new();
@@ -80,11 +84,13 @@ pub fn parse(wasm: &[u8]) -> Result<ModuleInfo> {
         let payload = payload?;
         match payload {
             Payload::TypeSection(reader) => {
+                if reader.count() > 100_000 { return Err(Error::Limit("100000 type groups")); }
                 for rec_group in reader {
                     let rec_group = rec_group?;
                     for sub_type in rec_group.types() {
                         match &sub_type.composite_type.inner {
                             CompositeInnerType::Func(ft) => {
+                                if ft.params().len() > 100_000 { return Err(Error::Limit("100000 function parameters")); }
                                 type_params.push(
                                     ft.params().iter().map(|&v| WasmValType::from(v)).collect(),
                                 );
@@ -103,8 +109,19 @@ pub fn parse(wasm: &[u8]) -> Result<ModuleInfo> {
                     if matches!(import.ty, TypeRef::Func(_) | TypeRef::FuncExact(_)) {
                         import_func_count += 1;
                     }
+                    if let TypeRef::Global(ty) = import.ty {
+                        if globals.len() >= 65_536 { return Err(Error::Limit("65536 globals")); }
+                        globals.push(ty.content_type.into());
+                    }
+                    if matches!(import.ty, TypeRef::Memory(_)) { memory_count += 1; }
                 }
             }
+
+            Payload::GlobalSection(reader) => {
+                if globals.len() + reader.count() as usize > 65_536 { return Err(Error::Limit("65536 globals")); }
+                for global in reader { globals.push(global?.ty.content_type.into()); }
+            }
+            Payload::MemorySection(reader) => { memory_count += reader.count(); }
 
             Payload::FunctionSection(reader) => {
                 for type_idx in reader {
@@ -119,6 +136,7 @@ pub fn parse(wasm: &[u8]) -> Result<ModuleInfo> {
             }
 
             Payload::CodeSectionEntry(body) => {
+                if raw_bodies.len() >= 100_000 { return Err(Error::Limit("100000 functions")); }
                 let func_index = import_func_count + raw_bodies.len() as u32;
                 let range = body.range();
                 let locals = collect_body_locals(body)?;
@@ -154,6 +172,7 @@ pub fn parse(wasm: &[u8]) -> Result<ModuleInfo> {
     let body_start = code_section_body_start.ok_or(Error::NoCodeSection)?;
 
     let mut funcs = Vec::with_capacity(raw_bodies.len());
+    let mut total_locals = 0_usize;
     for (func_index, range, body_locals) in raw_bodies {
         let type_idx_in_code = (func_index - import_func_count) as usize;
         let type_idx = func_type_indices
@@ -161,6 +180,8 @@ pub fn parse(wasm: &[u8]) -> Result<ModuleInfo> {
             .copied()
             .unwrap_or(0) as usize;
         let params = type_params.get(type_idx).cloned().unwrap_or_default();
+        total_locals += params.len();
+        if total_locals > 2_000_000 { return Err(Error::Limit("2000000 module locals")); }
 
         let mut locals: Vec<Local> = Vec::new();
         let fn_local_names = local_names.get(&func_index);
@@ -175,6 +196,11 @@ pub fn parse(wasm: &[u8]) -> Result<ModuleInfo> {
 
         let mut local_idx = params.len() as u32;
         for (count, vt) in body_locals {
+            total_locals += count as usize;
+            if total_locals > 2_000_000 { return Err(Error::Limit("2000000 module locals")); }
+            if count as usize > 100_000_usize.saturating_sub(locals.len()) {
+                return Err(Error::Limit("100000 locals per function"));
+            }
             let wvt = WasmValType::from(vt);
             for _ in 0..count {
                 let name = fn_local_names
@@ -195,6 +221,8 @@ pub fn parse(wasm: &[u8]) -> Result<ModuleInfo> {
     }
 
     Ok(ModuleInfo {
+        globals,
+        memory_count,
         code_section_body_start: body_start,
         funcs,
         func_names,

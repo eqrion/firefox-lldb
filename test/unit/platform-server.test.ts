@@ -26,9 +26,7 @@ const fakeLauncher: GdbServerLauncher = async ({ port }) => {
   return { port: boundPort, stop: () => srv.close() };
 };
 
-const fakeTabs: TabInfo[] = [
-  { actor: "server1.conn0.tab1", url: "http://localhost:8080/", title: "Test Page" },
-];
+const fakeTabs: TabInfo[] = [{ id: 10, url: "http://localhost:8080/", title: "Test Page" }];
 
 let server: RspServer;
 let spawner: GdbServerSpawner;
@@ -88,9 +86,9 @@ test("qfProcessInfo assigns stable pids across calls", async () => {
 });
 
 test("qLaunchGDBServer with pid routes to the correct tab actor", async () => {
-  let capturedTabActor: string | undefined;
-  const capturingLauncher: GdbServerLauncher = async ({ port, tabActor }) => {
-    capturedTabActor = tabActor;
+  let capturedTabId: number | undefined;
+  const capturingLauncher: GdbServerLauncher = async ({ port, tabId }) => {
+    capturedTabId = tabId;
     const srv = new RspServer(
       {
         async handle() {
@@ -106,7 +104,7 @@ test("qLaunchGDBServer with pid routes to the correct tab actor", async () => {
   const srv = new RspServer(
     new PlatformServer({
       spawner: sp,
-      listTabs: async () => [{ actor: "tab-actor-1", url: "http://example.com/", title: "" }],
+      listTabs: async () => [{ id: 10, url: "http://example.com/", title: "" }],
     })
   );
   const srvPort = await srv.listen(0);
@@ -117,7 +115,7 @@ test("qLaunchGDBServer with pid routes to the correct tab actor", async () => {
 
   const launchResp = await cl.requestText(`qLaunchGDBServer;host:localhost;pid:${pid};`);
   assert.match(launchResp, /port:\d+;/);
-  assert.equal(capturedTabActor, "tab-actor-1");
+  assert.equal(capturedTabId, 10);
 
   cl.close();
   await srv.close();
@@ -157,7 +155,7 @@ test("concurrent qLaunchGDBServer for same tab returns identical pid/port", asyn
   const sp = new GdbServerSpawner(concurrentLauncher);
   const ps = new PlatformServer({
     spawner: sp,
-    listTabs: async () => [{ actor: "tab-concurrent", url: "http://example.com/", title: "" }],
+    listTabs: async () => [{ id: 10, url: "http://example.com/", title: "" }],
   });
   const srv = new RspServer(ps);
   const srvPort = await srv.listen(0);
@@ -189,7 +187,7 @@ test("concurrent qLaunchGDBServer for same tab returns identical pid/port", asyn
   const spWrap = new GdbServerSpawner(concurrentLauncher);
   const psWrap = new PlatformServer({
     spawner: spWrap,
-    listTabs: async () => [{ actor: "tab-wrap", url: "http://example.com/", title: "" }],
+    listTabs: async () => [{ id: 10, url: "http://example.com/", title: "" }],
     wrapConnectPort: async (p) => {
       wrapCount++;
       return p + 10000;
@@ -234,7 +232,7 @@ test("qKillSpawnedProcess then qLaunchGDBServer launches a fresh server", async 
   const sp = new GdbServerSpawner(countingLauncher);
   const ps = new PlatformServer({
     spawner: sp,
-    listTabs: async () => [{ actor: "tab-reattach", url: "http://example.com/", title: "" }],
+    listTabs: async () => [{ id: 10, url: "http://example.com/", title: "" }],
   });
   const srv = new RspServer(ps);
   const srvPort = await srv.listen(0);
@@ -262,11 +260,11 @@ test("qKillSpawnedProcess then qLaunchGDBServer launches a fresh server", async 
   await sp.killAll();
 });
 
-test("qProcessInfoPID returns info for a known PID even after tab list changes", async () => {
+test("a retired tab PID fails process lookup and launch without selecting another tab", async () => {
   // Simulate LLDB querying process info for a PID that was assigned before
   // the tab list changed (e.g., tab navigated away).
   const sp = new GdbServerSpawner(fakeLauncher);
-  const dynamicTabs: TabInfo[] = [{ actor: "dynamic.tab1", url: "http://example.com/", title: "" }];
+  const dynamicTabs: TabInfo[] = [{ id: 10, url: "http://example.com/", title: "" }];
   const ps = new PlatformServer({
     spawner: sp,
     listTabs: async () => dynamicTabs,
@@ -282,10 +280,12 @@ test("qProcessInfoPID returns info for a known PID even after tab list changes",
   // Remove the tab from the list (simulate it closing).
   dynamicTabs.length = 0;
 
-  // qProcessInfoPID should still return info via the stable map fallback.
+  // Historical identity must not be mistaken for a still-live tab.
   const infoResp = await cl.requestText(`qProcessInfoPID:${pid}`);
-  assert.match(infoResp, /pid:\d+;/, "should return process info for stable PID");
-  assert.doesNotMatch(infoResp, /^E/, "should not return error for known PID");
+  assert.equal(infoResp, "E01");
+  assert.equal(await cl.requestText(`qLaunchGDBServer;pid:${pid};`), "E01");
+  assert.equal(await cl.requestText("qLaunchGDBServer;pid:999;"), "E01");
+  assert.equal(sp.list().length, 0);
 
   cl.close();
   await srv.close();

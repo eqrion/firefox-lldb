@@ -2,69 +2,40 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-// Implements the gdbstub component's WIT `debuggee` interface (as dispatched
-// over the worker SAB-RPC) on top of a live Firefox RDP session.
-//
-// Thread model: each Firefox thread actor maps to a gdbstub TID. Frames,
-// locals, and globals are per-thread. Linear memory is shared — any stopped
-// thread's `memory0` scope gives the same buffer.
-//
-// Both wasm (`wasmcall`) and JS (`call`) RDP frames are surfaced so LLDB sees
-// the real interleaved call stack. JS sources are represented as synthetic wasm
-// modules built lazily on the first stop that includes a JS frame. Each
-// synthetic module carries DWARF that maps address L to source line L. JS
-// frames report pc = where.line + codeOffset so LLDB's subtraction of the code
-// section offset recovers the DWARF address (= the source line).
-//
-// Sources discovered after attach are handled lazily from stopped call stacks.
-// Sources already present at attach are preloaded before the component starts:
-// a trap stop must stay SIGSEGV and therefore cannot also carry the RSP library
-// notification LLDB would otherwise need to load a newly discovered synthetic
-// module. Because #snapshotAll() runs inside EventFuture.finish (before the
-// component's update_on_stop -> all_modules call), any later synthetic built
-// from a breakpoint stack is present in addr_space before frame_to_pc runs.
-//
-// WIT changes vs the single-thread version:
-//   - Debuggee.listThreads  -> session.listTids()
-//   - Debuggee.stoppedThread -> session.stoppedTid
-//   - Debuggee.exitFrames(tid) -> per-tid snapshot
-//   - Debuggee.singleStep(tid, resumption) -> session.stepOne(tid)
-//   - Debuggee.continue     -> session.resumeAll()
-//   - EventFuture.finish    -> awaits all-stop "stopped" event, then snapshots
+// Owns WIT resources, generation-scoped symbols and per-thread stop snapshots.
+// RDP owns execution; this adapter translates its observations into LLDB's
+// address/value model. JS frames use synthetic modules alongside real wasm.
+// See INTERNALS.md and docs/COMPATIBILITY.md for the integration contracts.
 
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { join, dirname, basename } from "node:path";
-import { tmpdir } from "node:os";
-import { createHash } from "node:crypto";
+import { SourceFiles, sourceBasename } from "../symbols/source-files.js";
 import type {
   RdpWasmSession,
   FrameForm,
   StoppedEvent,
-  PauseEvent,
+  StopOperation,
   ThreadInfo,
 } from "../rdp/session.js";
-import { buildSyntheticModule } from "./synthetic-module.js";
-import { inspect as inspectWasm, convert as convertSourceMap } from "../sourcemap/converter.js";
-import { EMPTY_WASM_MODULE, PRIME_STOP_TIMEOUT_MS, RESYNC_GRACE_MS } from "../rdp/constants.js";
-import type { DebugFileRegistry } from "../core/debug-files.js";
-import { containedSourcePath } from "../sourcemap/materialize.js";
-import { sanitizeSourceMapBytes, sourceMapDataUrlBytes } from "../sourcemap/input.js";
-import { noopLogger, type Logger } from "../logging.js";
-import { stripWasmNameSection, wasmExternalDebugInfo, wasmFunctionRange } from "./wasm-bytecode.js";
-
-function urlBasename(url: string): string {
-  try {
-    const name = new URL(url).pathname.split("/").filter(Boolean).pop();
-    if (name) return name;
-  } catch {
-    /* fall through */
-  }
-  return basename(url) || "source.js";
-}
-
-function urlKey(url: string): string {
-  return createHash("sha256").update(url).digest("hex").slice(0, 12);
-}
+import { RetiredStopError } from "../rdp/session.js";
+import { buildSyntheticModule } from "../symbols/synthetic-module.js";
+import {
+  inspect as inspectWasm,
+  convert as convertSourceMap,
+  valueMetadata,
+} from "../sourcemap/converter.js";
+import type {
+  ModuleValues,
+  ValueType,
+} from "../sourcemap/generated/interfaces/firefox-lldb-source-map-source-map-converter.js";
+import { PRIME_STOP_TIMEOUT_MS, RESYNC_GRACE_MS } from "../rdp/constants.js";
+import type { DebugFileRegistry } from "../symbols/debug-files.js";
+import { sanitizeSourceMapBytes, sourceMapDataUrlBytes } from "../symbols/source-map-input.js";
+import { noopLogger, type Logger } from "../diagnostics/logger.js";
+import { fetchBytes } from "../symbols/fetch.js";
+import {
+  stripWasmNameSection,
+  wasmExternalDebugInfo,
+  wasmFunctionRange,
+} from "../symbols/wasm-bytecode.js";
 
 export interface RpcRequest {
   type: string;
@@ -73,50 +44,34 @@ export interface RpcRequest {
   args: unknown[];
 }
 
-// Upper bound on a single memory read. LLDB chunks reads to its negotiated
-// packet size, far below this, so a request above it means the session is being
-// driven by the generic gdb-remote plugin (not `--plugin wasm`), which
-// misinterprets the wasm address space and asks for absurd lengths. Reject those
-// instead of allocating gigabytes and OOM-ing the worker.
+// Bound allocation even when a client misinterprets the wasm address encoding.
 const MAX_MEMORY_READ = 16 * 1024 * 1024;
 
 function outOfBounds(): Error {
   return Object.assign(new Error("out-of-bounds"), { payload: "out-of-bounds" });
 }
 
+function unavailable(
+  tag: "invalid-frame" | "invalid-entity" | "unsupported-type" | "breakpoint-update",
+  cause?: unknown
+): Error {
+  return Object.assign(new Error(tag, { cause }), { payload: tag });
+}
+
+interface InstanceContext {
+  url: string;
+  frame?: { actor: string; tid: number; event: StoppedEvent };
+}
+
 type Ref = { $res: string; id: number };
 
-// Stop-coordination state for RdpDebuggee. Grouped under one field so a
-// reader sees the whole cluster at once, but each property still has an
-// independent lifetime managed at its own call sites — this is NOT a
-// discriminated union with enforced transitions (see the fields' comments
-// for cases where one property intentionally outlives another).
+// RDP owns execution completion; this adapter owns only LLDB stop labeling.
 interface StopState {
-  // Resolves on the next all-stop "stopped" event; rejects if the session
-  // closes first. Awaited by #finishEvent/primeStop. Starts pre-resolved so
-  // an early #finishEvent before any resume never hangs.
-  promise: Promise<StoppedEvent>;
-  // resolve/reject of `promise` while a stop is outstanding; null once it
-  // has settled. Non-null iff we are actively waiting for a stop.
-  pending: { resolve: (e: StoppedEvent) => void; reject: (e: Error) => void } | null;
-  // RDP why.type (or a synthetic override) of the most-recently-delivered
-  // stop; read only by #eventTag(). Only meaningful right after `promise`
-  // settles.
+  operation: StopOperation | null;
   reason: string;
-  // Set by the host Ctrl-C handler until Firefox delivers the corresponding
-  // real pause. This can precede Debuggee.continue arming `promise` because
-  // the SIGINT handler runs synchronously while WIT dispatch runs later.
+  // A terminal Ctrl-C can arrive before the worker dispatches continue.
   hostInterruptPending: boolean;
-  // Set just before #scheduleResyncCheck forces a fresh RDP interrupt to
-  // manufacture a stop. Firefox reports that pause's why.type as
-  // "interrupted", which the component's Event::Interrupted arm treats as
-  // spurious and just resumes from (it's meant for a real client Ctrl-C,
-  // which this isn't). Override the tag to "breakpoint" for this one stop so
-  // it lands in the arm that actually consults update_on_stop()'s changed
-  // modules and reports MultiThreadStopReason::Library. Cleared wherever
-  // `pending` settles or is bypassed (the "stopped" listener, session close,
-  // triggerInterrupt()) so it never survives to mislabel a later,
-  // unrelated stop.
+  // A navigation resync must report a library change, not a spurious interrupt.
   forcingResync: boolean;
 }
 
@@ -144,35 +99,34 @@ export class RdpDebuggee {
   // Where a module's separate DWARF file is registered for LLDB to open.
   #debugFiles?: DebugFileRegistry;
 
-  // Temp dir for materialized JS source text (for LLDB source list).
-  #tmpDir: string = mkdtempSync(join(tmpdir(), "firefox-lldb-"));
+  #sourceFiles: SourceFiles;
 
   // Per-tid frame snapshots (innermost-first wasm+JS frames, set on each stop).
   #framesByTid = new Map<number, FrameForm[]>();
+  #snapshotEvent?: StoppedEvent;
+  #unavailableFrames = new Map<number, string>();
 
   // Frame ref id -> {tid, index} (reset on each stop).
   #frameInfoById = new Map<number, { tid: number; index: number }>();
 
-  // Instance refs (id -> module URL).
-  #instanceUrlById = new Map<number, string>();
+  // Instance handles retain their module and, when available, requesting frame.
+  #instances = new Map<number, InstanceContext>();
+  #metadataByUrl = new Map<string, ModuleValues>();
+  #memoryById = new Map<number, string>();
+  #memoryModuleUrl?: string;
 
   // WasmValue refs (id -> {tag, raw}); raw is the JS value from RDP bindings.
   #valueById = new Map<number, { tag: string; raw: number | bigint }>();
 
-  // Global refs (id -> global index in the instance's global index space).
-  #globalIndexById = new Map<number, number>();
+  // Global handles retain the requesting instance, index and clone identity.
+  #globals = new Map<number, { index: number; instance: InstanceContext; uniqueId: bigint }>();
+  #futureById = new Map<number, StopOperation>();
 
-  // Per-tid innermost wasm frame actor (for memory/global reads in that thread's scope).
-  #topFrameActorByTid = new Map<number, string | null>();
-
-  // Cached frame environment per actor for the current stop cycle. Reset on
-  // each stop. Avoids O(locals²) getEnvironment round-trips: without this,
-  // each qWasmLocal packet would trigger a separate getEnvironment call.
+  // One environment fetch serves all local reads for this frame and stop.
   #envCacheByActor = new Map<string, Record<string, { value?: unknown }>>();
 
   #stop: StopState = {
-    promise: Promise.resolve({ tid: 1, pausePacket: {} as PauseEvent }),
-    pending: null,
+    operation: null,
     reason: "breakpoint",
     hostInterruptPending: false,
     forcingResync: false,
@@ -187,29 +141,21 @@ export class RdpDebuggee {
   // #scheduleResyncCheck).
   #resyncTimer: ReturnType<typeof setTimeout> | null = null;
   #disposed = false;
-  #removeTempDir = (): void => {
-    try {
-      rmSync(this.#tmpDir, { recursive: true, force: true });
-    } catch (err) {
-      this.#logger.debug(
-        `[cleanup] could not remove ${this.#tmpDir}: ${err instanceof Error ? err.message : String(err)}`
-      );
-    }
-  };
-
+  #generation = new AbortController();
+  #unsubscribe: (() => void)[] = [];
   constructor(
     session: RdpWasmSession,
     opts?: { onFirstContinue?: () => void; logger?: Logger; debugFiles?: DebugFileRegistry }
   ) {
     this.#session = session;
     this.#logger = opts?.logger ?? noopLogger;
+    this.#sourceFiles = new SourceFiles(this.#logger);
     this.#onFirstContinue = opts?.onFirstContinue ?? null;
     this.#debugFiles = opts?.debugFiles;
 
-    session.on("stopped", (e: StoppedEvent) => {
+    const onStopped = (e: StoppedEvent) => {
       this.#clearResyncTimer();
-      const pending = this.#stop.pending;
-      if (!pending) return;
+      if (this.#stop.operation?.id !== e.stopId) return;
       this.#stop.reason = this.#stop.hostInterruptPending
         ? "signal"
         : this.#stop.forcingResync
@@ -217,47 +163,93 @@ export class RdpDebuggee {
           : ((e.pausePacket as { why?: { type?: string } })?.why?.type ?? "breakpoint");
       this.#stop.hostInterruptPending = false;
       this.#stop.forcingResync = false;
-      pending.resolve(e);
-      this.#stop.pending = null;
-    });
+    };
+    session.on("stopped", onStopped);
+    this.#unsubscribe.push(() => session.off("stopped", onStopped));
 
-    session.on("close", () => {
+    const onClose = () => {
+      this.#generation.abort(new Error("debuggee session closed"));
       this.#clearResyncTimer();
       // Unblock any pending EventFuture.finish / primeStop so the gdbstub
       // worker thread doesn't hang when the RDP connection drops mid-session.
-      this.#stop.pending?.reject(new Error("session closed"));
-      this.#stop.pending = null;
+      this.#stop.operation?.cancel(new Error("session closed"));
       this.#stop.hostInterruptPending = false;
       this.#stop.forcingResync = false;
-    });
+    };
+    session.on("close", onClose);
+    this.#unsubscribe.push(() => session.off("close", onClose));
 
     // A navigation (driven or page-triggered) invalidates every per-URL cache
     // below — the actors/bodies they hold belonged to the destroyed target.
-    session.on("navigated", () => this.#onNavigated());
+    const onNavigated = () => this.#onNavigated();
+    session.on("navigated", onNavigated);
+    this.#unsubscribe.push(() => session.off("navigated", onNavigated));
 
     // Give the new page a chance to pause on its own (a buffered breakpoint
     // firing), then force it paused if it doesn't — see #scheduleResyncCheck.
     // This must not happen synchronously/immediately: give buffered
     // breakpoints on the replacement page a chance to fire through the normal
     // all-stop path before forcing the new target to stop.
-    session.on("target", (info: ThreadInfo) => {
+    const onTarget = (info: ThreadInfo) => {
       if (info.isTopLevel) this.#scheduleResyncCheck(info.tid);
-    });
+    };
+    session.on("target", onTarget);
+    this.#unsubscribe.push(() => session.off("target", onTarget));
 
-    process.once("exit", this.#removeTempDir);
+    this.logState("created");
+  }
+
+  /** Resource counts and filesystem ownership, without changing execution state. */
+  logState(event = "snapshot"): void {
+    this.#logger.debug(
+      `[debuggee] ${event} ${JSON.stringify({
+        disposed: this.#disposed,
+        generation: this.#session.topLevelGeneration(),
+        tempDir: this.#sourceFiles.root,
+        modules: this.#moduleById.size,
+        bytecodes: this.#bytecodeByUrl.size,
+        syntheticModules: this.#syntheticByUrl.size,
+        frameHandles: this.#frameInfoById.size,
+        instanceHandles: this.#instances.size,
+        valueHandles: this.#valueById.size,
+        globalHandles: this.#globals.size,
+        futureHandles: this.#futureById.size,
+        memoryHandles: this.#memoryById.size,
+        valueMetadata: this.#metadataByUrl.size,
+      })}`
+    );
   }
 
   /** Release per-attach filesystem and process-level resources. Idempotent. */
   dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true;
+    this.#stop.operation?.cancel(new Error("debuggee disposed"));
+    this.#generation.abort(new Error("debuggee disposed"));
+    for (const unsubscribe of this.#unsubscribe.splice(0)) unsubscribe();
     this.#clearResyncTimer();
-    process.off("exit", this.#removeTempDir);
-    this.#removeTempDir();
+    for (const map of [
+      this.#moduleByUrl,
+      this.#moduleById,
+      this.#bytecodeByUrl,
+      this.#syntheticByUrl,
+      this.#framesByTid,
+      this.#unavailableFrames,
+      this.#frameInfoById,
+      this.#envCacheByActor,
+      this.#instances,
+      this.#valueById,
+      this.#metadataByUrl,
+      this.#memoryById,
+      this.#globals,
+      this.#futureById,
+    ])
+      map.clear();
+    this.#sourceFiles.close();
+    this.logState("disposed");
   }
 
-  // One entry per WIT method. dispatch() is just the lookup; each handler
-  // below is independently readable instead of one arm of a single switch.
+  // Dispatch validates resource ownership before invoking a WIT method.
   #handlers: Record<string, Handler> = {
     "Debuggee.allModules": () => this.#allModules(),
     "Debuggee.allInstances": () => this.#allInstances(),
@@ -267,7 +259,7 @@ export class RdpDebuggee {
     "Debuggee.continue": () => this.#doContinue(),
     "Debuggee.singleStep": (_id, args) => this.#doSingleStep(args[0] as number),
     "Debuggee.interrupt": () => this.#doInterrupt(),
-    "EventFuture.finish": () => this.#finishEvent(),
+    "EventFuture.finish": (id) => this.#finishEvent(id),
 
     "Module.uniqueId": (id) => BigInt(id),
     "Module.name": (id) => this.#moduleName(id),
@@ -275,26 +267,27 @@ export class RdpDebuggee {
     "Module.addBreakpoint": (id, args) => this.#moduleAddBreakpoint(id, args[0] as number),
     "Module.removeBreakpoint": (id, args) => this.#moduleRemoveBreakpoint(id, args[0] as number),
 
-    "Instance.getModule": (id) => this.#moduleRef(this.#instanceUrlById.get(id)!),
-    "Instance.uniqueId": (id) => BigInt(this.#moduleByUrl.get(this.#instanceUrlById.get(id)!)!.id),
+    "Instance.getModule": (id) => this.#moduleRef(this.#instances.get(id)!.url),
+    "Instance.uniqueId": (id) => BigInt(this.#moduleByUrl.get(this.#instances.get(id)!.url)!.id),
     "Instance.getMemory": (id, args) => this.#instanceGetMemory(id, args[0] as number),
-    "Instance.getGlobal": (_id, args) => this.#instanceGetGlobal(args[0] as number),
+    "Instance.getGlobal": (id, args) => this.#instanceGetGlobal(id, args[0] as number),
 
-    "Global.get": (id) => this.#readGlobal(this.#globalIndexById.get(id)!),
-    "Global.uniqueId": (id) => BigInt(this.#globalIndexById.get(id)!),
+    "Global.get": (id) => this.#readGlobal(id),
+    "Global.uniqueId": (id) => this.#globals.get(id)!.uniqueId,
     "Global.clone": (id) => this.#globalClone(id),
 
-    "Memory.uniqueId": () => 1n,
-    "Memory.sizeBytes": async () => BigInt(await this.#memorySize()),
+    "Memory.uniqueId": (id) => BigInt(this.#moduleByUrl.get(this.#memoryById.get(id)!)!.id),
+    "Memory.sizeBytes": async (id) => BigInt(await this.#memorySize(id)),
     "Memory.pageSizeBytes": () => 65536n,
-    "Memory.getBytes": (_id, args) =>
-      this.#readMemory(Number(args[0] as bigint), Number(args[1] as bigint)),
+    "Memory.getBytes": (id, args) =>
+      this.#readMemory(id, Number(args[0] as bigint), Number(args[1] as bigint)),
 
     "Frame.getInstance": (id) => this.#frameInstance(id),
-    "Frame.getFuncIndex": () => 0,
     "Frame.getPc": (id) => this.#frameGetPc(id),
-    "Frame.getLocals": (id) => this.#localsForFrame(id),
-    "Frame.getStack": () => [],
+    "Frame.getLocal": (id, args) => this.#localForFrame(id, args[0] as number),
+    "Frame.getStack": () => {
+      throw unavailable("unsupported-type");
+    },
     "Frame.parentFrame": (id) => this.#parentFrame(id),
 
     "WasmValue.getType": (id) => this.#wasmValueGetType(id),
@@ -306,17 +299,78 @@ export class RdpDebuggee {
   };
 
   dispatch(req: RpcRequest): unknown {
+    if (this.#disposed) throw new Error("debuggee disposed");
     const { type, id, method, args } = req;
+    if (method === "drop") {
+      switch (type) {
+        case "Frame":
+          this.#frameInfoById.delete(id);
+          break;
+        case "Instance":
+          this.#instances.delete(id);
+          break;
+        case "Global":
+          this.#globals.delete(id);
+          break;
+        case "WasmValue":
+          this.#valueById.delete(id);
+          break;
+        // Modules belong to the generation's catalog, not an individual proxy.
+        case "EventFuture":
+          this.#futureById.get(id)?.cancel(new Error("execution future dropped"));
+          this.#futureById.delete(id);
+          break;
+        case "Module":
+          break;
+        case "Memory":
+          this.#memoryById.delete(id);
+          break;
+        default:
+          throw new Error(`cannot drop unknown resource ${type}`);
+      }
+      return null;
+    }
+    const resources =
+      type === "Frame"
+        ? this.#frameInfoById
+        : type === "Instance"
+          ? this.#instances
+          : type === "Global"
+            ? this.#globals
+            : type === "WasmValue"
+              ? this.#valueById
+              : type === "EventFuture"
+                ? this.#futureById
+                : type === "Memory"
+                  ? this.#memoryById
+                  : undefined;
+    if (resources && !resources.has(id)) {
+      const tag = type === "Frame" ? "invalid-frame" : "invalid-entity";
+      throw Object.assign(new Error(tag), { payload: tag });
+    }
     const key = `${type}.${method}`;
     const handler = this.#handlers[key];
     if (!handler) throw new Error(`RdpDebuggee: unhandled ${key}`);
-    return handler(id, args);
+    // A retired read is an unavailable observation, not an unexpected host bug.
+    // Preserve every other exception for the worker's fatal-error boundary.
+    const classify = (error: unknown): never => {
+      if (error instanceof RetiredStopError) throw unavailable("invalid-frame", error);
+      throw error;
+    };
+    try {
+      const result = handler(id, args);
+      return result instanceof Promise ? result.catch(classify) : result;
+    } catch (error) {
+      return classify(error);
+    }
   }
 
   // --- modules -------------------------------------------------------------
   async #allModules(): Promise<Ref[]> {
+    const { signal } = this.#generation;
     // wasmSources() also keeps the session's actor->url mapping current.
     const wasmSources = await this.#session.wasmSources();
+    signal.throwIfAborted();
     for (const s of wasmSources) {
       this.#moduleRef(s.url);
     }
@@ -330,6 +384,7 @@ export class RdpDebuggee {
   #moduleRef(url: string): Ref {
     let m = this.#moduleByUrl.get(url);
     if (!m) {
+      if (this.#moduleByUrl.size >= 4096) throw new Error("module catalog exceeds 4096 entries");
       m = { id: this.#nextId++, url };
       this.#moduleByUrl.set(url, m);
       this.#moduleById.set(m.id, m);
@@ -337,11 +392,8 @@ export class RdpDebuggee {
     return { $res: "Module", id: m.id };
   }
 
-  // A navigation can clear #moduleById out from under a Module ref the
-  // component is still holding (its own addr_space hasn't pruned it yet —
-  // that only happens on the next stop's update_on_stop). Callers below
-  // degrade gracefully instead of crashing the whole gdbstub worker on a WIT
-  // call with no error case.
+  // The component can retain old module proxies until its next stop update.
+  // Missing bytecode stays absent; old proxies cannot identify a new module.
   #requireModule(id: number): { id: number; url: string } | undefined {
     return this.#moduleById.get(id);
   }
@@ -349,39 +401,55 @@ export class RdpDebuggee {
   #moduleName(id: number): string {
     const entry = this.#requireModule(id);
     if (!entry) return "<stale module>";
-    // Suffix with the module id so a same-URL reload or a navigation back to
-    // a previously-seen URL gets a name LLDB has never seen before. LLDB's
-    // own library-list diff appears to key off this name string, not the
-    // reported address: reusing a bare basename ("math.wasm") across two
-    // different module incarnations reads to it as "the same library, still
-    // loaded, nothing to do", so it never re-resolves breakpoints bound to
-    // the one it already knew about — confirmed by tracing real RSP traffic
-    // (its own Z0 rebind-attempt only ever retried the stale, pre-navigation
-    // address once the name repeated, but correctly picked the new one once
-    // the name differed).
-    return `${urlBasename(entry.url)}#${id}`;
+    // LLDB's library diff uses names; an incarnation suffix makes same-URL
+    // reloads rebind their breakpoints. See nav_reload.test.mjs.
+    return `${sourceBasename(entry.url)}#${id}`;
   }
 
   // Fetch a real wasm module's bytecode, attaching debug info the module only
   // points at (separate DWARF, source maps) so it is debuggable. Cached per URL.
-  async #wasmBytecode(url: string): Promise<Uint8Array> {
+  async #wasmBytecode(url: string): Promise<Uint8Array | undefined> {
+    const { signal } = this.#generation;
+    signal.throwIfAborted();
     const cached = this.#bytecodeByUrl.get(url);
     if (cached) return cached;
     const bytes = await this.#session.fetchModuleBytes(url);
-    const out = await this.#withDebugInfo(url, bytes);
+    signal.throwIfAborted();
+    if (!bytes) return undefined;
+    const out = await this.#withDebugInfo(url, bytes, signal);
+    signal.throwIfAborted();
+    this.#checkSymbolBudget(out.length);
     this.#bytecodeByUrl.set(url, out);
     return out;
   }
 
-  // Resolve the debug info for `bytes`: embedded DWARF is used as-is, separate
-  // DWARF is registered for LLDB to open through the file provider, and a source
-  // map is converted to DWARF via the source-map component. Falls back to the
-  // original bytes on any failure.
-  async #withDebugInfo(url: string, bytes: Uint8Array): Promise<Uint8Array> {
+  #checkSymbolBudget(bytes: number): void {
+    for (const value of this.#bytecodeByUrl.values()) bytes += value.length;
+    for (const value of this.#syntheticByUrl.values()) bytes += value.bytecode.length;
+    if (bytes > 128 * 1024 * 1024) throw new Error("symbol bytecode cache exceeds 128 MiB limit");
+  }
+
+  #allocateHandle(): number {
+    const count =
+      this.#frameInfoById.size +
+      this.#instances.size +
+      this.#globals.size +
+      this.#valueById.size +
+      this.#memoryById.size +
+      this.#futureById.size;
+    if (count >= 65536) throw new Error("debugger resource handle limit of 65536 exceeded");
+    return this.#nextId++;
+  }
+
+  // Enrich real bytes with optional symbols. Enrichment failure retains the
+  // original bytes; generation cancellation still rejects the operation.
+  async #withDebugInfo(url: string, bytes: Uint8Array, signal: AbortSignal): Promise<Uint8Array> {
     let info;
     try {
       info = await inspectWasm(bytes);
+      signal.throwIfAborted();
     } catch (err) {
+      signal.throwIfAborted();
       this.#logger.debug(
         `[sourcemap] could not inspect ${url}: ${err instanceof Error ? err.message : String(err)}`
       );
@@ -397,7 +465,7 @@ export class RdpDebuggee {
       // The DWARF arrives later, when LLDB opens the companion file. Keep the
       // name section: until then (or if the file cannot be fetched) it carries
       // the only symbols this module has, and LLDB prefers DWARF once loaded.
-      this.#debugFiles?.register(externalDebugInfo, url);
+      this.#debugFiles?.register(externalDebugInfo, url, signal);
       return bytes;
     }
 
@@ -420,10 +488,9 @@ export class RdpDebuggee {
       let resolved = mapUrl;
       try {
         resolved = new URL(mapUrl, url).href;
-        const response = await fetch(resolved);
-        if (!response.ok) throw new Error(`HTTP ${response.status} ${response.statusText}`);
-        mapBytes = new Uint8Array(await response.arrayBuffer());
+        mapBytes = await fetchBytes(resolved, { maxBytes: 31 * 1024 * 1024, signal });
       } catch (err) {
+        signal.throwIfAborted();
         this.#logger.warn(
           `[sourcemap] could not fetch ${resolved}: ${err instanceof Error ? err.message : String(err)}`
         );
@@ -442,22 +509,16 @@ export class RdpDebuggee {
       return bytes;
     }
 
-    const compDir = join(this.#tmpDir, `${urlBasename(url)}.${urlKey(url)}.src`);
+    const compDir = this.#sourceFiles.directory(url, signal);
     try {
       const res = await convertSourceMap(bytes, mapBytes, compDir);
+      signal.throwIfAborted();
       for (const sf of res.sources) {
-        const dest = containedSourcePath(compDir, sf.path);
-        if (!dest) {
-          this.#logger.warn(`[sourcemap] refusing unsafe source path ${JSON.stringify(sf.path)}`);
-          continue;
-        }
         try {
-          mkdirSync(dirname(dest), { recursive: true });
-          writeFileSync(dest, sf.content);
+          this.#sourceFiles.write(url, sf.path, sf.content, signal);
         } catch (err) {
-          this.#logger.debug(
-            `[sourcemap] could not materialize ${dest}: ${err instanceof Error ? err.message : String(err)}`
-          );
+          signal.throwIfAborted();
+          this.#logger.warn(`[source] could not materialize ${JSON.stringify(sf.path)}: ${err}`);
         }
       }
       return res.wasm;
@@ -465,112 +526,188 @@ export class RdpDebuggee {
       this.#logger.warn(
         `[sourcemap] conversion failed for ${url}: ${err instanceof Error ? err.message : String(err)}`
       );
+      signal.throwIfAborted();
       return bytes;
     }
   }
 
-  async #moduleBytecode(id: number): Promise<Uint8Array> {
+  async #moduleBytecode(id: number): Promise<Uint8Array | undefined> {
     const entry = this.#requireModule(id);
-    if (!entry) return EMPTY_WASM_MODULE;
+    if (!entry) return undefined;
     const syn = this.#syntheticByUrl.get(entry.url);
     return syn ? syn.bytecode : this.#wasmBytecode(entry.url);
   }
 
   async #moduleAddBreakpoint(id: number, pc: number): Promise<number> {
     const entry = this.#requireModule(id);
-    if (!entry) return pc;
-    const syn = this.#syntheticByUrl.get(entry.url);
-    if (syn) {
-      await this.#session.setJsBreakpoint(entry.url, pc - syn.codeOffset);
-      return pc;
-    } else {
+    try {
+      if (!entry) throw new Error("breakpoint module retired");
+      const { signal } = this.#generation;
+      const syn = this.#syntheticByUrl.get(entry.url);
+      if (syn) {
+        const line = await this.#session.setJsBreakpoint(entry.url, pc - syn.codeOffset);
+        signal.throwIfAborted();
+        return line + syn.codeOffset;
+      }
       const bytes = await this.#moduleBytecode(id);
+      if (!bytes) throw unavailable("breakpoint-update");
+      signal.throwIfAborted();
       const snapped = await this.#session.setWasmBreakpoint(
         entry.url,
         pc,
         wasmFunctionRange(bytes, pc)
       );
+      signal.throwIfAborted();
       return snapped;
+    } catch (cause) {
+      this.#logger.error(`[breakpoints] add module=${id} pc=${pc}: ${String(cause)}`);
+      const error = new Error("breakpoint-update", { cause }) as Error & { payload: string };
+      error.payload = "breakpoint-update";
+      throw error;
     }
   }
 
   async #moduleRemoveBreakpoint(id: number, pc: number): Promise<null> {
     const entry = this.#requireModule(id);
     if (!entry) return null;
-    const syn = this.#syntheticByUrl.get(entry.url);
-    if (syn) {
-      await this.#session.removeJsBreakpoint(entry.url, pc - syn.codeOffset);
-    } else {
-      await this.#session.removeWasmBreakpoint(entry.url, pc);
+    const { signal } = this.#generation;
+    try {
+      const syn = this.#syntheticByUrl.get(entry.url);
+      if (syn) await this.#session.removeJsBreakpoint(entry.url, pc - syn.codeOffset);
+      else await this.#session.removeWasmBreakpoint(entry.url, pc);
+      signal.throwIfAborted();
+    } catch (cause) {
+      this.#logger.error(`[breakpoints] remove module=${id} pc=${pc}: ${String(cause)}`);
+      throw unavailable("breakpoint-update", cause);
     }
     return null;
   }
 
   // --- instances -----------------------------------------------------------
   async #allInstances(): Promise<Ref[]> {
+    const { signal } = this.#generation;
     const sources = await this.#session.wasmSources();
-    return sources.length ? [this.#instanceRef(sources[0].url)] : [];
+    signal.throwIfAborted();
+    this.#memoryModuleUrl ??= sources[0]?.url;
+    return this.#memoryModuleUrl ? [this.#instanceRef(this.#memoryModuleUrl)] : [];
   }
 
-  #instanceGetMemory(id: number, memIndex: number): Ref | Promise<never> {
-    const iUrl = this.#instanceUrlById.get(id)!;
-    if (this.#syntheticByUrl.has(iUrl) || memIndex !== 0) {
-      return Promise.reject(outOfBounds());
+  async #instanceGetMemory(id: number, memIndex: number): Promise<Ref> {
+    const instance = this.#instances.get(id)!;
+    if (
+      this.#syntheticByUrl.has(instance.url) ||
+      memIndex !== 0 ||
+      instance.url !== this.#memoryModuleUrl
+    ) {
+      throw outOfBounds();
     }
-    return { $res: "Memory", id: this.#nextId++ };
+    const metadata = await this.#valueMetadata(instance.url);
+    if (metadata.memories !== 1) throw unavailable("unsupported-type");
+    const memoryId = this.#allocateHandle();
+    this.#memoryById.set(memoryId, instance.url);
+    return { $res: "Memory", id: memoryId };
   }
 
-  #instanceGetGlobal(globalIndex: number): Ref {
-    const gid = this.#nextId++;
-    this.#globalIndexById.set(gid, globalIndex);
+  #instanceGetGlobal(id: number, globalIndex: number): Ref {
+    const instance = this.#instances.get(id)!;
+    if (!instance.frame) throw unavailable("invalid-frame");
+    this.#session.assertStopped(instance.frame.event);
+    if (!Number.isSafeInteger(globalIndex) || globalIndex < 0) throw outOfBounds();
+    const gid = this.#allocateHandle();
+    this.#globals.set(gid, { index: globalIndex, instance, uniqueId: BigInt(gid) });
     return { $res: "Global", id: gid };
   }
 
   // --- frames --------------------------------------------------------------
-  async #snapshotAll(): Promise<void> {
-    this.#frameInfoById.clear();
-    this.#envCacheByActor.clear();
-    const tids = this.#session.listTids();
-    const snapshots = new Map<number, FrameForm[]>();
-
-    // Firefox reports an empty frame list for pthread workers parked in
-    // Atomics.wait. A host Ctrl-C initially targets a worker to start the
-    // all-stop, but that worker may be one of those empty pool threads. Since
-    // all-stop has paused every interruptible thread by this point, inspect
-    // those paused workers until we find the live wasm stack the user expects
-    // Ctrl-C to select.
-    const candidates =
-      this.#stop.reason === "signal" ? this.#session.pausedTids() : [this.#session.stoppedTid];
-    let selectedTid = this.#session.stoppedTid;
-    let fallbackTid: number | undefined;
-    for (const tid of candidates) {
-      const frames = await this.#snapshotFrames(tid);
-      snapshots.set(tid, frames);
-      if (frames.length > 0 && fallbackTid === undefined) fallbackTid = tid;
-      if (frames.some((frame) => frame.type === "wasmcall")) {
-        selectedTid = tid;
-        break;
+  async #snapshotStopped(event: StoppedEvent): Promise<void> {
+    const deadline = Date.now() + 3000;
+    for (;;) {
+      try {
+        await this.#snapshotAll(event);
+        return;
+      } catch (error) {
+        if (
+          !(error instanceof RetiredStopError) ||
+          Date.now() >= deadline ||
+          !this.#session.canExtendStop(event)
+        )
+          throw error;
+        // Only target-set growth can retry a snapshot. A resume, navigation,
+        // transport failure, or malformed response remains a failed operation.
+        this.#armStopped();
+        await this.#session.adoptPausedState();
+        event = await this.#stop.operation!.promise;
       }
-    }
-    if (!snapshots.get(selectedTid)?.length && fallbackTid !== undefined) selectedTid = fallbackTid;
-    this.#session.selectStoppedTid(selectedTid);
-
-    for (const tid of tids) {
-      const frames = snapshots.get(tid) ?? [];
-      this.#framesByTid.set(tid, frames);
-      this.#topFrameActorByTid.set(tid, frames.find((f) => f.type === "wasmcall")?.actor ?? null);
     }
   }
 
-  async #snapshotFrames(tid: number): Promise<FrameForm[]> {
-    let frames: FrameForm[];
-    try {
-      frames = (await this.#session.frames(tid)).filter(
-        (frame) => (frame.type === "wasmcall" || frame.type === "call") && frame.where
-      );
-    } catch {
-      return [];
+  async #snapshotAll(event: StoppedEvent): Promise<void> {
+    const { signal } = this.#generation;
+    this.#session.assertStopped(event);
+    this.#frameInfoById.clear();
+    this.#envCacheByActor.clear();
+    const tids = event.pausedTids;
+    const snapshots = new Map<number, FrameForm[]>();
+    const unavailable = new Map<number, string>();
+
+    // A futex-blocked interrupt target may have no inspectable frames. Prefer a
+    // paused peer with a live wasm stack without changing the stop's paused set.
+    let selectedTid = this.#session.stoppedTid;
+    let selectedWasm = false;
+    let fallbackTid: number | undefined;
+    for (const tid of tids) {
+      let frames: FrameForm[];
+      try {
+        frames = await this.#snapshotFrames(tid);
+      } catch (error) {
+        // Firefox cannot serialize some wasm frames suspended in Atomics.wait.
+        // Retain this as unavailable, not an observed empty stack.
+        if (!(error instanceof Error) || error.message !== "TypeError: invalid script offset")
+          throw error;
+        unavailable.set(tid, error.message);
+        this.#logger.debug(
+          `[debuggee] frames-unavailable stop=${event.stopId} tid=${tid}: ${error.message}`
+        );
+        frames = [];
+      }
+      signal.throwIfAborted();
+      this.#session.assertStopped(event);
+      snapshots.set(tid, frames);
+      if (frames.length > 0 && fallbackTid === undefined) fallbackTid = tid;
+      if (
+        this.#stop.reason === "signal" &&
+        !selectedWasm &&
+        frames.some((frame) => frame.type === "wasmcall")
+      ) {
+        selectedTid = tid;
+        selectedWasm = true;
+      }
     }
+    if (
+      this.#stop.reason === "signal" &&
+      !snapshots.get(selectedTid)?.length &&
+      fallbackTid !== undefined
+    )
+      selectedTid = fallbackTid;
+    this.#session.assertStopped(event);
+    this.#session.selectStoppedTid(selectedTid);
+
+    this.#framesByTid.clear();
+    this.#unavailableFrames = unavailable;
+    this.#snapshotEvent = event;
+    for (const tid of tids) {
+      const frames = snapshots.get(tid) ?? [];
+      this.#framesByTid.set(tid, frames);
+    }
+    this.logState("stop-snapshot");
+  }
+
+  async #snapshotFrames(tid: number): Promise<FrameForm[]> {
+    const { signal } = this.#generation;
+    const frames = (await this.#session.frames(tid)).filter(
+      (frame) => (frame.type === "wasmcall" || frame.type === "call") && frame.where
+    );
+    signal.throwIfAborted();
     for (const frame of frames) {
       if (frame.type !== "call") continue;
       const actor = frame.where!.actor;
@@ -578,67 +715,72 @@ export class RdpDebuggee {
         // Not yet known — jsSources() populates the session's actor->url
         // mapping as a side effect.
         await this.#session.jsSources();
+        signal.throwIfAborted();
       }
       const url = this.#session.urlForSourceActor(actor) ?? actor;
       const calleeName = frame.callee?.displayName || frame.callee?.name;
       await this.#ensureSynthetic(url, actor, calleeName);
+      signal.throwIfAborted();
     }
     return frames;
   }
 
   async #ensureSynthetic(url: string, actor: string, calleeName?: string): Promise<void> {
+    const { signal } = this.#generation;
+    signal.throwIfAborted();
     if (this.#syntheticByUrl.has(url)) return;
     let text = "";
     try {
       text = await this.#session.fetchSourceText(actor);
-    } catch {
-      /* skip */
+    } catch (error) {
+      signal.throwIfAborted();
+      this.#logger.warn(`[source] source text unavailable for ${url}: ${error}`);
     }
+    signal.throwIfAborted();
     const lineCount = text ? text.split("\n").length : 1;
-    const name = urlBasename(url);
-    const sourceDir = join(this.#tmpDir, `${name}.${urlKey(url)}.src`);
-    const filePath = join(sourceDir, name);
+    const name = sourceBasename(url);
+    const sourceDir = this.#sourceFiles.directory(url, signal);
     if (text) {
       try {
-        mkdirSync(sourceDir, { recursive: true });
-        writeFileSync(filePath, text, "utf8");
+        this.#sourceFiles.write(url, name, text, signal);
       } catch (err) {
-        this.#logger.debug(
-          `[source] could not materialize ${filePath}: ${
-            err instanceof Error ? err.message : String(err)
-          }`
-        );
+        signal.throwIfAborted();
+        this.#logger.warn(`[source] could not materialize ${url}: ${err}`);
       }
     }
     const syn = buildSyntheticModule({
       name,
-      compDir: dirname(filePath),
+      compDir: sourceDir,
       lineCount,
       subprogramName: calleeName,
     });
+    this.#checkSymbolBudget(syn.bytecode.length);
     this.#syntheticByUrl.set(url, syn);
     this.#moduleRef(url);
   }
 
-  // A trap must remain a SIGSEGV stop so LLDB exposes the fault correctly.
-  // Unlike the breakpoint stop path, that signal stop cannot simultaneously
-  // carry RSP's `library` notification, so a JS module first discovered in
-  // the trapping stack would be added to the component's address space too
-  // late for LLDB to load and symbolicate it (issue #45). Register the page's
-  // current JS sources before the component performs its initial module scan.
+  // Preload JS symbols before the initial module scan: a SIGSEGV trap cannot
+  // also carry the library-change notification. See wasm_trap.test.mjs.
   async #preloadJsSources(): Promise<void> {
+    const { signal } = this.#generation;
     for (const source of await this.#session.jsSources()) {
+      signal.throwIfAborted();
       await this.#ensureSynthetic(source.url, source.actor);
     }
   }
 
   async #exitFrames(tid: number): Promise<Ref[]> {
+    if (this.#unavailableFrames.has(tid)) {
+      const error = new Error("invalid-frame") as Error & { payload: string };
+      error.payload = "invalid-frame";
+      throw error;
+    }
     const frames = this.#framesByTid.get(tid) ?? [];
     return frames.length ? [this.#frameRef(tid, 0)] : [];
   }
 
   #frameRef(tid: number, index: number): Ref {
-    const id = this.#nextId++;
+    const id = this.#allocateHandle();
     this.#frameInfoById.set(id, { tid, index });
     return { $res: "Frame", id };
   }
@@ -652,6 +794,8 @@ export class RdpDebuggee {
   }
 
   #frameGetPc(id: number): number {
+    if (!this.#snapshotEvent) throw unavailable("invalid-frame");
+    this.#session.assertStopped(this.#snapshotEvent);
     const fi = this.#frameInfoById.get(id);
     const frame = fi ? this.#framesByTid.get(fi.tid)?.[fi.index] : undefined;
     const line = frame?.where?.line ?? 0;
@@ -663,187 +807,279 @@ export class RdpDebuggee {
   }
 
   #frameInstance(frameId: number): Ref {
+    if (!this.#snapshotEvent) throw unavailable("invalid-frame");
+    this.#session.assertStopped(this.#snapshotEvent);
     const fi = this.#frameInfoById.get(frameId);
     const frames = fi ? (this.#framesByTid.get(fi.tid) ?? []) : [];
     const frame = fi ? frames[fi.index] : undefined;
     const actor = frame?.where?.actor ?? "";
     const url = this.#session.urlForSourceActor(actor) ?? actor;
-    return this.#instanceRef(url);
+    if (!frame || !fi || !this.#snapshotEvent) throw unavailable("invalid-frame");
+    return this.#instanceRef(url, { actor: frame.actor, tid: fi.tid, event: this.#snapshotEvent });
   }
 
-  #instanceRef(url: string): Ref {
+  #instanceRef(url: string, frame?: InstanceContext["frame"]): Ref {
     this.#moduleRef(url);
-    const id = this.#nextId++;
-    this.#instanceUrlById.set(id, url);
+    const id = this.#allocateHandle();
+    this.#instances.set(id, { url, frame });
     return { $res: "Instance", id };
   }
 
   // --- locals / memory -----------------------------------------------------
-  async #localsForFrame(frameId: number): Promise<Ref[]> {
+  async #localForFrame(frameId: number, index: number): Promise<Ref> {
+    const { signal } = this.#generation;
+    const event = this.#snapshotEvent;
     const fi = this.#frameInfoById.get(frameId);
-    if (!fi) return [];
+    if (!fi || !event) throw unavailable("invalid-frame");
+    this.#session.assertStopped(event);
     const frames = this.#framesByTid.get(fi.tid) ?? [];
     const frame = frames[fi.index];
-    if (!frame || frame.type === "call") return [];
+    if (!frame) throw unavailable("invalid-frame");
+    if (frame.type === "call") throw unavailable("invalid-frame");
+    if (!Number.isSafeInteger(index) || index < 0) throw outOfBounds();
+    const url = this.#session.urlForSourceActor(frame.where!.actor);
+    if (!url) throw unavailable("invalid-frame");
+    const metadata = await this.#valueMetadata(url);
+    signal.throwIfAborted();
+    this.#session.assertStopped(event);
+    const types = metadata.functions.find(
+      (fn) => fn.start <= frame.where!.line && frame.where!.line < fn.end
+    )?.locals;
+    if (!types) throw unavailable("invalid-frame");
     type VarBindings = Record<string, { value?: unknown }>;
     if (!this.#envCacheByActor.has(frame.actor)) {
-      // Cache the environment per frame actor per stop. Without this, each
-      // qWasmLocal packet triggers a separate getEnvironment round-trip,
-      // making locals O(N²) in the number of locals.
+      // Reuse this stop's environment across individual qWasmLocal requests.
       const env = (await this.#session.frameEnvironment(frame.actor)) as {
         bindings?: { variables?: VarBindings };
       };
-      this.#envCacheByActor.set(frame.actor, env.bindings?.variables ?? {});
+      signal.throwIfAborted();
+      this.#session.assertStopped(event);
+      if (!env.bindings?.variables) throw unavailable("invalid-frame");
+      this.#envCacheByActor.set(frame.actor, env.bindings.variables);
     }
     const vars = this.#envCacheByActor.get(frame.actor)!;
-    return Object.keys(vars)
-      .map((name) => ({ name, idx: /^var(\d+)$/.exec(name)?.[1] }))
-      .filter((e): e is { name: string; idx: string } => e.idx !== undefined)
-      .sort((a, b) => Number(a.idx) - Number(b.idx))
-      .map((e) => this.#valueRef(vars[e.name].value));
+    return this.#valueRef(vars[`var${index}`]?.value, types[index]);
   }
 
-  async #readGlobal(index: number): Promise<Ref> {
-    const vars = await this.#instanceScopeBindings();
-    return this.#valueRef(vars[`global${index}`]?.value);
+  async #readGlobal(id: number): Promise<Ref> {
+    const { index, instance } = this.#globals.get(id)!;
+    const vars = await this.#instanceScopeBindings(instance);
+    const metadata = await this.#valueMetadata(instance.url);
+    this.#session.assertStopped(instance.frame!.event);
+    return this.#valueRef(vars[`global${index}`]?.value, metadata.globals[index]);
   }
 
   #globalClone(id: number): Ref {
-    const gid = this.#nextId++;
-    this.#globalIndexById.set(gid, this.#globalIndexById.get(id)!);
+    const gid = this.#allocateHandle();
+    this.#globals.set(gid, this.#globals.get(id)!);
     return { $res: "Global", id: gid };
   }
 
-  async #instanceScopeBindings(): Promise<Record<string, { value?: unknown }>> {
-    const topActor = this.#topFrameActorByTid.get(this.#session.stoppedTid);
-    if (!topActor) return {};
-    let env = (await this.#session.frameEnvironment(topActor)) as
+  async #instanceScopeBindings(
+    instance: InstanceContext
+  ): Promise<Record<string, { value?: unknown }>> {
+    if (!instance.frame) throw unavailable("invalid-frame");
+    const { actor, event } = instance.frame;
+    this.#session.assertStopped(event);
+    let env = (await this.#session.frameEnvironment(actor)) as
       | {
           scopeKind?: string;
           parent?: unknown;
           bindings?: { variables?: Record<string, { value?: unknown }> };
         }
       | undefined;
+    this.#session.assertStopped(event);
+    let depth = 0;
     while (env && env.scopeKind !== "wasm instance") {
+      if (++depth > 64) throw unavailable("invalid-frame");
       env = env.parent as typeof env;
     }
-    return env?.bindings?.variables ?? {};
+    if (!env?.bindings?.variables) throw unavailable("invalid-frame");
+    return env.bindings.variables;
   }
 
-  #valueRef(raw: unknown): Ref {
-    let tag = "wasm-i32";
-    let value: number | bigint = 0;
-    if (typeof raw === "bigint") {
-      tag = "wasm-i64";
-      value = raw;
-    } else if (typeof raw === "number") {
-      value = raw;
-      tag = Number.isInteger(raw) ? "wasm-i32" : "wasm-f64";
+  async #valueMetadata(url: string): Promise<ModuleValues> {
+    const { signal } = this.#generation;
+    const cached = this.#metadataByUrl.get(url);
+    if (cached) return cached;
+    const bytes = await this.#wasmBytecode(url);
+    if (!bytes) throw unavailable("unsupported-type");
+    const metadata = await valueMetadata(bytes);
+    signal.throwIfAborted();
+    let entries =
+      metadata.globals.length + metadata.functions.reduce((n, fn) => n + fn.locals.length, 0);
+    for (const cached of this.#metadataByUrl.values())
+      entries +=
+        cached.globals.length + cached.functions.reduce((n, fn) => n + fn.locals.length, 0);
+    if (entries > 2_000_000) throw new Error("value metadata cache exceeds 2000000 entries");
+    this.#metadataByUrl.set(url, metadata);
+    return metadata;
+  }
+
+  #valueRef(raw: unknown, type: ValueType | undefined): Ref {
+    if (!type || type === "unsupported") throw unavailable("unsupported-type");
+    if (raw && typeof raw === "object") {
+      const grip = raw as { type?: string; text?: string };
+      if (
+        grip.type === "BigInt" &&
+        typeof grip.text === "string" &&
+        /^-?\d+$/.test(grip.text) &&
+        grip.text.length <= 32
+      )
+        raw = BigInt(grip.text);
+      else if (grip.type === "NaN") raw = NaN;
+      else if (grip.type === "Infinity") raw = Infinity;
+      else if (grip.type === "-Infinity") raw = -Infinity;
+      else if (grip.type === "-0") raw = -0;
     }
-    const id = this.#nextId++;
-    this.#valueById.set(id, { tag, raw: value });
+    if (type === "i64" && typeof raw === "number") {
+      if (!Number.isSafeInteger(raw)) {
+        this.#logger.warn("[value] i64 unavailable: Firefox returned an unsafe JavaScript number");
+        throw unavailable("unsupported-type");
+      }
+      raw = BigInt(raw);
+    }
+    if ((type === "i64" && typeof raw !== "bigint") || (type !== "i64" && typeof raw !== "number"))
+      throw unavailable("invalid-frame");
+    if (
+      type === "i32" &&
+      (!Number.isInteger(raw) || Number(raw) < -0x8000_0000 || Number(raw) > 0xffff_ffff)
+    )
+      throw unavailable("invalid-frame");
+    const id = this.#allocateHandle();
+    this.#valueById.set(id, { tag: `wasm-${type}`, raw: raw as number | bigint });
     return { $res: "WasmValue", id };
   }
 
   #wasmValueGetType(id: number): { tag: string } {
-    const entry = this.#valueById.get(id);
-    // Defensive: id not found → report funcref so value_to_bytes returns 0u32
-    // rather than crashing with a null-deref (TypeScript ! assertion).
-    return { tag: entry?.tag ?? "wasm-funcref" };
+    return { tag: this.#valueById.get(id)!.tag };
   }
 
   #wasmValueUnwrapI32(id: number): number {
     const entry = this.#valueById.get(id);
-    return entry ? Number(entry.raw) >>> 0 : 0;
+    return Number(entry!.raw) >>> 0;
   }
 
   #wasmValueUnwrapI64(id: number): bigint {
     const entry = this.#valueById.get(id);
-    return BigInt(entry?.raw ?? 0);
+    return BigInt(entry!.raw);
   }
 
   #wasmValueUnwrapF(id: number): number {
     const entry = this.#valueById.get(id);
-    return Number(entry?.raw ?? 0);
+    return Number(entry!.raw);
   }
 
   #wasmValueClone(id: number): Ref {
     const v = this.#valueById.get(id);
-    const newId = this.#nextId++;
-    // Defensive: id not found → clone as zero i32 rather than crashing.
-    this.#valueById.set(newId, v ?? { tag: "wasm-i32", raw: 0 });
+    const newId = this.#allocateHandle();
+    this.#valueById.set(newId, v!);
     return { $res: "WasmValue", id: newId };
   }
 
-  async #memorySize(): Promise<number> {
-    const topActor = this.#topFrameActorByTid.get(this.#session.stoppedTid);
-    const consoleActor = this.#session.stoppedConsoleActor;
-    if (!topActor || !consoleActor) return 0;
+  #memoryContext(id: number) {
+    const url = this.#memoryById.get(id);
+    const event = this.#snapshotEvent;
+    if (!url || !event) throw unavailable("invalid-frame");
+    try {
+      this.#session.assertStopped(event);
+    } catch (cause) {
+      throw unavailable("invalid-frame", cause);
+    }
+    const tids = [
+      this.#session.stoppedTid,
+      ...event.pausedTids.filter((tid) => tid !== this.#session.stoppedTid),
+    ];
+    for (const tid of tids) {
+      const frame = this.#framesByTid
+        .get(tid)
+        ?.find(
+          (f) =>
+            f.type === "wasmcall" &&
+            f.where &&
+            this.#session.urlForSourceActor(f.where.actor) === url
+        );
+      const consoleActor = this.#session.consoleActorForThread(tid);
+      if (frame && consoleActor)
+        return { topActor: frame.actor, consoleActor, event, signal: this.#generation.signal };
+    }
+    throw unavailable("invalid-frame");
+  }
+
+  async #memorySize(id: number): Promise<number> {
+    const { topActor, consoleActor, event, signal } = this.#memoryContext(id);
     try {
       const r = (await this.#session.evaluateInFrame(
         "memory0.buffer.byteLength",
         topActor,
         consoleActor
       )) as { result?: unknown };
-      return typeof r.result === "number" ? r.result : 0;
-    } catch {
-      return 0;
+      signal.throwIfAborted();
+      this.#session.assertStopped(event);
+      if (typeof r.result !== "number" || !Number.isSafeInteger(r.result) || r.result < 0)
+        throw new Error("memory size evaluation returned a missing or invalid size");
+      return r.result;
+    } catch (cause) {
+      this.#logger.error(`[memory] size failed stop=${event.stopId}: ${String(cause)}`);
+      throw unavailable("invalid-frame", cause);
     }
   }
 
-  async #readMemory(addr: number, len: number): Promise<Uint8Array> {
-    if (len < 0 || len > MAX_MEMORY_READ) throw outOfBounds();
-    const out = new Uint8Array(len);
-    const topActor = this.#topFrameActorByTid.get(this.#session.stoppedTid);
-    const consoleActor = this.#session.stoppedConsoleActor;
-    if (!topActor || !consoleActor) return out;
+  async #readMemory(id: number, addr: number, len: number): Promise<Uint8Array> {
+    if (
+      !Number.isSafeInteger(addr) ||
+      addr < 0 ||
+      !Number.isSafeInteger(len) ||
+      len < 0 ||
+      len > MAX_MEMORY_READ
+    )
+      throw outOfBounds();
+    const { signal, event, topActor, consoleActor } = this.#memoryContext(id);
+    signal.throwIfAborted();
+    this.#session.assertStopped(event);
     const expr =
-      `(()=>{const b=memory0.buffer,t=b.byteLength,a=${addr},n=${len},o=new Uint8Array(n);` +
-      `if(a<t)o.set(new Uint8Array(b,a,Math.min(n,t-a)));` +
-      `let s='';for(const x of o)s+=x.toString(16).padStart(2,'0');return s;})()`;
-    const evalOnce = () =>
-      this.#session.evaluateInFrame(expr, topActor, consoleActor) as Promise<{ result?: unknown }>;
-    let hex = "";
+      `(()=>{const b=memory0.buffer,a=${addr},n=${len};` +
+      `if(a>b.byteLength||n>b.byteLength-a)return null;` +
+      `let s='';for(const x of new Uint8Array(b,a,n))s+=x.toString(16).padStart(2,'0');return s;})()`;
     try {
-      const r = await evalOnce();
-      hex = typeof r.result === "string" ? r.result : "";
-      // Retry once if the result is missing or truncated (transient RDP failure).
-      if (len > 0 && hex.length !== len * 2) {
-        const r2 = await evalOnce().catch(() => ({}) as { result?: unknown });
-        hex = typeof r2.result === "string" ? r2.result : hex;
-      }
-    } catch {
-      try {
-        const r2 = await evalOnce();
-        hex = typeof r2.result === "string" ? r2.result : "";
-      } catch {
-        // both attempts failed — return zeros
-      }
+      const response = (await this.#session.evaluateInFrame(expr, topActor, consoleActor)) as {
+        result?: unknown;
+      };
+      signal.throwIfAborted();
+      this.#session.assertStopped(event);
+      if (
+        response.result === null ||
+        (typeof response.result === "object" &&
+          (response.result as { type?: string })?.type === "null")
+      )
+        throw outOfBounds();
+      if (
+        typeof response.result !== "string" ||
+        response.result.length !== len * 2 ||
+        !/^[0-9a-f]*$/i.test(response.result)
+      )
+        throw new Error("memory evaluation returned missing or malformed bytes");
+      return Uint8Array.from(Buffer.from(response.result, "hex"));
+    } catch (cause) {
+      if ((cause as { payload?: string })?.payload === "out-of-bounds") throw cause;
+      this.#logger.error(
+        `[memory] read failed stop=${event.stopId} address=${addr} length=${len}: ${String(cause)}`
+      );
+      throw Object.assign(new Error("invalid-frame", { cause }), { payload: "invalid-frame" });
     }
-    for (let i = 0; i < len && i * 2 + 1 < hex.length; i++) {
-      out[i] = parseInt(hex.substr(i * 2, 2), 16);
-    }
-    return out;
   }
 
   // --- resumption ----------------------------------------------------------
   #doContinue(): Ref {
     this.#armStopped();
-    if (this.#stop.pending !== null) {
+    if (this.#stop.operation?.pending) {
       if (this.#stop.hostInterruptPending) {
         // Ctrl-C won the race with WIT dispatch. Establish a genuine RDP
         // all-stop now and let the real worker pause resolve EventFuture.
-        this.#session.armAllStop();
         this.#interruptForHost();
       } else if (this.#session.hasUnwitnessedPause()) {
-        // A pause already happened with nothing listening for it — e.g. a
-        // buffered breakpoint fired on a newly-navigated page before this
-        // continue armed the all-stop machinery (armAllStop's paused:<tid>
-        // listeners weren't registered yet). resumeAll() would resume
-        // straight past that paused thread and nothing would stop again.
-        // Surface the pause we already have instead of losing it. A tid
-        // merely left over from an already-reported stop (e.g. primeStop's
-        // initial interrupt) isn't one of these and takes the normal path.
+        // Report an unwitnessed pause before resuming, including breakpoints that
+        // fired during navigation before this execution wait was armed.
         void this.#session.adoptPausedState().catch((err) => {
           this.#logger.error(
             `[rdp] could not adopt paused state: ${err instanceof Error ? err.message : String(err)}`
@@ -851,7 +1087,6 @@ export class RdpDebuggee {
           this.#session.close();
         });
       } else {
-        this.#session.armAllStop();
         this.#session.resumeAll().catch((err) => {
           this.#logger.error(
             `[rdp] resume failed: ${err instanceof Error ? err.message : String(err)}`
@@ -868,19 +1103,13 @@ export class RdpDebuggee {
 
   #doSingleStep(tid: number): Ref {
     this.#armStopped();
-    if (this.#stop.pending !== null) {
+    if (this.#stop.operation?.pending) {
       if (this.#stop.hostInterruptPending) {
-        this.#session.armAllStop();
         this.#interruptForHost();
         return this.#eventFutureRef();
       }
-      // LLDB's own "step off a stale breakpoint before resuming" dance —
-      // triggered by its cached, pre-navigation view of where a breakpoint
-      // site is — runs as a singleStep BEFORE it ever issues a real continue.
-      // If a pause already happened with nothing listening (e.g. a buffered
-      // breakpoint refiring on a newly-navigated page, won before this
-      // step-off dance even started), stepping now would silently resume
-      // straight past it. Surface it instead, same as #doContinue's check.
+      // LLDB can step off a cached breakpoint before continuing. Report an
+      // unwitnessed pause first so that step cannot skip the replacement's stop.
       if (this.#session.hasUnwitnessedPause()) {
         void this.#session.adoptPausedState().catch((err) => {
           this.#logger.error(
@@ -890,7 +1119,6 @@ export class RdpDebuggee {
         });
         return this.#eventFutureRef();
       }
-      this.#session.armAllStop();
       // A JS (`call`) innermost frame is JIT-compiled: RDP "step" advances one
       // wasm instruction, which jumps an arbitrary number of JS source lines.
       // Use "next" (RDP step-over by source line) so a step lands on the next
@@ -905,53 +1133,41 @@ export class RdpDebuggee {
 
   #doInterrupt(): null {
     this.#armStopped();
-    if (this.#stop.pending !== null) {
+    if (this.#stop.operation?.pending) {
       this.#session.interrupt(this.#session.stoppedTid);
     }
     return null;
   }
 
-  async #finishEvent(): Promise<{ tag: string }> {
-    await this.#stop.promise;
-    await this.#snapshotAll();
+  async #finishEvent(id: number): Promise<{ tag: string }> {
+    const event = await this.#futureById.get(id)!.promise;
+    await this.#snapshotStopped(event);
     return { tag: this.#eventTag() };
   }
 
-  /**
-   * Force a genuine all-stop and snapshot live thread state. Called on attach so
-   * the stop LLDB sees on connect is backed by a real RDP pause with real frames
-   * (issue #21), rather than the synthetic empty placeholder. Must run before the
-   * gdbstub component starts, since its startup `update_on_stop` reads the frame
-   * snapshot once and never re-snapshots on attach.
-   */
+  /** Collect a genuine stop and snapshot before the component's initial scan.
+   * A missing pause or retired generation rejects attach. */
   async primeStop(timeoutMs = PRIME_STOP_TIMEOUT_MS): Promise<void> {
-    // Interrupt a live thread (lowest tid = top-level), not the default
-    // stoppedTid: after a navigate the top-level target re-arrives under a fresh
-    // tid, so stoppedTid (1) no longer names a live thread. armAllStop then
-    // interrupts the rest and sets stoppedTid to the thread that actually paused.
+    // Select a live target; a remembered stopped thread may have been retired.
     const tid = this.#session.listTids()[0];
     if (tid === undefined) return;
     this.#armStopped();
-    if (this.#session.hasUnwitnessedPause()) {
+    if (this.#session.paused()) {
       // A thread paused before we armed a listener (pauseOnExceptions fires
       // during page load). Interrupting it would draw an alreadyPaused error
       // reply instead of a paused event, which armAllStop cannot see, so adopt
       // the known paused state directly. Same guard as #doContinue/#doSingleStep.
       await this.#session.adoptPausedState();
     } else {
-      this.#session.armAllStop();
       this.#session.interrupt(tid);
     }
-    // An interrupt can still go unanswered (the thread resumes, or its target is
-    // destroyed, between the check above and the request). Attach must not hang
-    // on that: give up the primed stop and let the component report its
-    // synthetic one, which costs frame quality on the first stop (issue #21) but
-    // keeps the session alive.
+    // An unanswered interrupt fails attach instead of manufacturing an empty stop.
     if (!(await this.#awaitStop(timeoutMs))) {
-      this.#logger.warn(`[rdp] no stop within ${timeoutMs}ms of priming; attaching without one`);
-      return;
+      const error = new Error(`no complete stop within ${timeoutMs}ms of priming`);
+      this.#stop.operation?.cancel(error);
+      throw error;
     }
-    await this.#snapshotAll();
+    await this.#snapshotStopped(await this.#stop.operation!.promise);
     await this.#preloadJsSources();
   }
 
@@ -963,7 +1179,7 @@ export class RdpDebuggee {
       timer = setTimeout(() => resolve(false), timeoutMs);
     });
     try {
-      return await Promise.race([this.#stop.promise.then(() => true), expired]);
+      return await Promise.race([this.#stop.operation!.promise.then(() => true), expired]);
     } finally {
       clearTimeout(timer);
     }
@@ -978,13 +1194,11 @@ export class RdpDebuggee {
     this.#clearResyncTimer();
     this.#stop.hostInterruptPending = true;
     this.#stop.forcingResync = false;
-    if (this.#stop.pending) this.#interruptForHost();
+    if (this.#stop.operation?.pending) this.#interruptForHost();
   }
 
   #armStopped(): void {
-    this.#stop.promise = new Promise((resolve, reject) => {
-      this.#stop.pending = { resolve, reject };
-    });
+    this.#stop.operation = this.#session.armAllStop();
   }
 
   #interruptForHost(): void {
@@ -999,50 +1213,18 @@ export class RdpDebuggee {
     }
   }
 
-  /**
-   * Called whenever a new top-level target arrives while a continue is
-   * outstanding (#stop.pending set — the process was running, or
-   * continue() raced the navigation). LLDB is blocked in EventFuture.finish
-   * waiting for a "stopped" that only a real RDP pause produces — which is
-   * also the only point update_on_stop() -> all_modules() runs on the
-   * component side: without one, a navigation to a page whose buffered
-   * breakpoint never fires leaves LLDB attached to a stale module/thread
-   * model with no way to learn otherwise.
-   *
-   * Give the new page a grace period to pause on its own — a buffered
-   * breakpoint firing through the normal all-stop path (armAllStop's
-   * onNewTarget listener) — before forcing it paused.
-   *
-   * Deliberately does NOT also force a pause when nothing is outstanding
-   * (LLDB believes the debuggee is already stopped from before the swap,
-   * gdbstub having no way to tell it otherwise): interrupting at an
-   * arbitrary point can catch the new page between JS frames entirely
-   * (idle, mid-microtask-checkpoint), and Firefox's own thread.js resume()
-   * throws a bare TypeError ("frame is null") trying to single-step a
-   * thread paused with no current frame — which is exactly what LLDB's own
-   * step-off-a-stale-breakpoint dance tries to do on its next continue.
-   * Left running instead, that dance's resume attempt fails with a
-   * harmless, recoverable "wrongState" (thread not paused) and LLDB just
-   * issues a normal continue afterward — worse information, but a thread
-   * that's actually running, with an actual frame once it does hit
-   * something, beats a "paused" thread Firefox can't safely single-step.
-   */
+  /** While execution is pending, allow a replacement's breakpoint to fire
+   * before forcing a re-sync stop. Do not interrupt an idle replacement just
+   * because LLDB retains an old stop; Firefox may have no frame to step. */
   #scheduleResyncCheck(tid: number): void {
     this.#clearResyncTimer();
     this.#resyncTimer = setTimeout(() => {
       this.#resyncTimer = null;
-      if (this.#stop.pending === null) return; // LLDB isn't waiting on anything
+      if (!this.#stop.operation?.pending) return;
       const live = this.#session.listTids();
       if (live.length === 0) return; // nothing left to interrupt — a genuine close, not a swap
       if (this.#session.hasUnwitnessedPause()) {
-        // Adopts a pause that already happened (e.g. the new page's
-        // breakpoint fired but nothing was listening yet) — its pausePacket
-        // is synthetic and empty, so the "stopped" listener already
-        // defaults its tag to "breakpoint"; no override needed. If instead
-        // something IS paused but was properly witnessed (armAllStop's
-        // onNewTarget already has a listener on it, #allStop is just still
-        // running its interrupt-others phase), leave it alone rather than
-        // racing a second #allStop against the one already in flight.
+        // Adopt its real pause packet; an existing collector remains the sole owner.
         void this.#session.adoptPausedState().catch((err) => {
           this.#logger.error(
             `[rdp] could not adopt paused state: ${err instanceof Error ? err.message : String(err)}`
@@ -1056,23 +1238,34 @@ export class RdpDebuggee {
     }, RESYNC_GRACE_MS);
   }
 
-  // A navigation invalidates every actor/body these caches hold — they were
-  // scoped to the destroyed top-level target. (The session's own actor->url
-  // map is cleared by session.ts itself, synchronously before this fires.)
-  // Clearing #moduleByUrl too (not just the bytecode) means a same-URL reload
-  // gets a fresh module id: the component treats it as a library unload+reload
-  // rather than serving the old module's cached content, which is what makes a
-  // changed-body reload (and, via the same path, a plain cross-page
-  // navigation) pick up correctly.
+  // Retire the adapter's generation-owned handles and symbols. New module IDs
+  // make LLDB observe a reload even when the URL is unchanged.
   #onNavigated(): void {
+    this.#generation.abort(new Error("debuggee generation retired by navigation"));
+    this.#generation = new AbortController();
     this.#bytecodeByUrl.clear();
     this.#syntheticByUrl.clear();
     this.#moduleByUrl.clear();
     this.#moduleById.clear();
+    this.#framesByTid.clear();
+    this.#frameInfoById.clear();
+    this.#envCacheByActor.clear();
+    this.#instances.clear();
+    this.#globals.clear();
+    this.#memoryById.clear();
+    this.#metadataByUrl.clear();
+    this.#memoryModuleUrl = undefined;
+    this.#valueById.clear();
+    this.#snapshotEvent = undefined;
+    this.#unavailableFrames.clear();
+    this.logState("generation-retired");
   }
 
   #eventFutureRef(): Ref {
-    return { $res: "EventFuture", id: this.#nextId++ };
+    const id = this.#allocateHandle();
+    if (!this.#stop.operation) throw new Error("no execution operation for future");
+    this.#futureById.set(id, this.#stop.operation);
+    return { $res: "EventFuture", id };
   }
 
   #eventTag(): string {

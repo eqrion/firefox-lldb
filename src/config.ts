@@ -42,3 +42,12 @@ export function firefoxLogDir(): string | undefined {
 export function allowUnsupportedFirefox(): boolean {
   return process.env.FIREFOX_LLDB_ALLOW_UNSUPPORTED === "1";
 }
+
+export const PTY_PROMPT_TOKEN_ENV = "FIREFOX_LLDB_PTY_PROMPT_TOKEN";
+
+/** Private PTY completion record; ordinary terminal sessions emit no marker. */
+export function ptyPromptMarker(token = process.env[PTY_PROMPT_TOKEN_ENV]): string | undefined {
+  if (token === undefined) return undefined;
+  if (!/^[0-9a-f]{32}$/.test(token)) throw new Error("invalid PTY prompt token");
+  return `\x1b]firefox-lldb;prompt;${token}\x07`;
+}

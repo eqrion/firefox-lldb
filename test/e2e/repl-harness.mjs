@@ -10,14 +10,15 @@
 
 import { PassThrough, Writable } from "node:stream";
 import { LLDBClient } from "lldb-wasm";
-import { parseCliArgs, startPlatformServer } from "../../src/core/platform-session.ts";
+import { parseCliArgs } from "../../src/cli/options.ts";
+import { startPlatformServer } from "../../src/core/platform-session.ts";
 import { freePort } from "../../src/platform/gdb-server-spawner.ts";
+import { EmbeddedLldbBridge } from "../../src/lldb/bridge.ts";
 import { runRepl } from "../../src/cli/repl.ts";
 import {
   FIXTURES,
   startStaticServer,
   withDeadline,
-  bridgeTcp,
   platformConnect,
   attachWithRetry,
   shutdownSession,
@@ -32,19 +33,18 @@ export class ReplSession {
   #client;
   #handle;
   #staticServer;
-  #sockets = new Set();
+  #bridge;
   #input;
   #repl;
   #out = "";
   #waiters = [];
   #triggerInterrupt;
+  #navigationRevision = 0;
   #trace;
-  #tabBridgeSerial = 0;
+  #startup;
+  #startupAbort = new AbortController();
+  #shutdown;
   session;
-
-  #bridgeTcp(port, label = `tab-${++this.#tabBridgeSerial}`) {
-    return bridgeTcp(this.#client, this.#sockets, port, { trace: this.#trace, label });
-  }
 
   #settle() {
     return new Promise((resolve) => {
@@ -73,6 +73,7 @@ export class ReplSession {
     trace.stage("LLDB client ready");
     const rs = new ReplSession();
     rs.#client = client;
+    rs.#bridge = new EmbeddedLldbBridge(client, trace);
     rs.#staticServer = staticServer;
     rs.#trace = trace;
     client.setFileProvider(() => Promise.resolve(null));
@@ -110,22 +111,27 @@ export class ReplSession {
           "--fire",
           fire ?? fx.fire,
         ]);
-        const handle = await startPlatformServer(args, {
-          wrapConnectPort: (port) => rs.#bridgeTcp(port),
+        const handle = await (rs.#startup = startPlatformServer(args, {
+          signal: rs.#startupAbort.signal,
+          wrapConnectPort: (port) => rs.#bridge.bridgeTcp(port),
           logger: trace,
           onRdpSession: (s) => {
             rs.session = s;
           },
           onSession: (s, interrupt) => {
+            s.on("navigated", () => {
+              rs.#navigationRevision++;
+            });
             rs.session = s;
             rs.#triggerInterrupt = interrupt;
             void s.streamConsole((m) => rs.#repl.printConsole(m));
           },
-        });
+        }));
         rs.#handle = handle;
+        rs.#startupAbort.signal.throwIfAborted();
         trace.stage(`platform server ready on TCP port ${handle.port}`);
 
-        const c0 = await rs.#bridgeTcp(handle.port, "platform");
+        const c0 = await rs.#bridge.bridgeTcp(handle.port, "platform");
         await platformConnect(client, c0, trace);
         trace.stage("submitting attach command alias");
         await client.sessionCommand("command alias attach process attach --plugin wasm");
@@ -133,7 +139,7 @@ export class ReplSession {
         // Attach is driven directly (not through the REPL) so the retry
         // policy is in one place; REPL command routing is what the tests
         // exercise afterwards.
-        await attachWithRetry(client, 4, trace);
+        await attachWithRetry(client, 4, trace, () => rs.#navigationRevision);
         trace.stage("starting REPL");
         rs.#repl.start();
         await rs.#settle();
@@ -184,15 +190,25 @@ export class ReplSession {
 
   logState(event = "snapshot") {
     this.session?.logState(event);
+    this.#bridge.logState();
   }
 
   shutdown() {
-    return shutdownSession({
-      sockets: this.#sockets,
-      handle: this.#handle,
-      client: this.#client,
-      staticServer: this.#staticServer,
-    });
+    this.#startupAbort.abort(new Error("REPL harness startup cancelled by shutdown"));
+    return (this.#shutdown ??= (async () => {
+      let rollbackError;
+      await this.#startup?.catch((error) => {
+        if (error instanceof AggregateError) rollbackError = error;
+      });
+      this.#input.end();
+      await shutdownSession({
+        bridge: this.#bridge,
+        handle: this.#handle,
+        client: this.#client,
+        staticServer: this.#staticServer,
+      });
+      if (rollbackError) throw rollbackError;
+    })());
   }
 
   forceKillFirefox() {

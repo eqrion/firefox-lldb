@@ -74,16 +74,6 @@ function wasmSections(bytes: Uint8Array): WasmSection[] | undefined {
   return sections;
 }
 
-function concatBytes(parts: Uint8Array[]): Uint8Array {
-  const out = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
-  let offset = 0;
-  for (const part of parts) {
-    out.set(part, offset);
-    offset += part.length;
-  }
-  return out;
-}
-
 export interface WasmFunctionRange {
   /** Offset of the function body's size field in the module bytecode. */
   start: number;
@@ -123,24 +113,25 @@ export function wasmFunctionRange(
 }
 
 /**
- * Remove the `name` custom section.
+ * Hide the `name` custom section without changing any file offsets.
  *
  * LLDB's wasm object reader maps names from that section as if its function
  * indices excluded imports. The wasm format includes imports in that index
  * space, so names after the imported functions are attached to the wrong code
  * addresses. DWARF already carries the authoritative function names and ranges,
- * so dropping the section prevents duplicate, incorrectly-addressed symbol
- * matches without touching executable code or debug sections.
+ * so renaming it prevents duplicate, incorrectly-addressed symbol matches.
+ * Keep its encoded size: a custom section can precede executable code.
  */
 export function stripWasmNameSection(bytes: Uint8Array): Uint8Array {
   const sections = wasmSections(bytes);
   if (!sections || !sections.some((section) => section.name === "name")) return bytes;
-  return concatBytes([
-    bytes.subarray(0, WASM_HEADER.length),
-    ...sections
-      .filter((section) => section.name !== "name")
-      .map((section) => bytes.subarray(section.start, section.end)),
-  ]);
+  const out = bytes.slice();
+  for (const section of sections) {
+    if (section.name !== "name") continue;
+    const name = readU32(bytes, section.contentStart, section.end)!;
+    out[name.next] = 0x5f; // "_ame" is an ignored custom section of identical length.
+  }
+  return out;
 }
 
 /**

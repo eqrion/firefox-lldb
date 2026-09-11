@@ -98,7 +98,8 @@ Install `firefox-lldb` in the workspace for that path, or replace
 Starting the configuration launches Firefox and attaches to the first tab.
 
 The REPL-only `js` commands and live browser-console stream are not exposed in
-DAP mode yet.
+DAP mode yet. Pause and disconnect while running also have known upstream
+limitations; see the [integration contracts](docs/COMPATIBILITY.md).
 
 ### Preparing your wasm
 
@@ -182,6 +183,17 @@ firefox-lldb --url http://localhost:8080/index.html --log
 ```
 
 The log can contain page content, console output, and raw protocol data.
+`FIREFOX_LLDB_LOG_DIR` overrides its directory, including with `--log`. Traces
+are bounded and mark omitted data; a write failure reports an incomplete log
+and preserves the available in-memory tail.
+
+## Development
+
+See [INTERNALS.md](INTERNALS.md) for the command path, component boundaries and
+lifetime contracts, [the E2E guide](test/e2e/README.md) for validation, and
+[HARNESS.md](HARNESS.md) for driving the real REPL through MCP. Integration
+limitations and workaround removal criteria live in
+[COMPATIBILITY.md](docs/COMPATIBILITY.md).
 
 ## License
 

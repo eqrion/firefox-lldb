@@ -7,6 +7,11 @@ import { posix } from "node:path";
 
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
+export const MAX_SOURCE_MAP_BYTES = 31 * 1024 * 1024;
+
+export function checkSourceMapSize(bytes: Uint8Array): void {
+  if (bytes.length > MAX_SOURCE_MAP_BYTES) throw new Error("source map exceeds 31 MiB limit");
+}
 
 function safeRelativePath(path: string): string | null {
   if (!path || path.includes("\0") || path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path)) {
@@ -30,6 +35,7 @@ function relocatedPath(path: string): string {
 /** Rewrite every source name to a safe relative path before it enters DWARF.
  * Source indices and sourcesContent stay aligned, so mappings are unchanged. */
 export function sanitizeSourceMapBytes(bytes: Uint8Array): Uint8Array {
+  checkSourceMapSize(bytes);
   const map = JSON.parse(decoder.decode(bytes)) as {
     version?: number;
     sourceRoot?: unknown;
@@ -43,15 +49,22 @@ export function sanitizeSourceMapBytes(bytes: Uint8Array): Uint8Array {
     return safeRelativePath(combined) ?? relocatedPath(combined);
   });
   map.sourceRoot = "";
-  return encoder.encode(JSON.stringify(map));
+  const result = encoder.encode(JSON.stringify(map));
+  checkSourceMapSize(result);
+  return result;
 }
 
 export function sourceMapDataUrlBytes(url: string): Uint8Array {
+  // Bound encoded input before decoding or allocating a second representation.
+  if (url.length > MAX_SOURCE_MAP_BYTES * 3 + 256)
+    throw new Error("source-map data URL exceeds limit");
   const comma = url.indexOf(",");
   if (!url.startsWith("data:") || comma === -1) throw new Error("invalid source-map data URL");
   const metadata = url.slice(5, comma);
   const payload = url.slice(comma + 1);
-  return metadata.split(";").includes("base64")
+  const bytes = metadata.split(";").includes("base64")
     ? new Uint8Array(Buffer.from(payload, "base64"))
     : encoder.encode(decodeURIComponent(payload));
+  checkSourceMapSize(bytes);
+  return bytes;
 }

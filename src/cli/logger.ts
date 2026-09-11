@@ -2,8 +2,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-import type { Logger } from "../logging.js";
-import type { SessionLog } from "./session-log.js";
+import type { Logger } from "../diagnostics/logger.js";
+import type { SessionLog } from "../diagnostics/session-log.js";
 
 /** Console logger. Debug output is gated behind the `verbose` flag. */
 export function consoleLogger(verbose: boolean): Logger {
@@ -37,5 +37,16 @@ export function createLogger(opts: {
 }): Logger {
   const base = opts.quiet ? quietLogger(opts.verbose) : consoleLogger(opts.verbose);
   if (!opts.sessionLog || opts.verbose) return base;
-  return { ...base, debug: (m) => opts.sessionLog!.record("debug", m) };
+  return {
+    ...base,
+    debug: (m) => opts.sessionLog!.record("debug", m),
+    error: (m) => {
+      // LLDB returns command failures to the REPL/DAP caller as well as logging
+      // their internal operation record. Keep that duplicate diagnostic in the
+      // transcript; a recovered attach attempt is not a terminal session error.
+      if (opts.quiet && m.startsWith("[lldb-wasm] operation.failed "))
+        opts.sessionLog!.record("debug", m);
+      else base.error(m);
+    },
+  };
 }

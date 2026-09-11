@@ -27,6 +27,9 @@ export interface ImportObject {
   'print-debugger-info': {
     'default'(message: string): void,
   },
+  'debugger-listening': {
+    'default'(port: number): void,
+  },
   'log-line': {
     'default'(message: string): void,
   },

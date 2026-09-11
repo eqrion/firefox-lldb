@@ -80,14 +80,16 @@ jobs:
           mkdir -p "$FIREFOX_LLDB_LOG_DIR"
           ${{ matrix.firefox.command }}
 
-      - name: Dump captured Firefox process output
-        if: steps.tests.outcome == 'failure' || cancelled()
-        run: |
-          shopt -s nullglob
-          for f in /tmp/firefox-logs/*; do
-            echo "=== $f ==="
-            cat "$f"
-          done
+      # Keep successful runs too: a recovered setup attempt is still evidence
+      # of a reliability failure. Each matrix job and rerun owns a distinct zip.
+      - name: Retain debugger and Firefox transcripts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: firefox-logs-${{ matrix.firefox.channel }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: /tmp/firefox-logs/
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Fail the job when the suite failed
         if: steps.tests.outcome == 'failure'

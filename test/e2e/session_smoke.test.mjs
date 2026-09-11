@@ -15,7 +15,19 @@ before(async () => {
   session = await Session.platformOnly();
 });
 after(async () => {
-  await session?.shutdown();
+  if (!session) return;
+  // Keep a deadline alive even after shutdown has closed every socket/worker.
+  let timer;
+  try {
+    await Promise.race([
+      session.shutdown(),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("platform-only shutdown did not finish")), 5000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 });
 
 test("platform connection is live (host info available)", async () => {

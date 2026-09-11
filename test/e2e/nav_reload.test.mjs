@@ -21,7 +21,7 @@ after(async () => {
 });
 
 test("location.reload() re-fetches module bytes and the breakpoint refires", async () => {
-  const fetchesBefore = s.wasmFetchCount();
+  const fetchesBefore = s.moduleFetchCount();
   assert.ok(
     fetchesBefore >= 1,
     "the debugger must have already fetched module bytes at least once by the first breakpoint"
@@ -51,7 +51,7 @@ test("location.reload() re-fetches module bytes and the breakpoint refires", asy
   assert.match(f0.function, /compute_factorial/);
 
   assert.ok(
-    s.wasmFetchCount() > fetchesBefore,
+    s.moduleFetchCount() > fetchesBefore,
     "reload must re-fetch module bytes, not serve the stale cached bytecode"
   );
 });

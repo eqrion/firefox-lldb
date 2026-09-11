@@ -4,7 +4,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildSyntheticModule } from "../../src/gdb/synthetic-module.js";
+import { buildSyntheticModule } from "../../src/symbols/synthetic-module.js";
 
 function readUleb(bytes: Uint8Array, offset: number): { value: number; next: number } {
   let value = 0;

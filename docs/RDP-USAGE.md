@@ -16,7 +16,13 @@ All RDP wire traffic is confined to [`src/rdp/`](../src/rdp/):
   processes requests serially (FIFO), so a non-event packet from an actor is
   the reply to that actor's oldest outstanding request. Packets whose `type`
   is a known event (see below) are delivered as unsolicited notifications
-  instead.
+  instead. Request deadlines close the connection. Explicit actor-lifetime
+  cancellation permanently retires that actor's FIFO and discards late replies;
+  it is not cancellation for a reusable actor's individual request.
+- [`browser.ts`](../src/rdp/browser.ts) — compatibility/token checks, stable tab
+  discovery, pre-navigation priming and coalesced tab watching.
+- [`breakpoints.ts`](../src/rdp/breakpoints.ts) — desired/applied locations and
+  serialized replay/removal, including shared physical sites.
 - [`session.ts`](../src/rdp/session.ts) — the wasm-debugging session: actor
   discovery, thread-config bring-up, breakpoints, stepping, all-stop
   coordination, console/eval. Top-level target incarnations receive explicit
@@ -81,6 +87,22 @@ are sent per thread actor — the watcher does not broadcast them.
 
 Full request/response TypeScript shapes: `REQUESTS` and the `*Args`/`*Response`
 interfaces in [`protocol.ts`](../src/rdp/protocol.ts).
+
+`RdpWasmSession.evalJS()` uses one five-second deadline for both the
+acknowledgement and result event. It subscribes before sending, since both
+packets can arrive in the same TCP chunk. A timeout before acknowledgement
+closes the session: the outstanding actor FIFO entry cannot safely be
+abandoned. A timeout after acknowledgement leaves the connection usable;
+late events cannot satisfy another evaluation. Timeout logs identify the
+console actor and whether the operation was awaiting an ack or a result.
+
+Startup cancellation belongs to the connection, not to individual actor requests.
+An optional abort signal closes the RDP socket through TCP connect, root greeting,
+initialization, and later requests. Closing rejects pending FIFO entries and
+unblocks session lifecycle waits. The launcher checks cancellation before each
+new acquisition stage; it cannot reuse an abandoned actor reply queue. Expected
+socket aborts still reject work and emit close, without being reported as an
+unexpected transport error.
 
 ## Events
 

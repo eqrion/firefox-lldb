@@ -10,8 +10,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import net from "node:net";
-import { parseCliArgs, startPlatformServer } from "../../src/core/platform-session.ts";
+import { parseCliArgs } from "../../src/cli/options.ts";
+import { startPlatformServer } from "../../src/core/platform-session.ts";
 import { freePort } from "../../src/platform/gdb-server-spawner.ts";
+import { FirefoxPortInUseError } from "../../src/core/firefox.ts";
 
 test("launch refuses when the RDP port is already occupied", async () => {
   const rdpPort = await freePort();
@@ -26,7 +28,7 @@ test("launch refuses when the RDP port is already occupied", async () => {
       "--rdp-port",
       String(rdpPort),
     ]);
-    await assert.rejects(() => startPlatformServer(args), /already listening/);
+    await assert.rejects(() => startPlatformServer(args), FirefoxPortInUseError);
   } finally {
     await new Promise((resolve) => blocker.close(resolve));
   }

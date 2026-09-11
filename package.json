@@ -45,11 +45,11 @@
     "launch-server": "node --import tsx src/cli/firefox-lldb-server.ts --launch --port ${PORT:-1234} --rdp-port ${RDP_PORT:-6080} ${URL:+--url $URL}",
     "connect": "node --import tsx src/cli/firefox-lldb-server.ts --connect --port ${PORT:-1234} --rdp-port ${RDP_PORT:-6080} ${URL:+--url $URL}",
     "mcp": "node --import tsx src/mcp/server.ts",
-    "component:build": "cd vendor/gdbstub-component && cargo build --release --target wasm32-wasip2",
+    "component:build": "cd vendor/gdbstub-component && cargo build --locked --release --target wasm32-wasip2",
     "component:transpile": "npx jco transpile vendor/gdbstub-component/target/wasm32-wasip2/release/firefox_lldb_gdbstub_component.wasm -o src/gdb/generated --name gdbstub --instantiation async && node scripts/patch-generated.mjs",
     "component": "npm run component:build && npm run component:transpile",
-    "sourcemap:build": "cd vendor/source-map-dwarf-component && cargo build --release --target wasm32-wasip2",
-    "sourcemap:transpile": "npx jco transpile vendor/source-map-dwarf-component/target/wasm32-wasip2/release/firefox_lldb_source_map_component.wasm -o src/sourcemap/generated --name sourcemap --instantiation async",
+    "sourcemap:build": "cd vendor/source-map-dwarf-component && cargo build --locked --release --target wasm32-wasip2",
+    "sourcemap:transpile": "npx jco transpile vendor/source-map-dwarf-component/target/wasm32-wasip2/release/firefox_lldb_source_map_component.wasm -o src/sourcemap/generated --name sourcemap --instantiation async && node scripts/normalize-generated.mjs src/sourcemap/generated/sourcemap.js",
     "sourcemap": "npm run sourcemap:build && npm run sourcemap:transpile",
     "test:rust": "cargo test --manifest-path vendor/source-map-dwarf/Cargo.toml",
     "build:fixtures": "npm run build:fixture-simple && npm run build:fixture-separate-dwarf && npm run build:fixture-throw-on-load && npm run build:fixture-self-redirect && npm run build:fixture-oop && npm run build:fixture-parser && npm run build:fixture-ledger && npm run build:fixture-types && npm run build:fixture-heap && npm run build:fixture-trap && npm run build:fixture-sourcemap && npm run build:fixture-eh && npm run build:fixture-jspi && npm run build:fixture-threaded && npm run build:fixture-threaded-dynamic && npm run build:fixture-large",
@@ -71,10 +71,10 @@
     "build:fixture-large": "bash scripts/build-fixture-large.sh"
   },
   "dependencies": {
-    "@bytecodealliance/preview2-shim": "^0.18.1",
-    "@modelcontextprotocol/sdk": "^1.12.0",
-    "lldb-wasm": "^0.1.8",
-    "node-pty": "^1.1.0"
+    "@bytecodealliance/preview2-shim": "0.18.1",
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "lldb-wasm": "0.1.8",
+    "node-pty": "1.1.0"
   },
   "devDependencies": {
     "@bytecodealliance/jco": "1.24.3",

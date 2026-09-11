@@ -11,11 +11,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { spawn as ptySpawn } from "node-pty";
-import { findFirefoxBinary } from "../../src/rdp/firefox.ts";
+import { findFirefoxBinary } from "../../src/core/firefox.ts";
 import { freePort } from "../../src/platform/gdb-server-spawner.ts";
 import { FIXTURES, startStaticServer } from "./harness.mjs";
 
@@ -38,8 +39,10 @@ function waitFor(getOutput, pred, ms = 60_000) {
   });
 }
 
-test("a failed default CLI run retains its temporary transcript and prints the tail", () => {
-  const result = spawnSync(
+test("a failed default CLI run retains its temporary transcript and prints the tail", async (t) => {
+  // Keep stdin open: EOF is a shutdown request, which now cancels acquisition
+  // before the deliberately invalid binary necessarily reaches spawn().
+  const child = spawn(
     process.execPath,
     [
       "--import",
@@ -54,10 +57,22 @@ test("a failed default CLI run retains its temporary transcript and prints the t
       "--rdp-port",
       "6080",
     ],
-    { cwd: REPO, env: process.env, encoding: "utf8", timeout: 30_000 }
+    { cwd: REPO, env: process.env, stdio: ["pipe", "pipe", "pipe"], timeout: 30_000 }
   );
-  const output = `${result.stdout}${result.stderr}`;
-  assert.equal(result.status, 1, output);
+  let output = "";
+  child.stdout.on("data", (chunk) => {
+    output += chunk;
+  });
+  child.stderr.on("data", (chunk) => {
+    output += chunk;
+  });
+  const exited = once(child, "exit");
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+    await exited;
+  });
+  const [code] = await exited;
+  assert.equal(code, 1, output);
   assert.match(output, /Last \d+ session log lines:/);
   const match = output.match(/Full session log retained at (\S+\.log)/);
   assert.ok(match, output);
@@ -81,9 +96,8 @@ test("--log captures a full transcript while keeping the terminal clean", async 
   const platformPort = await freePort();
   const rdpPort = await freePort();
 
-  // --log has no path argument (auto-named, relative to cwd), so run with cwd
-  // set to the repo root — same as every other e2e test spawning this CLI —
-  // and pick up the exact filename from the startup line it prints.
+  // --log names the file automatically, in FIREFOX_LLDB_LOG_DIR when set or
+  // cwd otherwise. Read the actual path from the startup line.
   const child = ptySpawn(
     process.execPath,
     [
@@ -118,7 +132,7 @@ test("--log captures a full transcript while keeping the terminal clean", async 
     );
     const startupMatch = stripAnsi(out).match(/logging this session to (\S+\.log)/);
     assert.ok(startupMatch, `startup path line not printed; output: ${stripAnsi(out)}`);
-    logPath = join(REPO, startupMatch[1]);
+    logPath = resolve(REPO, startupMatch[1]);
 
     await waitFor(
       () => out,
@@ -129,6 +143,14 @@ test("--log captures a full transcript while keeping the terminal clean", async 
     await waitFor(
       () => out,
       (s) => s.includes("Breakpoint 1")
+    );
+
+    // A user command failure remains visible once, while LLDB's duplicate
+    // operation.failed diagnostic stays in the transcript even without -v.
+    child.write("this_command_does_not_exist\r");
+    await waitFor(
+      () => out,
+      (s) => /not a valid command|unknown command/.test(s)
     );
 
     child.write("quit\r");
@@ -149,6 +171,10 @@ test("--log captures a full transcript while keeping the terminal clean", async 
     assert.match(contents, /debug\s+\[rdp] >>/m);
     assert.match(contents, /debug\s+\[lldb-wasm] worker\.started /m);
     assert.match(contents, /debug\s+\[lldb-wasm] operation\.completed /m);
+    assert.match(contents, /debug\s+\[lldb-wasm] operation\.failed /m);
+    assert.match(contents, /debug\s+\[bridge platform] LLDB->TCP RSP/);
+    assert.match(contents, /debug\s+\[bridge tab-1] TCP->LLDB RSP/);
+    assert.match(contents, /channel\.closed/);
 
     // The debug trace that went to the file must never have reached the pty.
     assert.doesNotMatch(stripAnsi(out), /\[debug]\s*\[rdp]/);
@@ -169,11 +195,13 @@ test("--log captures a full transcript while keeping the terminal clean", async 
         try {
           mkdirSync(keepDir, { recursive: true });
           renameSync(logPath, join(keepDir, basename(logPath)));
-        } catch {
-          rmSync(logPath);
+        } catch (error) {
+          console.error(`Could not move failed transcript; retained at ${logPath}: ${error}`);
         }
-      } else {
+      } else if (!keepLog) {
         rmSync(logPath);
+      } else {
+        console.error(`Failed transcript retained at ${logPath}`);
       }
     }
   }

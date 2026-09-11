@@ -2,9 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-// The browser can load a credentialed module that Node's independent fetch
-// cannot. In that case the debugger must read Firefox's source-actor
-// ArrayBuffer or it receives no DWARF and cannot resolve this named breakpoint.
+// Browser-owned bytes preserve credentials and the loaded module's identity.
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import { Session } from "./harness.mjs";
@@ -17,9 +15,23 @@ after(async () => {
   await s?.shutdown();
 });
 
-test("browser-owned module bytes recover from an unauthenticated HTTP fallback", async () => {
-  assert.ok(s.wasmFetchCount() > 0, "the debugger's unauthenticated HTTP fetch was attempted");
+test("browser-owned module bytes do not require an unauthenticated HTTP fetch", async () => {
+  assert.equal(s.wasmFetchCount(), 0);
   const frame = await s.topFrame();
   assert.match(frame.function, /compute_factorial/);
   assert.match(frame.file, /math\.cpp$/);
+});
+
+test("a changed HTTP body cannot replace the browser-loaded module", async (t) => {
+  const session = await Session.stoppedAtBreakpoint("factorial", {
+    setupAttempts: 1,
+    transformResponse(path, bytes, request) {
+      return path.endsWith(".wasm") && request.headers["x-firefox-lldb"] === "module-fetch"
+        ? Buffer.from([0, 97, 115, 109, 1, 0, 0, 0])
+        : bytes;
+    },
+  });
+  t.after(() => session.shutdown());
+  assert.equal(session.wasmFetchCount(), 0);
+  assert.match((await session.topFrame()).function, /compute_factorial/);
 });

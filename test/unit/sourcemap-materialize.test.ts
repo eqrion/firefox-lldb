@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { resolve } from "node:path";
-import { containedSourcePath } from "../../src/sourcemap/materialize.js";
+import { containedSourcePath } from "../../src/symbols/source-path.js";
 
 const ROOT = resolve("/tmp/firefox-lldb-test/module.src");
 

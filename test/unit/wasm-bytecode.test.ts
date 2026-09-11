@@ -8,17 +8,22 @@ import {
   stripWasmNameSection,
   wasmExternalDebugInfo,
   wasmFunctionRange,
-} from "../../src/gdb/wasm-bytecode.js";
+} from "../../src/symbols/wasm-bytecode.js";
 
 const header = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
 
-test("stripWasmNameSection removes only the name custom section", () => {
+test("stripWasmNameSection renames only the name custom section without shifting bytes", () => {
   const type = [0x01, 0x01, 0x00];
   const name = [0x00, 0x06, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0xaa];
   const debug = [0x00, 0x08, 0x06, 0x2e, 0x64, 0x65, 0x62, 0x75, 0x67, 0xbb];
   const input = new Uint8Array([...header, ...type, ...name, ...debug]);
 
-  assert.deepEqual(stripWasmNameSection(input), new Uint8Array([...header, ...type, ...debug]));
+  const hidden = [...name];
+  hidden[3] = 0x5f;
+  assert.deepEqual(
+    stripWasmNameSection(input),
+    new Uint8Array([...header, ...type, ...hidden, ...debug])
+  );
 });
 
 test("stripWasmNameSection leaves malformed or name-free modules unchanged", () => {

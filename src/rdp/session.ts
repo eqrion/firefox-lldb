@@ -2,30 +2,12 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-// High-level Firefox RDP session for wasm debugging.
-//
-// Encapsulates the validated flow against stock Firefox:
-//   - getWatcher with isServerTargetSwitchingEnabled so the watcher instantiates
-//     server-side targets and applies thread-config session data at creation;
-//   - set observeWasm/observeAsmJS thread-config BEFORE navigation, so the
-//     page's own wasm compiles with debug support;
-//   - watchTargets("frame") + watchTargets("worker") and watched source/document
-//     resources to track targets, sources, and navigation readiness;
-//   - per-thread setBreakpoint / frames / resume / interrupt, plus all-stop
-//     coordination on any pause (interrupt all other running threads).
-//
-// Wasm specifics: a wasm breakpoint location is {sourceUrl, line:<byteOffset>,
-// column:1}; a paused wasm frame reports where.line as the byte offset.
-//
-// Thread model:
-//   - TID 1 = the top-level frame target (the page's JS thread).
-//   - TIDs 2+ = web worker targets (emscripten pthreads pool), assigned in
-//     arrival order.
-//   - "Stopped" means the thread that triggered the pause; all-stop interrupts
-//     the rest and waits for their acks (interrupt is reliable in < 10 ms even
-//     for threads blocked in Atomics.wait).
+// Owns one tab's RDP generations, live targets and coherent all-stop state.
+// Configure wasm observation before navigation; publish stops only after every
+// live target is paused. See INTERNALS.md for ownership and RDP-USAGE.md for wire shapes.
 
 import { RdpClient } from "./client.js";
+import { RdpBreakpoints } from "./breakpoints.js";
 import type { RdpPacket } from "./transport.js";
 import {
   REQUESTS,
@@ -33,12 +15,9 @@ import {
   ROOT_ACTOR,
   grip,
   hasUrl,
-  type ThreadConfig,
   type TabInfo,
   type RdpTabForm,
   type ListTabsResponse,
-  type GetRootResponse,
-  type GetCharPrefResponse,
   type GetWatcherResponse,
   type GetThreadConfigurationActorResponse,
   type SourceForm,
@@ -51,7 +30,6 @@ import {
   type ArrayBufferSliceResponse,
   type LongStringGrip,
   type SubstringResponse,
-  type GetBreakpointPositionsResponse,
   type FrameForm,
   type FramesResponse,
   type PauseEvent,
@@ -61,17 +39,17 @@ import {
   type PageErrorEvent,
 } from "./protocol.js";
 import { EventEmitter } from "node:events";
-import type { WasmFunctionRange } from "../gdb/wasm-bytecode.js";
-import { LAUNCH_TOKEN_PREF } from "./firefox.js";
-import { EMPTY_WASM_MODULE, DETACH_GRACE_MS, NAVIGATE_TARGET_TIMEOUT_MS } from "./constants.js";
-import { noopLogger, type Logger } from "../logging.js";
+import type { WasmFunctionRange } from "../symbols/wasm-bytecode.js";
+import { THREAD_CONFIG, browserId, MissingTabError } from "./browser.js";
+import { DETACH_GRACE_MS, NAVIGATE_TARGET_TIMEOUT_MS } from "./constants.js";
+import { noopLogger, type Logger } from "../diagnostics/logger.js";
 import {
   defaultModuleByteProvider,
   isWasmBinary,
   MAX_MODULE_BYTES,
   type ModuleByteProvider,
-} from "./module-bytes.js";
-import { requireCompatibleFirefox, type FirefoxRuntime } from "./firefox-compatibility.js";
+} from "../symbols/module-bytes.js";
+import { requireCompatibleFirefox } from "./firefox-compatibility.js";
 
 export {
   grip,
@@ -82,185 +60,6 @@ export {
   type PauseEvent,
   type StoppedEvent,
 };
-
-// Thread configuration applied before navigation. observeWasm/observeAsmJS so the
-// page's wasm compiles with debug support; pauseOnExceptions with
-// ignoreCaughtExceptions so we break on uncaught wasm traps (surfacing as a
-// stop) without pausing on routine caught JS exceptions.
-const THREAD_CONFIG: ThreadConfig = {
-  observeWasm: true,
-  observeAsmJS: true,
-  pauseOnExceptions: true,
-  ignoreCaughtExceptions: true,
-};
-
-/**
- * Confirm the Firefox listening on port:host is the one that produced
- * expectedToken (see LAUNCH_TOKEN_PREF in rdp/firefox.ts), not an unrelated
- * instance (e.g. a stale leftover from a previous run) squatting on the same
- * port. Retries the connection itself, but fails immediately on a token
- * mismatch since retrying can't fix that.
- */
-export async function verifyFirefoxLaunchToken(
-  port: number,
-  host: string,
-  expectedToken: string,
-  attempts = 80
-): Promise<FirefoxRuntime> {
-  let lastConnectErr: unknown;
-  for (let i = 0; i < attempts; i++) {
-    let client: RdpClient;
-    try {
-      client = await RdpClient.connect(port, host);
-    } catch (err) {
-      lastConnectErr = err;
-      await new Promise((r) => setTimeout(r, 250));
-      continue;
-    }
-    try {
-      const root = (await client.request(ROOT_ACTOR, {
-        type: REQUESTS.getRoot,
-      })) as GetRootResponse;
-      const actor = root.preferenceActor;
-      if (!actor) throw new Error("Firefox RDP root actor has no preferenceActor");
-      const { value } = (await client.request(actor, {
-        type: REQUESTS.getCharPref,
-        value: LAUNCH_TOKEN_PREF,
-      })) as GetCharPrefResponse;
-      if (value !== expectedToken) {
-        throw new Error(
-          `RDP port ${port} is answering, but not from the Firefox instance this process just ` +
-            `launched — a different (possibly stale) Firefox is listening there.`
-        );
-      }
-      return await requireCompatibleFirefox(client);
-    } finally {
-      client.close();
-    }
-  }
-  const msg = lastConnectErr instanceof Error ? lastConnectErr.message : String(lastConnectErr);
-  throw new Error(`could not connect to Firefox RDP on ${port}: ${msg}`);
-}
-
-/** One-shot: connect, list tabs, disconnect. */
-export async function listFirefoxTabs(port = 6080, host = "127.0.0.1"): Promise<TabInfo[]> {
-  const client = await RdpClient.connect(port, host);
-  try {
-    const { tabs } = (await client.request(ROOT_ACTOR, {
-      type: REQUESTS.listTabs,
-    })) as ListTabsResponse;
-    return toTabInfos(tabs);
-  } finally {
-    client.close();
-  }
-}
-
-function toTabInfos(tabs: RdpTabForm[] | undefined): TabInfo[] {
-  return (tabs ?? []).map((t) => ({ actor: t.actor, url: t.url ?? "", title: t.title ?? "" }));
-}
-
-/**
- * Watch the tab list and enable observeWasm:true on each tab via a persistent
- * watcher. The thread config survives page navigation: any page
- * loaded in a primed tab after this call compiles wasm in debug mode, making
- * breakpoints available without a reload. Resolves when the connection closes.
- */
-export async function watchAndPrimeFirefoxTabs(
-  port = 6080,
-  host = "127.0.0.1",
-  onTabs: (tabs: TabInfo[]) => void,
-  logger: Logger = noopLogger,
-  signal?: AbortSignal
-): Promise<void> {
-  const client = await RdpClient.connect(port, host, { logger });
-  const abort = () => client.close();
-  if (signal?.aborted) abort();
-  else signal?.addEventListener("abort", abort, { once: true });
-  client.on("error", (err: Error) =>
-    logger.warn(`[rdp] tab watcher transport error: ${err.message}`)
-  );
-
-  const primedActors = new Set<string>();
-
-  const primeTab = async (tabActor: string) => {
-    if (primedActors.has(tabActor)) return;
-    primedActors.add(tabActor);
-    try {
-      const watcherR = (await client.request(tabActor, {
-        type: REQUESTS.getWatcher,
-        isServerTargetSwitchingEnabled: true,
-      })) as GetWatcherResponse;
-      const watcher = watcherR.actor;
-      if (!watcher) throw new Error("no watcher actor");
-      const cfg = (await client.request(watcher, {
-        type: REQUESTS.getThreadConfigurationActor,
-      })) as GetThreadConfigurationActorResponse;
-      const configActor =
-        typeof cfg.configuration === "string" ? cfg.configuration : cfg.configuration?.actor;
-      if (!configActor) throw new Error("no thread config actor");
-      await client.request(configActor, {
-        type: REQUESTS.updateConfiguration,
-        configuration: THREAD_CONFIG,
-      });
-      // Do NOT call watchTargets here. With two connections both subscribed via
-      // watchTargets, Firefox routes paused events to whichever connection called
-      // watchTargets first (the watcher). The launcher's armAllStop never fires
-      // and EventFuture.finish hangs waiting for the trap's paused event.
-      // The launcher's own RdpWasmSession calls watchTargets in #init(), making
-      // it the sole subscriber and ensuring it receives all thread events.
-    } catch (err) {
-      // Tab may have disappeared; ignore and let the next query re-prime it.
-      primedActors.delete(tabActor);
-      logger.debug(
-        `[rdp] could not prime tab ${tabActor}: ${err instanceof Error ? err.message : String(err)}`
-      );
-    }
-  };
-
-  const query = async () => {
-    const { tabs } = (await client.request(ROOT_ACTOR, {
-      type: REQUESTS.listTabs,
-    })) as ListTabsResponse;
-    const tabList = tabs ?? [];
-    onTabs(toTabInfos(tabList));
-    for (const t of tabList) void primeTab(t.actor);
-  };
-
-  client.on("event", (p) => {
-    if (p.type === EVENTS.tabListChanged || p.type === EVENTS.tabNavigated)
-      void query().catch((err) =>
-        logger.debug(
-          `[rdp] tab refresh failed: ${err instanceof Error ? err.message : String(err)}`
-        )
-      );
-  });
-
-  try {
-    await requireCompatibleFirefox(client, logger);
-    await query();
-    const startupRetry = setTimeout(
-      () =>
-        void query().catch((err) =>
-          logger.debug(
-            `[rdp] startup tab query failed: ${err instanceof Error ? err.message : String(err)}`
-          )
-        ),
-      2000
-    );
-
-    await new Promise<void>((resolve) =>
-      client.on("close", () => {
-        clearTimeout(startupRetry);
-        resolve();
-      })
-    );
-  } catch (err) {
-    client.close();
-    throw err;
-  } finally {
-    signal?.removeEventListener("abort", abort);
-  }
-}
 
 export interface ThreadInfo {
   tid: number;
@@ -273,6 +72,33 @@ export interface ThreadInfo {
   isTopLevel: boolean;
 }
 
+/** An inspection cannot use the stop snapshot it captured. */
+export class RetiredStopError extends Error {
+  constructor(stopId: number) {
+    super(`stop ${stopId} snapshot retired`);
+    this.name = "RetiredStopError";
+  }
+}
+
+/** Accepted navigation lost its target before a replacement was observed. */
+export class NavigationTargetLostError extends Error {
+  constructor(
+    readonly tabId: number,
+    generation: number
+  ) {
+    super(`Firefox tab ${tabId} lost target generation ${generation} during accepted navigation`);
+    this.name = "NavigationTargetLostError";
+  }
+}
+
+/** One cancellable execution wait, from arming through coherent all-stop. */
+export interface StopOperation {
+  readonly id: number;
+  readonly pending: boolean;
+  readonly promise: Promise<StoppedEvent>;
+  cancel(error?: Error): void;
+}
+
 interface NavigationProgress {
   id: number;
   phase: "waiting" | "destination-ready" | "complete" | "failed";
@@ -280,6 +106,7 @@ interface NavigationProgress {
   startingGeneration: number;
   completion?: "document-event" | "tab-navigated";
   destinationGeneration?: number;
+  sameTargetStarted?: boolean;
   lastUrl?: string;
 }
 
@@ -299,49 +126,40 @@ export class RdpWasmSession extends EventEmitter {
   #logger: Logger;
   #moduleByteProvider: ModuleByteProvider;
   #tabActor!: string;
+  #tabId!: number;
   #watcher!: string;
 
   // tid -> ThreadInfo (including the top-level frame target)
   #threads = new Map<number, ThreadInfo>();
+  #retiredTargetActors = new Set<string>();
   #nextTid = 1;
   #nextGeneration = 1;
   #activeGeneration = 0;
+  #generationAbort = new AbortController();
   #nextNavigationId = 1;
   #navigation: NavigationProgress | undefined;
+  #activeStop?: StopOperation;
+  #completedStop?: StoppedEvent;
+  #beginStop?: (tid: number, packet: PauseEvent) => void;
+  #nextStopId = 1;
 
   // tid of the thread that triggered the most recent all-stop pause
   #stoppedTid = 1;
 
-  // tids that we interrupted during all-stop (to be resumed on next continue)
-  // tids that are currently paused (breakpoint, step, or interrupt)
+  // Paused TIDs include breakpoint, step and interrupt pauses.
   #pausedTids = new Set<number>();
-  // Subset of #pausedTids that paused with no armAllStop listener catching
-  // it (see the EVENTS.paused case). Cleared once #allStop reports a stop
-  // that accounts for them, or the tid resumes.
+  #resumingTids = new Set<number>();
+  // Pauses not yet represented by a completed stop or active collector.
   #unwitnessedPausedTids = new Set<number>();
-  // Real pause packet per currently-paused tid, mirroring #pausedTids's
-  // lifecycle exactly (same add/delete sites). Lets adoptPausedState()
-  // report the actual why.type instead of a synthetic empty packet that
-  // always defaults to "breakpoint" downstream in RdpDebuggee.
+  // Preserve the actual reason when adopting an already-paused thread.
   #pausePacketByTid = new Map<number, PauseEvent>();
-  // Explicit pause-coordination ownership. EventEmitter listener counts are
-  // observable plumbing, not debugger state: diagnostic listeners and leaked
-  // callbacks must not change whether a pause is considered witnessed.
+  // Diagnostic listeners must not change whether a pause is witnessed.
   #pauseWitnessCountByTid = new Map<number, number>();
 
-  // breakpoints buffered so new workers inherit them
-  #breakpoints = new Map<string, Set<number>>(); // sourceUrl -> set of offsets
-  // Function-body bounds for breakpoint requests whose module bytecode was
-  // available. Used to keep nearest-position snapping inside the same body.
-  #breakpointRangeByUrl = new Map<string, Map<number, WasmFunctionRange>>();
-  // Exact RDP location selected for each LLDB-requested wasm PC. Firefox only
-  // accepts valid instruction boundaries, so insertion may snap the PC.
-  #snappedBreakpointByUrl = new Map<string, Map<number, number>>();
+  #breakpoints: RdpBreakpoints;
 
   #wasmActorByUrl = new Map<string, { actor: string; generation: number }>();
-  #breakpointPositionCache = new Map<string, Promise<number[]>>(); // actor -> positions
-  #jsActorByUrl = new Map<string, { actor: string; generation: number }>();
-  // Reverse of the two maps above (wasm + JS actors share one namespace).
+  // Wasm and JS source actors share one namespace.
   // The single owner of actor->url lookups — RdpDebuggee reads it via
   // urlForSourceActor() instead of keeping its own copy.
   #sourceUrlByActor = new Map<string, { url: string; generation: number }>();
@@ -377,15 +195,20 @@ export class RdpWasmSession extends EventEmitter {
         : undefined,
       threadCount: this.#threads.size,
       pausedTids: [...this.#pausedTids].sort((a, b) => a - b),
+      resumingTids: [...this.#resumingTids].sort((a, b) => a - b),
       unwitnessedPausedTids: [...this.#unwitnessedPausedTids].sort((a, b) => a - b),
       pendingTopLevelTid: this.#pendingTopLevelTid,
       navigation: this.#navigation ? { ...this.#navigation } : undefined,
+      stopOperation: this.#activeStop
+        ? { id: this.#activeStop.id, pending: this.#activeStop.pending }
+        : undefined,
     };
   }
 
   /** Put the current authoritative RDP state at the end of the normal log. */
   logState(event = "snapshot"): void {
-    this.#record({ domain: "rdp", event });
+    // Observation must not wake lifecycle waiters or advance an operation.
+    this.#logger.debug(`[state] rdp.${event} ${JSON.stringify({ current: this.#currentState() })}`);
   }
 
   #clearPendingDetachChecks(): void {
@@ -393,15 +216,8 @@ export class RdpWasmSession extends EventEmitter {
     this.#pendingDetachChecks.clear();
   }
 
-  // tid to hand to the next top-level target, reused from the one a
-  // navigation just destroyed rather than minted fresh. LLDB has no RSP
-  // mechanism to learn "tid N is gone, thread state referencing it is
-  // stale" (gdbstub has no thread-exited/exec stop reason) — its own
-  // breakpoint step-off dance (remove bp, single-step the thread it
-  // believes is current, re-add) keeps addressing the old tid regardless of
-  // what we tell it. Keeping the number stable across the swap means that
-  // stale-looking reference is actually still valid, pointed at the new
-  // page's thread.
+  // Reuse the top-level TID across replacement: LLDB can still address it while
+  // stepping off a cached breakpoint. Actor/generation identity still changes.
   #pendingTopLevelTid: number | undefined;
 
   #watchPause(tid: number): void {
@@ -415,14 +231,17 @@ export class RdpWasmSession extends EventEmitter {
   }
 
   #removeThread(info: ThreadInfo): void {
+    this.#breakpoints.removeTarget(info.threadActor);
+    this.#rememberRetiredTarget(info.targetActor);
     // A replacement top-level target can already own the same stable tid.
     // Only delete the map entry if it still describes this actor.
     if (this.#threads.get(info.tid)?.targetActor === info.targetActor) {
       this.#threads.delete(info.tid);
+      this.#pausedTids.delete(info.tid);
+      this.#resumingTids.delete(info.tid);
+      this.#unwitnessedPausedTids.delete(info.tid);
+      this.#pausePacketByTid.delete(info.tid);
     }
-    this.#pausedTids.delete(info.tid);
-    this.#unwitnessedPausedTids.delete(info.tid);
-    this.#pausePacketByTid.delete(info.tid);
     this.#record({
       domain: "target",
       event: "thread-removed",
@@ -441,26 +260,35 @@ export class RdpWasmSession extends EventEmitter {
     }
   }
 
-  // Source actors are scoped to an RDP connection and become invalid whenever
-  // the top-level target goes away — whether that's a navigate() we drove or
-  // one the page triggered on its own (reload, self-redirect, Fission
-  // process-swap). Stale entries here cause breakpoint-position queries to
-  // hit dead actors (session.ts's #snapOffset) instead of just falling back
-  // gracefully.
-  #invalidateActorCaches(): void {
-    this.#jsActorByUrl.clear();
-    this.#wasmActorByUrl.clear();
-    this.#breakpointPositionCache.clear();
-    this.#sourceUrlByActor.clear();
+  #rememberRetiredTarget(actor: string): void {
+    // Evicting tombstones would allow an old available event to resurrect a target.
+    if (!this.#retiredTargetActors.has(actor) && this.#retiredTargetActors.size >= 65536)
+      throw new Error("RDP retired target limit exceeded (65536); reconnect required");
+    this.#retiredTargetActors.add(actor);
   }
 
-  // Fires whenever the top-level target is gone — a navigate() we drove, or
-  // the page navigating on its own (reload, link click, location assignment).
-  // Distinct from "detached": that one is grace-gated and means the tab is
-  // really closed, while this fires unconditionally so a live LLDB
-  // attachment (RdpDebuggee) can re-sync (refetch bytecode, force a re-sync
-  // stop) even when a Fission process-swap replacement is on its way.
+  #rememberSource(source: UrlSourceForm, generation: number): void {
+    if (!this.#sourceUrlByActor.has(source.actor) && this.#sourceUrlByActor.size >= 16384)
+      throw new Error("RDP source actor limit exceeded (16384 per generation)");
+    if (source.introductionType === "wasm") {
+      if (!this.#wasmActorByUrl.has(source.url) && this.#wasmActorByUrl.size >= 4096)
+        throw new Error("RDP wasm module limit exceeded (4096 per generation)");
+      this.#wasmActorByUrl.set(source.url, { actor: source.actor, generation });
+    }
+    this.#sourceUrlByActor.set(source.actor, { url: source.url, generation });
+  }
+
+  // Retire source identities together with their top-level generation.
+  #invalidateActorCaches(): void {
+    this.#wasmActorByUrl.clear();
+    this.#sourceUrlByActor.clear();
+    this.#warnedUrllessActors.clear();
+  }
+
+  // Invalidate generation-owned work immediately. The separate, grace-gated
+  // detached event distinguishes a tab close from an in-progress replacement.
   #onTopLevelGone(info?: ThreadInfo): void {
+    this.#generationAbort.abort(new Error("RDP target generation retired"));
     this.#invalidateActorCaches();
     this.#record({
       domain: "target",
@@ -477,16 +305,20 @@ export class RdpWasmSession extends EventEmitter {
     super();
     this.#client = client;
     this.#logger = logger;
+    this.#breakpoints = new RdpBreakpoints(client, logger);
     this.#moduleByteProvider = moduleByteProvider;
     this.#record({ domain: "rdp", event: "session-created" });
     // Forward transport close so consumers can unblock pending promises.
     client.on("close", () => {
+      this.#breakpoints.close();
       this.#closed = true;
+      this.#generationAbort.abort(new Error("RDP session closed"));
       this.#clearPendingDetachChecks();
       this.#record({ domain: "rdp", event: "transport-closed" });
       this.emit("close");
     });
     client.on("error", (err: Error) => {
+      this.close();
       this.#record({ domain: "rdp", event: "transport-error", detail: err.message });
       this.#logger.error(`[rdp] transport error: ${err.message}`);
     });
@@ -496,6 +328,10 @@ export class RdpWasmSession extends EventEmitter {
 
   get stoppedTid(): number {
     return this.#stoppedTid;
+  }
+
+  get tabId(): number {
+    return this.#tabId;
   }
 
   /**
@@ -578,7 +414,7 @@ export class RdpWasmSession extends EventEmitter {
   ): Promise<void> {
     if (predicate()) return Promise.resolve();
     if (this.#closed) return Promise.reject(new Error(closeMessage));
-    if (signal?.aborted) return Promise.reject(new Error("lifecycle wait cancelled"));
+    if (signal?.aborted) return Promise.reject(signal.reason);
     return new Promise<void>((resolve, reject) => {
       let timer: ReturnType<typeof setTimeout>;
       const cleanup = () => {
@@ -598,7 +434,7 @@ export class RdpWasmSession extends EventEmitter {
       };
       const onAbort = () => {
         cleanup();
-        reject(new Error("lifecycle wait cancelled"));
+        reject(signal!.reason);
       };
       timer = setTimeout(() => {
         cleanup();
@@ -638,6 +474,14 @@ export class RdpWasmSession extends EventEmitter {
     const navigation = this.#navigation;
     if (!navigation || navigation.phase !== "waiting") return;
     if (navigation.requestedUrl !== "about:blank" && url === "about:blank") return;
+    if (generation === navigation.startingGeneration && !navigation.sameTargetStarted) return;
+    if (
+      navigation.destinationGeneration !== undefined &&
+      generation !== navigation.destinationGeneration
+    )
+      return;
+    if (url !== navigation.requestedUrl && url !== navigation.lastUrl) return;
+    navigation.destinationGeneration = generation;
     navigation.phase = "destination-ready";
     navigation.completion = completion;
     navigation.lastUrl = url;
@@ -677,14 +521,16 @@ export class RdpWasmSession extends EventEmitter {
   static async start(
     port = 6080,
     host = "127.0.0.1",
-    tabActor?: string,
+    tabId?: number,
     logger: Logger = noopLogger,
-    moduleByteProvider: ModuleByteProvider = defaultModuleByteProvider
+    moduleByteProvider: ModuleByteProvider = defaultModuleByteProvider,
+    signal?: AbortSignal
   ): Promise<RdpWasmSession> {
-    const client = await RdpClient.connect(port, host, { logger });
+    const client = await RdpClient.connect(port, host, { logger, signal });
     const session = new RdpWasmSession(client, logger, moduleByteProvider);
     try {
-      await session.#init(tabActor);
+      await session.#init(tabId);
+      signal?.throwIfAborted();
       return session;
     } catch (err) {
       // Initialization is transactional: callers commonly retry while Firefox
@@ -700,7 +546,7 @@ export class RdpWasmSession extends EventEmitter {
     }
   }
 
-  async #init(tabActor?: string): Promise<void> {
+  async #init(tabId?: number): Promise<void> {
     const runtime = await requireCompatibleFirefox(this.#client, this.#logger);
     this.#record({
       domain: "rdp",
@@ -711,10 +557,14 @@ export class RdpWasmSession extends EventEmitter {
       type: REQUESTS.listTabs,
     })) as ListTabsResponse & { tabs?: (RdpTabForm & { selected?: boolean })[] };
     const tab =
-      (tabActor ? tabs?.find((t) => t.actor === tabActor) : undefined) ??
-      tabs?.find((t) => t.selected) ??
-      tabs?.[0];
-    if (!tab) throw new Error("no Firefox tab found (Firefox may still be starting)");
+      tabId !== undefined
+        ? tabs?.find((candidate) => browserId(candidate) === tabId)
+        : (tabs?.find((candidate) => candidate.selected) ?? tabs?.[0]);
+    if (!tab) {
+      if (tabId !== undefined) throw new MissingTabError(tabId);
+      throw new Error("no Firefox tab found (Firefox may still be starting)");
+    }
+    this.#tabId = browserId(tab);
     this.#tabActor = tab.actor;
     this.#record({ domain: "rdp", event: "tab-selected", actor: this.#tabActor, url: tab.url });
 
@@ -739,7 +589,16 @@ export class RdpWasmSession extends EventEmitter {
     });
     this.#record({ domain: "rdp", event: "thread-configuration-applied", actor: configActor });
 
-    this.#client.on("event", (p) => this.#onEvent(p));
+    this.#client.on("event", (p) => {
+      try {
+        this.#onEvent(p);
+      } catch (error) {
+        this.#logger.error(
+          `[rdp] event processing failed: ${error instanceof Error ? error.stack : error}`
+        );
+        this.close();
+      }
+    });
     await this.#client.request(this.#watcher, {
       type: REQUESTS.watchTargets,
       targetType: "frame",
@@ -758,6 +617,7 @@ export class RdpWasmSession extends EventEmitter {
   }
 
   #onEvent(p: RdpPacket): void {
+    if (this.#closed) return;
     switch (p.type) {
       case EVENTS.targetAvailableForm: {
         const target = p.target as {
@@ -778,6 +638,10 @@ export class RdpWasmSession extends EventEmitter {
           break;
         }
 
+        if (this.#retiredTargetActors.has(targetActor)) {
+          this.#record({ domain: "target", event: "retired-actor-ignored", actor: targetActor });
+          break;
+        }
         // Check if this actor is already known (re-announce after navigation).
         const existing = [...this.#threads.values()].find((t) => t.targetActor === targetActor);
         if (existing) {
@@ -815,10 +679,14 @@ export class RdpWasmSession extends EventEmitter {
           this.#pendingTopLevelTid = undefined;
           generation = this.#nextGeneration++;
           this.#activeGeneration = generation;
+          this.#generationAbort = new AbortController();
           // Workers can be announced in the destroy/available gap. Adopt them
           // into the new incarnation once its top-level target identifies it.
           for (const thread of this.#threads.values()) {
-            if (thread.generation === 0) thread.generation = generation;
+            if (thread.generation === 0) {
+              thread.generation = generation;
+              this.#observeBreakpointTarget(thread);
+            }
           }
         } else {
           tid = this.#nextTid++;
@@ -832,7 +700,9 @@ export class RdpWasmSession extends EventEmitter {
           url: target.url ?? "",
           isTopLevel,
         };
+        if (this.#threads.size >= 1024) throw new Error("RDP live target limit exceeded (1024)");
         this.#threads.set(tid, info);
+        this.#observeBreakpointTarget(info);
         this.#record({
           domain: "target",
           event: "target-available",
@@ -844,19 +714,15 @@ export class RdpWasmSession extends EventEmitter {
         });
         if (isTopLevel) this.#observeNavigationTarget(info.url, generation);
 
-        // Apply any buffered breakpoints to the new worker.
-        void this.#applyBreakpoints(info).catch((err) =>
-          this.#logger.warn(
-            `[rdp] could not apply buffered breakpoints to tid ${info.tid}: ${
-              err instanceof Error ? err.message : String(err)
-            }`
-          )
-        );
-
         this.emit("target", info);
         break;
       }
       case EVENTS.tabNavigated: {
+        const currentTop = [...this.#threads.values()].find((t) => t.isTopLevel);
+        if (!currentTop || (p.from !== currentTop.targetActor && p.from !== this.#tabActor)) {
+          this.#record({ domain: "navigation", event: "retired-sender-ignored", actor: p.from });
+          break;
+        }
         const event = p as { url?: unknown; state?: unknown; target?: { url?: unknown } };
         const url = typeof event.url === "string" ? event.url : event.target?.url;
         if (typeof url !== "string") {
@@ -871,9 +737,20 @@ export class RdpWasmSession extends EventEmitter {
         // as about:blank, then complete that same target via tabNavigated
         // without another target-available-form. Keep the target form current
         // and let navigate() use the stop notification as its load barrier.
-        const currentTop = [...this.#threads.values()].find((t) => t.isTopLevel);
-        if (currentTop) currentTop.url = url;
         const state = typeof event.state === "string" ? event.state : undefined;
+        const navigation = this.#navigation;
+        if (state === "start" && navigation?.phase === "waiting") {
+          navigation.sameTargetStarted = currentTop.generation === navigation.startingGeneration;
+          navigation.lastUrl = url;
+        }
+        if (
+          navigation?.phase === "waiting" &&
+          state !== "start" &&
+          url !== navigation.requestedUrl &&
+          url !== navigation.lastUrl
+        )
+          break;
+        currentTop.url = url;
         this.#record({
           domain: "navigation",
           event: "tab-navigated",
@@ -893,11 +770,7 @@ export class RdpWasmSession extends EventEmitter {
         break;
       }
       case EVENTS.targetDestroyedForm: {
-        // Unlike target-available-form, this payload carries the window/frame
-        // target actor but not the thread actor — match on that instead, or a
-        // destroyed process-swap target (e.g. Fission reloading the page into
-        // a new process right after the initial navigation) never gets pruned
-        // from #threads and a later all-stop interrupt hangs on the dead tid.
+        // Destroy events identify the target actor, not the thread actor.
         const target = p.target as { actor?: string };
         const targetActor = target?.actor;
         if (!targetActor) {
@@ -959,6 +832,7 @@ export class RdpWasmSession extends EventEmitter {
             this.#removeThread(info);
           }
         } else {
+          this.#rememberRetiredTarget(targetActor);
           this.#record({
             domain: "target",
             event: "target-destroyed-unknown",
@@ -968,26 +842,21 @@ export class RdpWasmSession extends EventEmitter {
         break;
       }
       case EVENTS.resourcesAvailableArray: {
-        // Current Firefox batches watched resources. Worker SourceActor ids
-        // are thread-local, so retain every actor -> URL mapping; otherwise a
-        // stopped worker frame is mistaken for a brand-new module whose name
-        // is the opaque actor id, and gdbstub aborts during frame_to_pc.
+        // Worker source actors are thread-local; retain every actor-to-URL mapping.
         const groups = (p as ResourcesAvailableArrayEvent).array;
         if (!groups) break;
         for (const group of groups) {
           if (!Array.isArray(group) || !Array.isArray(group[1])) continue;
           if (group[0] === "source") {
+            const owner = [...this.#threads.values()].find(
+              (thread) => thread.targetActor === p.from
+            );
+            if (!owner || owner.generation === 0) continue;
             for (const source of group[1] as SourceForm[]) {
               if (!source.actor || !this.#reportUsableSource(source)) continue;
-              const generation = this.#activeGeneration;
-              if (generation === 0) continue;
-              this.#sourceUrlByActor.set(source.actor, { url: source.url, generation });
-              if (source.introductionType === "wasm") {
-                this.#wasmActorByUrl.set(source.url, { actor: source.actor, generation });
-              } else {
-                this.#jsActorByUrl.set(source.url, { actor: source.actor, generation });
-              }
+              this.#rememberSource(source, owner.generation);
             }
+            this.#observeBreakpointSources(owner, group[1] as SourceForm[]);
           } else if (group[0] === "document-event") {
             // Unlike source resources, document events identify their target
             // through the packet's `from` actor. Tie readiness to that actor's
@@ -1021,13 +890,9 @@ export class RdpWasmSession extends EventEmitter {
         if (!entry) break;
         const [tid] = entry;
         this.#pausedTids.add(tid);
+        this.#resumingTids.delete(tid);
         this.#pausePacketByTid.set(tid, p as PauseEvent);
-        // No all-stop coordinator owns this pause right now — e.g. a
-        // newly-navigated page's
-        // buffered breakpoint fires before the next Debuggee.continue arms
-        // the all-stop machinery. Remember it as unwitnessed so the next
-        // continue adopts it instead of blindly resuming past it (see
-        // hasUnwitnessedPause() and its caller in rdp-debuggee.ts).
+        // Preserve a pause with no collector so the next continue reports it first.
         if ((this.#pauseWitnessCountByTid.get(tid) ?? 0) === 0) {
           this.#unwitnessedPausedTids.add(tid);
         }
@@ -1050,8 +915,10 @@ export class RdpWasmSession extends EventEmitter {
         const fromActor = p.from as string;
         const entry = [...this.#threads.entries()].find(([, t]) => t.threadActor === fromActor);
         if (entry) {
+          this.#completedStop = undefined;
           const [tid] = entry;
           this.#pausedTids.delete(tid);
+          this.#resumingTids.delete(tid);
           this.#pausePacketByTid.delete(tid);
           this.#unwitnessedPausedTids.delete(tid);
           this.#record({
@@ -1069,7 +936,7 @@ export class RdpWasmSession extends EventEmitter {
 
   /** Navigate the tab; resolves once Firefox accepts the request and the
    * destination document reaches DOM interactive. */
-  async navigate(url: string): Promise<void> {
+  async navigate(url: string, timeoutMs = NAVIGATE_TARGET_TIMEOUT_MS): Promise<void> {
     if (this.#navigation?.phase === "waiting" || this.#navigation?.phase === "destination-ready") {
       this.#record({
         domain: "navigation",
@@ -1098,13 +965,27 @@ export class RdpWasmSession extends EventEmitter {
       detail: `navigation=${navigation.id}`,
     });
     const destinationAbort = new AbortController();
+    let requestReplied = false;
     const destination = this.#waitForState(
       () => navigation.phase === "destination-ready",
-      NAVIGATE_TARGET_TIMEOUT_MS,
-      `no completed top-level navigation within ${NAVIGATE_TARGET_TIMEOUT_MS}ms`,
+      timeoutMs,
+      `no completed top-level navigation within ${timeoutMs}ms`,
       "session closed during navigate",
       destinationAbort.signal
-    );
+    ).catch((error: unknown) => {
+      // A detach grace is only a heuristic: a slow replacement can still
+      // arrive. Classify missing targets at the navigation deadline, never
+      // turn cancellation, connection loss or request rejection into a retry.
+      if (
+        !this.#closed &&
+        !destinationAbort.signal.aborted &&
+        requestReplied &&
+        startingGeneration !== 0 &&
+        this.topLevelGeneration() === 0
+      )
+        throw new NavigationTargetLostError(this.#tabId, startingGeneration);
+      throw error;
+    });
     // A pause during navigation can arrive before the replacement target is
     // announced. Resume past it so target discovery can finish; the attach
     // sequence makes its own stop afterwards (RdpDebuggee.primeStop).
@@ -1119,7 +1000,7 @@ export class RdpWasmSession extends EventEmitter {
         detail: `navigation=${navigation.id}`,
       });
       const info = this.#threads.get(tid);
-      if (info) this.#client.send(info.threadActor, { type: REQUESTS.resume });
+      if (info) this.#requestResume(info);
     };
     this.on("paused", onPausedDuringLoad);
     try {
@@ -1136,6 +1017,7 @@ export class RdpWasmSession extends EventEmitter {
           waitForLoad: false,
         })
         .then(() => {
+          requestReplied = true;
           this.#record({
             domain: "navigation",
             event: "request-replied",
@@ -1148,6 +1030,9 @@ export class RdpWasmSession extends EventEmitter {
       // parallel also lets the lifecycle deadline fail promptly if Firefox
       // withholds the navigateTo reply after losing the completion event.
       await Promise.all([request, destination]);
+      destinationAbort.signal.throwIfAborted();
+      if (this.topLevelGeneration() !== navigation.destinationGeneration)
+        throw new Error("navigation destination retired before request acceptance");
       navigation.phase = "complete";
       this.#record({
         domain: "navigation",
@@ -1181,12 +1066,7 @@ export class RdpWasmSession extends EventEmitter {
   }
 
   #isCurrentThread(info: ThreadInfo): boolean {
-    return this.#threads.get(info.tid)?.targetActor === info.targetActor;
-  }
-
-  /** Send a raw request to an actor (escape hatch for actor-specific packets). */
-  request(actor: string, packet: Record<string, unknown>): Promise<RdpPacket> {
-    return this.#client.request(actor, packet);
+    return !this.#closed && this.#threads.get(info.tid) === info;
   }
 
   // --- wasm sources ---
@@ -1205,49 +1085,44 @@ export class RdpWasmSession extends EventEmitter {
       .filter((s) => s.introductionType === "wasm")
       .filter((s) => this.#reportUsableSource(s));
     for (const s of wasm) {
-      this.#wasmActorByUrl.set(s.url, { actor: s.actor, generation: info.generation });
-      this.#sourceUrlByActor.set(s.actor, { url: s.url, generation: info.generation });
+      this.#rememberSource(s, info.generation);
     }
+    this.#observeBreakpointSources(info, wasm);
     return wasm;
   }
 
-  // A URL-less source cannot be addressed: Firefox resolves breakpoints by
-  // `location.sourceUrl`, and our buffering maps are URL-keyed so a new worker
-  // thread inherits them. Drop it, once per actor.
-  //
-  // Firefox reports url:null routinely for eval/new Function/debugger-eval
-  // scripts, which nobody expects to debug, so those stay at debug level. A
-  // URL-less *wasm* module is different: it silently will not be debuggable,
-  // and the user needs to be told why.
+  // Firefox requires sourceUrl for breakpoints. Warn for unsupported wasm;
+  // ordinary URL-less eval scripts use debug logging. Warning retention is bounded.
   #reportUsableSource(s: SourceForm): s is UrlSourceForm {
     if (hasUrl(s)) return true;
-    if (!this.#warnedUrllessActors.has(s.actor)) {
+    if (!this.#warnedUrllessActors.has(s.actor) && this.#warnedUrllessActors.size < 1024) {
       this.#warnedUrllessActors.add(s.actor);
       const msg =
         `[rdp] ignoring ${s.introductionType ?? "unknown"} source ${s.actor}: ` +
         `Firefox reports no URL for it, and a breakpoint can only be addressed by URL`;
       if (s.introductionType === "wasm") this.#logger.warn(msg);
       else this.#logger.debug(msg);
+      if (this.#warnedUrllessActors.size === 1024)
+        this.#logger.warn("[rdp] further URL-less source warnings suppressed for this generation");
     }
     return false;
   }
 
   /** Wasm sources deduped by URL across all known threads. */
   async wasmSources(): Promise<UrlSourceForm[]> {
-    // Use the top-level thread (lowest tid, always has the full source list).
+    // Prefer the top-level source list; retry another thread only if this one retires.
     const tids = [...this.#threads.keys()].sort((a, b) => a - b);
     if (tids.length === 0) return [];
-    try {
-      return await this.wasmSourcesForTid(tids[0]);
-    } catch {
-      // Try any other thread.
-      for (const tid of tids.slice(1)) {
-        try {
-          return await this.wasmSourcesForTid(tid);
-        } catch {}
+    for (const tid of tids) {
+      const info = this.#threads.get(tid);
+      if (!info) continue;
+      try {
+        return await this.#wasmSourcesForInfo(info);
+      } catch (error) {
+        if (this.#closed || this.#isCurrentThread(info)) throw error;
       }
-      return [];
     }
+    return [];
   }
 
   /** URL for a wasm or JS source actor, if known (populated by wasmSourcesForTid/jsSources). */
@@ -1256,46 +1131,59 @@ export class RdpWasmSession extends EventEmitter {
     return entry?.generation === this.#activeGeneration ? entry.url : undefined;
   }
 
-  async fetchModuleBytes(url: string): Promise<Uint8Array> {
-    // Module.bytecode's WIT signature has no error case, so a throw here is
-    // re-thrown uncaught inside the gdbstub worker and takes the whole session
-    // with it. Degrade like the unavailable-bytes path below instead.
+  async fetchModuleBytes(url: string): Promise<Uint8Array | undefined> {
+    const { signal } = this.#generationAbort;
+    signal.throwIfAborted();
+    // WIT Module.bytecode uses an option: unavailable is not an empty wasm module.
     if (typeof url !== "string") {
       this.#logger.error(`[rdp] module bytes requested for a source with no URL (${url})`);
-      return EMPTY_WASM_MODULE;
+      return undefined;
     }
     const actorEntry = this.#wasmActorByUrl.get(url);
     const actor = actorEntry?.generation === this.#activeGeneration ? actorEntry.actor : undefined;
-    if (url.startsWith("http://") || url.startsWith("https://")) {
-      try {
-        return await this.#moduleByteProvider.fetch(url);
-      } catch (e) {
-        // A Node-side fetch may lack the page's credentials, client cert, or
-        // cache context. Fall back to Firefox's source actor, which exposes the
-        // exact browser-loaded ArrayBuffer.
-        this.#logger.debug(
-          `[rdp] out-of-band module fetch failed for ${url}; trying browser source: ${
-            e instanceof Error ? e.message : String(e)
-          }`
-        );
-      }
-    }
     if (actor) {
       const bytes = await this.#fetchWasmBytesFromActor(actor);
-      if (bytes && isWasmBinary(bytes)) return bytes;
+      signal.throwIfAborted();
+      if (bytes && isWasmBinary(bytes)) {
+        this.#logger.debug(
+          `[rdp] module-bytes ${JSON.stringify({ url, actor, generation: this.#activeGeneration, provider: "browser", bytes: bytes.length })}`
+        );
+        return bytes;
+      }
     }
-    // Module.bytecode's WIT signature has no error case. Return a minimal valid
-    // wasm binary so one unavailable module does not trap the entire component.
+    if (url.startsWith("http://") || url.startsWith("https://")) {
+      this.#logger.warn(
+        `[rdp] browser bytes unavailable for ${url}; HTTP fallback cannot establish loaded-module identity`
+      );
+      try {
+        const bytes = await this.#moduleByteProvider.fetch(url, signal);
+        signal.throwIfAborted();
+        if (!isWasmBinary(bytes)) throw new Error("HTTP fallback did not provide a wasm binary");
+        this.#logger.debug(
+          `[rdp] module-bytes ${JSON.stringify({ url, generation: this.#activeGeneration, provider: "http-fallback", bytes: bytes.length })}`
+        );
+        return bytes;
+      } catch (error) {
+        signal.throwIfAborted();
+        this.#logger.warn(`[rdp] module HTTP fallback failed for ${url}: ${error}`);
+      }
+    }
     this.#logger.error(`[rdp] could not acquire valid module bytes for ${url}`);
-    return EMPTY_WASM_MODULE;
+    return undefined;
   }
 
   /** Try to fetch raw wasm bytes from a source actor via RDP. */
   async #fetchWasmBytesFromActor(sourceActor: string): Promise<Uint8Array | null> {
+    const actorLifetime = this.#generationAbort.signal;
     try {
-      const resp = (await this.#client.request(sourceActor, {
-        type: REQUESTS.source,
-      })) as SourceResponse;
+      const resp = (await this.#client.request(
+        sourceActor,
+        {
+          type: REQUESTS.source,
+        },
+        { actorLifetime }
+      )) as SourceResponse;
+      actorLifetime.throwIfAborted();
       const src = resp.source;
       if (src instanceof Uint8Array) return src;
       if (ArrayBuffer.isView(src)) {
@@ -1314,21 +1202,26 @@ export class RdpWasmSession extends EventEmitter {
         }
         let sliced: ArrayBufferSliceResponse;
         try {
-          sliced = (await this.#client.request(grip.actor, {
-            type: REQUESTS.slice,
-            start: 0,
-            count: grip.length,
-          })) as ArrayBufferSliceResponse;
+          sliced = (await this.#client.request(
+            grip.actor,
+            {
+              type: REQUESTS.slice,
+              start: 0,
+              count: grip.length,
+            },
+            { actorLifetime }
+          )) as ArrayBufferSliceResponse;
         } finally {
-          await this.#client
-            .request(grip.actor, { type: REQUESTS.release })
-            .catch((err) =>
-              this.#logger.debug(
-                `[rdp] could not release ArrayBuffer actor ${grip.actor}: ${
-                  err instanceof Error ? err.message : String(err)
-                }`
-              )
-            );
+          if (!actorLifetime.aborted)
+            await this.#client
+              .request(grip.actor, { type: REQUESTS.release })
+              .catch((err) =>
+                this.#logger.debug(
+                  `[rdp] could not release ArrayBuffer actor ${grip.actor}: ${
+                    err instanceof Error ? err.message : String(err)
+                  }`
+                )
+              );
         }
         if (typeof sliced.encoded !== "string") throw new Error("ArrayBuffer slice has no data");
         const bytes = Uint8Array.from(Buffer.from(sliced.encoded, "base64"));
@@ -1354,96 +1247,75 @@ export class RdpWasmSession extends EventEmitter {
   }
 
   async fetchSourceText(sourceActor: string): Promise<string> {
-    const resp = (await this.#client.request(sourceActor, {
-      type: REQUESTS.source,
-    })) as SourceResponse;
+    const { signal } = this.#generationAbort;
+    signal.throwIfAborted();
+    const resp = (await this.#client.request(
+      sourceActor,
+      {
+        type: REQUESTS.source,
+      },
+      { actorLifetime: signal }
+    )) as SourceResponse;
+    signal.throwIfAborted();
     const src = resp.source;
-    if (typeof src === "string") return src;
+    const maxChars = 8 * 1024 * 1024;
+    if (typeof src === "string") {
+      if (src.length > maxChars) throw new Error("source text exceeds 8 Mi characters");
+      return src;
+    }
     if (src && typeof src === "object") {
       const longString = src as LongStringGrip;
-      if (longString.type === "longString" && longString.actor && longString.length !== undefined) {
-        if (longString.initial !== undefined && longString.initial.length === longString.length) {
-          return longString.initial;
+      if (longString.type === "longString" && longString.actor) {
+        try {
+          if (
+            !Number.isSafeInteger(longString.length) ||
+            longString.length! < 0 ||
+            longString.length! > maxChars
+          )
+            throw new Error(`invalid source text length ${longString.length}`);
+          if (longString.initial !== undefined && longString.initial.length === longString.length)
+            return longString.initial;
+          const sub = (await this.#client.request(
+            longString.actor,
+            {
+              type: REQUESTS.substring,
+              start: 0,
+              end: longString.length,
+            },
+            { actorLifetime: signal }
+          )) as SubstringResponse;
+          signal.throwIfAborted();
+          if (typeof sub.substring !== "string" || sub.substring.length !== longString.length)
+            throw new Error("source text length mismatch");
+          return sub.substring;
+        } finally {
+          if (!signal.aborted)
+            await this.#client
+              .request(longString.actor, { type: REQUESTS.release })
+              .catch((error) =>
+                this.#logger.debug(
+                  `[rdp] source text release failed for ${longString.actor}: ${error}`
+                )
+              );
         }
-        const sub = (await this.#client.request(longString.actor, {
-          type: REQUESTS.substring,
-          start: 0,
-          end: longString.length,
-        })) as SubstringResponse;
-        return sub.substring ?? "";
       }
     }
-    return "";
+    throw new Error(`source actor ${sourceActor} did not provide text`);
   }
 
-  async setJsBreakpoint(sourceUrl: string, line: number): Promise<void> {
-    const loc = await this.#snapJsLocation(sourceUrl, line);
-    await Promise.all(
-      [...this.#threads.values()].map((t) =>
-        this.#client
-          .request(t.threadActor, {
-            type: REQUESTS.setBreakpoint,
-            location: { sourceUrl, line: loc.line, column: loc.column },
-            options: {},
-          })
-          .catch(() => {})
-      )
-    );
+  async setJsBreakpoint(sourceUrl: string, line: number): Promise<number> {
+    return (await this.#breakpoints.set("js", sourceUrl, line)).line;
   }
 
   async removeJsBreakpoint(sourceUrl: string, line: number): Promise<void> {
-    const loc = await this.#snapJsLocation(sourceUrl, line);
-    await Promise.all(
-      [...this.#threads.values()].map((t) =>
-        this.#client
-          .request(t.threadActor, {
-            type: REQUESTS.removeBreakpoint,
-            location: { sourceUrl, line: loc.line, column: loc.column },
-          })
-          .catch(() => {})
-      )
-    );
-  }
-
-  /**
-   * Snap a JS source line to a real breakpoint position. Firefox only fires a
-   * breakpoint set at a valid (line, column) entry point; an arbitrary column
-   * binds to nothing and never hits. Pick the nearest line with positions
-   * (preferring forward, so the fired line stays within the component's
-   * pre-snap breakpoint-match tolerance) and its first column.
-   */
-  async #snapJsLocation(
-    sourceUrl: string,
-    line: number
-  ): Promise<{ line: number; column?: number }> {
-    const actorEntry = this.#jsActorByUrl.get(sourceUrl);
-    const actor = actorEntry?.generation === this.#activeGeneration ? actorEntry.actor : undefined;
-    if (!actor) return { line };
-    let positions: Record<string, number[]>;
-    try {
-      const resp = (await this.#client.request(actor, {
-        type: REQUESTS.getBreakpointPositionsCompressed,
-        query: { start: { line: 0 }, end: { line: 1e7 } },
-      })) as GetBreakpointPositionsResponse;
-      positions = resp.positions ?? {};
-    } catch {
-      return { line };
-    }
-    const lines = Object.keys(positions)
-      .map(Number)
-      .sort((a, b) => a - b);
-    if (!lines.length) return { line };
-    const snLine = lines.find((l) => l >= line) ?? lines[lines.length - 1];
-    const cols = (positions[String(snLine)] ?? []).slice().sort((a, b) => a - b);
-    // cols[0] is undefined if positions returns a line with an empty column list.
-    return cols.length > 0 ? { line: snLine, column: cols[0] } : { line: snLine };
+    await this.#breakpoints.remove("js", sourceUrl, line);
   }
 
   async jsSources(): Promise<UrlSourceForm[]> {
     const tids = [...this.#threads.keys()].sort((a, b) => a - b);
     if (tids.length === 0) return [];
+    const info = this.#threads.get(tids[0])!;
     try {
-      const info = this.#threads.get(tids[0])!;
       const { sources } = (await this.#client.request(info.threadActor, {
         type: REQUESTS.sources,
       })) as SourcesResponse;
@@ -1452,11 +1324,12 @@ export class RdpWasmSession extends EventEmitter {
         .filter((s) => this.#reportUsableSource(s));
       if (!this.#isCurrentThread(info)) return [];
       for (const s of js) {
-        this.#jsActorByUrl.set(s.url, { actor: s.actor, generation: info.generation });
-        this.#sourceUrlByActor.set(s.actor, { url: s.url, generation: info.generation });
+        this.#rememberSource(s, info.generation);
       }
+      this.#observeBreakpointSources(info, js);
       return js;
-    } catch {
+    } catch (error) {
+      if (this.#closed || this.#isCurrentThread(info)) throw error;
       return [];
     }
   }
@@ -1464,12 +1337,13 @@ export class RdpWasmSession extends EventEmitter {
   // --- frames ---
 
   async frames(tid: number, start = 0, count = 1000): Promise<FrameForm[]> {
+    const info = this.#info(tid);
     // A timed-out actor FIFO cannot safely accept later requests, so let the
     // client enforce the deadline and close the poisoned connection instead of
     // abandoning a still-pending request behind a local Promise.race.
     try {
       const { frames } = (await this.#client.request(
-        this.#info(tid).threadActor,
+        info.threadActor,
         {
           type: REQUESTS.frames,
           start,
@@ -1477,6 +1351,7 @@ export class RdpWasmSession extends EventEmitter {
         },
         { timeoutMs: 5000 }
       )) as FramesResponse;
+      if (!this.#isCurrentThread(info)) throw new Error("frame snapshot target retired");
       return frames ?? [];
     } catch (err) {
       if (this.#closed) throw new Error("session closed", { cause: err });
@@ -1491,172 +1366,65 @@ export class RdpWasmSession extends EventEmitter {
     offset: number,
     functionRange?: WasmFunctionRange
   ): Promise<number> {
-    // Buffer so new workers inherit it.
-    if (!this.#breakpoints.has(sourceUrl)) this.#breakpoints.set(sourceUrl, new Set());
-    this.#breakpoints.get(sourceUrl)!.add(offset);
-    if (functionRange) {
-      let ranges = this.#breakpointRangeByUrl.get(sourceUrl);
-      if (!ranges) {
-        ranges = new Map();
-        this.#breakpointRangeByUrl.set(sourceUrl, ranges);
-      }
-      ranges.set(offset, functionRange);
-    }
-
-    const snappedOffset = await this.#snapOffset(sourceUrl, offset, functionRange);
-    let snappedByOffset = this.#snappedBreakpointByUrl.get(sourceUrl);
-    if (!snappedByOffset) {
-      snappedByOffset = new Map();
-      this.#snappedBreakpointByUrl.set(sourceUrl, snappedByOffset);
-    }
-    snappedByOffset.set(offset, snappedOffset);
-    await Promise.all(
-      [...this.#threads.values()].map(
-        (t) =>
-          this.#client
-            .request(t.threadActor, {
-              type: REQUESTS.setBreakpoint,
-              location: { sourceUrl, line: snappedOffset, column: 1 },
-              options: {},
-            })
-            .catch(() => {}) // ignore stale actors
-      )
-    );
-    return snappedOffset;
+    return (await this.#breakpoints.set("wasm", sourceUrl, offset, functionRange)).line;
   }
 
   async removeWasmBreakpoint(sourceUrl: string, offset: number): Promise<void> {
-    this.#breakpoints.get(sourceUrl)?.delete(offset);
-    const ranges = this.#breakpointRangeByUrl.get(sourceUrl);
-    ranges?.delete(offset);
-    if (ranges?.size === 0) this.#breakpointRangeByUrl.delete(sourceUrl);
-    const snappedByOffset = this.#snappedBreakpointByUrl.get(sourceUrl);
-    // Re-snapping after an actor/cache change can choose a different offset
-    // and leave the original Firefox breakpoint armed.
-    const snappedOffset =
-      snappedByOffset?.get(offset) ?? (await this.#snapOffset(sourceUrl, offset));
-    snappedByOffset?.delete(offset);
-    if (snappedByOffset?.size === 0) this.#snappedBreakpointByUrl.delete(sourceUrl);
-    await Promise.all(
-      [...this.#threads.values()].map((t) =>
-        this.#client
-          .request(t.threadActor, {
-            type: REQUESTS.removeBreakpoint,
-            location: { sourceUrl, line: snappedOffset, column: 1 },
-          })
-          .catch(() => {})
-      )
-    );
+    await this.#breakpoints.remove("wasm", sourceUrl, offset);
   }
 
   async wasmBreakpointOffsets(sourceActor: string): Promise<number[]> {
-    // Cache per actor: for large modules the RDP round-trip for all positions
-    // can be expensive. For a wasm source the compressed response is
-    // { <wasm byte offset>: [1] }; the keys, not the column arrays, are the
-    // valid Z0 locations. Subsequent packets reuse the same list.
-    let p = this.#breakpointPositionCache.get(sourceActor);
-    if (!p) {
-      p = (async () => {
-        const { positions } = (await this.#client.request(sourceActor, {
-          type: REQUESTS.getBreakpointPositionsCompressed,
-          query: { start: { line: 0 }, end: { line: 1e7 } },
-        })) as GetBreakpointPositionsResponse;
-        return Object.keys(positions ?? {})
-          .map(Number)
-          .filter((n) => !Number.isNaN(n))
-          .sort((a, b) => a - b);
-      })();
-      this.#breakpointPositionCache.set(sourceActor, p);
-    }
-    return p;
+    return Object.keys(await this.#breakpoints.positions(sourceActor))
+      .map(Number)
+      .sort((a, b) => a - b);
   }
 
-  async #snapOffset(
-    sourceUrl: string,
-    offset: number,
-    functionRange?: WasmFunctionRange
-  ): Promise<number> {
-    const actorEntry = this.#wasmActorByUrl.get(sourceUrl);
-    const actor = actorEntry?.generation === this.#activeGeneration ? actorEntry.actor : undefined;
-    if (!actor) return offset;
-    const positions = await this.wasmBreakpointOffsets(actor).catch((): number[] => []);
-    if (!positions.length || positions.includes(offset)) return offset;
-    const candidates = functionRange
-      ? positions.filter((p) => p >= functionRange.start && p < functionRange.end)
-      : positions;
-    if (!candidates.length) return offset;
-    // Keep the established nearest-position behavior for source breakpoints,
-    // but never let it escape the containing function. A function low_pc can
-    // sit in its encoded body header; without the range constraint its closest
-    // position may be the preceding function's final opcode.
-    return candidates.reduce(
-      (best, p) => (Math.abs(p - offset) < Math.abs(best - offset) ? p : best),
-      candidates[0]
-    );
+  #observeBreakpointSources(info: ThreadInfo, sources: SourceForm[]): void {
+    void this.#breakpoints.sources(info.threadActor, sources).catch((error) => {
+      if (!this.#isCurrentThread(info)) return;
+      this.#logger.error(`[rdp] breakpoint replay failed for tid ${info.tid}: ${String(error)}`);
+      this.close();
+    });
   }
 
-  /** Apply all buffered breakpoints to a newly-arrived thread. */
-  async #applyBreakpoints(info: ThreadInfo): Promise<void> {
-    if (!this.#isCurrentThread(info)) return;
-    // A brand new target (post-navigation, or a fresh worker) hasn't
-    // necessarily discovered its wasm sources yet — the page's script needs
-    // a moment to load and instantiate the module. #wasmActorByUrl starts
-    // out empty for it, and #snapOffset falls back to the un-snapped offset
-    // when it can't find an actor; Firefox silently never fires a wasm
-    // breakpoint set at a position that isn't a valid instruction boundary,
-    // so every buffered breakpoint would silently stop working on the new
-    // target. Poll briefly for the sources to appear before snapping.
-    if (this.#breakpoints.size > 0) {
-      for (let i = 0; i < 10; i++) {
-        if (!this.#isCurrentThread(info)) return;
-        // Cap each attempt: if the actor never replies (a stale/dead thread,
-        // or simply no wasm on this target), this poll must still progress
-        // and eventually give up rather than hang on the very first await.
-        const sources = await Promise.race([
-          this.#wasmSourcesForInfo(info).catch((): SourceForm[] => []),
-          new Promise<SourceForm[]>((resolve) => setTimeout(() => resolve([]), 200)),
-        ]);
-        if (sources.length > 0) break;
-        await new Promise((r) => setTimeout(r, 50));
-      }
-    }
-    for (const [sourceUrl, offsets] of this.#breakpoints) {
-      for (const offset of offsets) {
-        if (!this.#isCurrentThread(info)) return;
-        const range = this.#breakpointRangeByUrl.get(sourceUrl)?.get(offset);
-        const snapped = await this.#snapOffset(sourceUrl, offset, range);
-        let snappedByOffset = this.#snappedBreakpointByUrl.get(sourceUrl);
-        if (!snappedByOffset) {
-          snappedByOffset = new Map();
-          this.#snappedBreakpointByUrl.set(sourceUrl, snappedByOffset);
-        }
-        snappedByOffset.set(offset, snapped);
-        if (!this.#isCurrentThread(info)) return;
-        await this.#client
-          .request(info.threadActor, {
-            type: REQUESTS.setBreakpoint,
-            location: { sourceUrl, line: snapped, column: 1 },
-            options: {},
-          })
-          .catch(() => {});
-      }
-    }
+  #observeBreakpointTarget(info: ThreadInfo): void {
+    void this.#breakpoints.addTarget(info.threadActor, info.generation).catch((error) => {
+      if (!this.#isCurrentThread(info)) return;
+      this.#logger.error(`[rdp] breakpoint replay failed for tid ${info.tid}: ${String(error)}`);
+      this.close();
+    });
   }
 
   // --- resume / step / interrupt (all-stop) ---
+
+  #requestResume(info: ThreadInfo, limit?: "step" | "next"): void {
+    this.#completedStop = undefined;
+    // A requested resume invalidates the previous stop immediately. Waiting
+    // for its event would let a fast peer pause publish the old paused set.
+    const wasPaused = this.#pausedTids.delete(info.tid);
+    this.#pausePacketByTid.delete(info.tid);
+    this.#unwitnessedPausedTids.delete(info.tid);
+    if (wasPaused) this.#resumingTids.add(info.tid);
+    this.#client.send(info.threadActor, {
+      type: REQUESTS.resume,
+      ...(limit ? { resumeLimit: { type: limit } } : {}),
+    });
+    this.#record({
+      domain: "pause",
+      event: "resume-requested",
+      tid: info.tid,
+      actor: info.threadActor,
+      generation: info.generation,
+    });
+  }
 
   /**
    * Resume all previously-paused threads (after an all-stop).
    * The top-level continue call — resumes every thread we own.
    */
   async resumeAll(): Promise<void> {
-    // Release the threads interrupted by #allStop before the thread that
-    // originally stopped. In a pthread program the stopped main thread can
-    // enter pthread_join as soon as it resumes; Firefox may then stop
-    // servicing worker-thread resume packets that were queued behind it.
-    // Sending the triggering thread last ensures every worker is runnable
-    // before the main thread can wait for it. In particular, this avoids the
-    // repeated all-stop pthread_join deadlock from issue #7.
+    // Resume peers before the trigger, which may immediately enter pthread_join.
+    // See threaded_worker_sequence.test.mjs and docs/COMPATIBILITY.md.
     const toResume = [...this.#pausedTids].sort((a, b) => {
       if (a === this.#stoppedTid) return 1;
       if (b === this.#stoppedTid) return -1;
@@ -1665,7 +1433,7 @@ export class RdpWasmSession extends EventEmitter {
     for (const tid of toResume) {
       const info = this.#threads.get(tid);
       if (!info) continue;
-      this.#client.send(info.threadActor, { type: REQUESTS.resume });
+      this.#requestResume(info);
     }
   }
 
@@ -1680,145 +1448,217 @@ export class RdpWasmSession extends EventEmitter {
    */
   stepOne(tid: number, limit: "step" | "next" = "step"): void {
     const info = this.#info(tid);
-    this.#client.send(info.threadActor, { type: REQUESTS.resume, resumeLimit: { type: limit } });
+    this.#requestResume(info, limit);
   }
 
-  /**
-   * Wait for ANY thread to pause, then interrupt all others and wait for
-   * their acks. Emits "stopped" with the triggering tid once all threads are
-   * paused. This is the all-stop implementation.
-   */
-  armAllStop(): void {
-    let fired = false;
-    const perTidHandlers = new Map<number, (p: PauseEvent) => void>();
-    let onNewTarget: ((info: ThreadInfo) => void) | null = null;
-
+  /** Own one execution wait through coherent all-stop. Repeated calls join it.
+   * Cancellation removes listeners; a missing acknowledgement fails closed. */
+  armAllStop(): StopOperation {
+    if (this.#activeStop?.pending) return this.#activeStop;
+    if (this.#closed) throw new Error("session closed");
+    const id = this.#nextStopId++;
+    const abort = new AbortController();
+    let resolve!: (event: StoppedEvent) => void;
+    let reject!: (error: Error) => void;
+    let pending = true;
+    let collecting = false;
+    const witnessed = new Set<number>();
+    const promise = new Promise<StoppedEvent>((r, j) => {
+      resolve = r;
+      reject = j;
+    });
+    // Legacy event subscribers may ignore the returned handle. The operation
+    // still owns its rejection; callers awaiting the promise see the failure.
+    void promise.catch(() => {});
     const cleanup = () => {
-      for (const [tid, h] of perTidHandlers) {
-        this.off(`paused:${tid}`, h);
-        this.#unwatchPause(tid);
-      }
-      perTidHandlers.clear();
-      if (onNewTarget) {
-        this.off("target", onNewTarget);
-        onNewTarget = null;
-      }
+      for (const tid of witnessed) this.#unwatchPause(tid);
+      witnessed.clear();
+      this.off("paused", begin);
+      this.off("target", onTarget);
       this.off("close", onClose);
+      if (this.#activeStop === operation) {
+        this.#activeStop = undefined;
+        this.#beginStop = undefined;
+      }
     };
-
-    const onPaused = (tid: number, packet: PauseEvent) => {
-      if (fired) return;
-      fired = true;
+    const cancel = (error = new Error("stop operation cancelled")) => {
+      if (!pending) return;
+      pending = false;
       cleanup();
-      void this.#allStop(tid, packet).catch((err) => {
-        this.#logger.error(
-          `[rdp] all-stop coordination failed: ${err instanceof Error ? err.message : String(err)}`
-        );
-        this.close();
+      abort.abort(error);
+      this.#record({
+        domain: "pause",
+        event: "operation-cancelled",
+        detail: `stop=${id}: ${error.message}`,
       });
+      reject(error);
     };
-
-    // If the session closes before any thread pauses, clean up the listeners
-    // so they don't linger in the session's EventEmitter.
-    const onClose = () => {
-      if (fired) return;
-      fired = true;
-      cleanup();
+    const operation: StopOperation = {
+      id,
+      promise,
+      cancel,
+      get pending() {
+        return pending;
+      },
     };
-
-    const addTid = (tid: number) => {
-      if (fired) return;
-      // A navigation reuses the old top-level tid for the replacement target.
-      // The existing event listener is keyed by tid rather than actor, so it
-      // already covers the replacement. Installing another one would overwrite
-      // the Map entry without removing the first listener; that orphan would
-      // leak until session close and could invoke stale coordination logic on
-      // later pauses.
-      if (perTidHandlers.has(tid)) return;
-      const h = (p: PauseEvent) => onPaused(tid, p);
-      perTidHandlers.set(tid, h);
-      this.#watchPause(tid);
-      this.on(`paused:${tid}`, h);
+    const begin = (tid: number, packet: PauseEvent) => {
+      if (!pending || collecting) return;
+      collecting = true;
+      void this.#collectStop(tid, packet, id, abort.signal).then(
+        (event) => {
+          collecting = false;
+          if (!pending) return;
+          if (this.#closed) {
+            cancel(new Error("session closed during stop"));
+            return;
+          }
+          if (!event) {
+            // A navigation retired the trigger during collection. Keep this
+            // execution wait armed for the replacement's next genuine pause.
+            const next = [...this.#pausedTids][0];
+            if (next !== undefined) {
+              const packet = this.#pausePacketByTid.get(next);
+              if (packet) begin(next, packet);
+            }
+            return;
+          }
+          pending = false;
+          cleanup();
+          this.#stoppedTid = event.tid;
+          this.#completedStop = event;
+          this.#unwitnessedPausedTids.clear();
+          this.#record({
+            domain: "pause",
+            event: "all-stopped",
+            generation: event.generation,
+            tid: event.tid,
+            detail: `stop=${id} paused=${event.pausedTids.join(",")}`,
+          });
+          resolve(event);
+          this.emit("stopped", event);
+        },
+        (error) => {
+          if (!pending) return;
+          cancel(error instanceof Error ? error : new Error(String(error)));
+          this.#logger.error(`[rdp] all-stop coordination failed: ${String(error)}`);
+          this.close();
+        }
+      );
     };
-
-    onNewTarget = (info: ThreadInfo) => addTid(info.tid);
-    this.on("target", onNewTarget);
+    const onTarget = (info: ThreadInfo) => {
+      if (!witnessed.has(info.tid)) {
+        witnessed.add(info.tid);
+        this.#watchPause(info.tid);
+      }
+    };
+    const onClose = () => cancel(new Error("session closed during stop"));
+    this.#activeStop = operation;
+    this.#beginStop = begin;
+    this.on("paused", begin);
+    this.on("target", onTarget);
     this.once("close", onClose);
-
-    for (const tid of this.#threads.keys()) addTid(tid);
+    for (const info of this.#threads.values()) onTarget(info);
+    this.#record({ domain: "pause", event: "operation-armed", detail: `stop=${id}` });
+    return operation;
   }
 
-  async #allStop(stoppedTid: number, packet: PauseEvent): Promise<void> {
-    this.#stoppedTid = stoppedTid;
-
-    // Interrupt all other running threads and wait for their pauses.
-    const others = [...this.#threads.keys()].filter(
-      (tid) => tid !== stoppedTid && !this.#pausedTids.has(tid)
-    );
-
-    await Promise.all(
-      others.map(async (tid) => {
-        const info = this.#threads.get(tid);
-        if (!info) return;
-        // Send interrupt and wait for the paused event. Interrupt is normally
-        // < 10 ms, but cap at 3 s for threads that may not be interruptible
-        // (e.g. a futex-blocked worker whose JS loop is frozen). Also resolve
-        // immediately if the session closes so shutdown isn't delayed 3 s.
-        const paused = new Promise<void>((resolve) => {
-          const done = () => {
-            clearTimeout(timer);
-            this.off(`paused:${tid}`, onPaused);
-            this.off(`target-destroyed:${info.targetActor}`, onDestroyed);
-            this.off("close", onClose);
-            this.#unwatchPause(tid);
-            resolve();
-          };
-          const timer = setTimeout(done, 3000);
-          const onPaused = done;
-          const onDestroyed = done;
-          const onClose = done;
-          this.#watchPause(tid);
-          this.once(`paused:${tid}`, onPaused);
-          this.once(`target-destroyed:${info.targetActor}`, onDestroyed);
-          this.once("close", onClose);
-        });
-        this.#client.send(info.threadActor, { type: REQUESTS.interrupt, when: {} });
-        await paused;
-      })
-    );
-
-    // Every currently-paused tid is now accounted for by this reported stop
-    // (the stoppedTid, plus whichever others we just interrupted), whether
-    // this ran via armAllStop's normal flow or adoptPausedState() surfacing
-    // one that was left unwitnessed.
-    this.#unwitnessedPausedTids.clear();
-    this.emit("stopped", { tid: stoppedTid, pausePacket: packet } as StoppedEvent);
+  async #collectStop(
+    tid: number,
+    packet: PauseEvent,
+    stopId: number,
+    signal: AbortSignal
+  ): Promise<StoppedEvent | undefined> {
+    const trigger = this.#threads.get(tid);
+    if (!trigger) return;
+    const interrupted = new Set<string>();
+    const complete = () =>
+      !this.#isCurrentThread(trigger) ||
+      [...this.#threads.values()].every((thread) => this.#pausedTids.has(thread.tid));
+    const interruptRunning = () => {
+      if (!this.#isCurrentThread(trigger)) return;
+      for (const thread of this.#threads.values()) {
+        if (
+          this.#pausedTids.has(thread.tid) ||
+          this.#resumingTids.has(thread.tid) ||
+          interrupted.has(thread.targetActor)
+        )
+          continue;
+        interrupted.add(thread.targetActor);
+        this.#client.send(thread.threadActor, { type: REQUESTS.interrupt, when: {} });
+      }
+    };
+    this.on("target", interruptRunning);
+    this.on("lifecycle-state", interruptRunning);
+    try {
+      const deadline = Date.now() + 3000;
+      // Register the state waiter before sending any interrupts. Newly announced
+      // workers participate in the same collection and the same deadline.
+      do {
+        const stopped = this.#waitForState(
+          complete,
+          Math.max(1, deadline - Date.now()),
+          `all-stop ${stopId} incomplete after 3000ms`,
+          "session closed during all-stop",
+          signal
+        );
+        void stopped.catch(() => {});
+        interruptRunning();
+        await stopped;
+        signal.throwIfAborted();
+        if (!this.#isCurrentThread(trigger)) return;
+        // A target queued with the final pause joins this same deadline.
+      } while (!complete());
+      return {
+        tid,
+        pausePacket: packet,
+        generation: trigger.generation,
+        stopId,
+        pausedTids: this.pausedTids(),
+      };
+    } finally {
+      this.off("target", interruptRunning);
+      this.off("lifecycle-state", interruptRunning);
+    }
   }
 
   interrupt(tid: number): void {
     this.#client.send(this.#info(tid).threadActor, { type: REQUESTS.interrupt, when: {} });
   }
 
-  /**
-   * If any thread is already paused (e.g. pauseOnExceptions fired during page
-   * load before primeStop had a chance to arm its listener), adopt the first
-   * paused thread as the stopped thread and interrupt any others. Returns true
-   * if a paused thread was found; false if all threads are running.
-   *
-   * Sending interrupt to an already-paused thread returns an alreadyPaused
-   * error reply (not a paused event), so armAllStop would silently lose it
-   * and primeStop would hang. This method sidesteps that by running #allStop
-   * directly when the paused state is already known.
-   */
+  /** Reject a snapshot whose stop or participating target set is no longer current. */
+  assertStopped(event: StoppedEvent): void {
+    if (
+      this.#closed ||
+      this.#completedStop !== event ||
+      event.generation !== this.#activeGeneration ||
+      event.pausedTids.length !== this.#threads.size ||
+      event.pausedTids.some((tid) => !this.#threads.has(tid) || !this.#pausedTids.has(tid))
+    )
+      throw new RetiredStopError(event.stopId);
+  }
+
+  /** A newly announced target may join a still-paused stop, but never a resumed one. */
+  canExtendStop(event: StoppedEvent): boolean {
+    return (
+      !this.#closed &&
+      this.#completedStop === event &&
+      event.generation === this.#activeGeneration &&
+      event.pausedTids.length < this.#threads.size &&
+      event.pausedTids.every((tid) => this.#threads.has(tid) && this.#pausedTids.has(tid))
+    );
+  }
+
+  /** Adopt a real, unreported pause and collect its peers. Returns false when
+   * every thread is running; never invents a pause packet or stop reason. */
   async adoptPausedState(): Promise<boolean> {
     const paused = [...this.#pausedTids];
     if (paused.length === 0) return false;
-    // Report the real pause packet (why.type etc.) if we captured one for
-    // this tid, rather than a synthetic empty one that always reads as a
-    // generic breakpoint downstream — this tid was genuinely paused, just
-    // not by us, so its real cause (trap/exception/breakpoint) is known.
-    const packet = this.#pausePacketByTid.get(paused[0]) ?? ({} as PauseEvent);
-    await this.#allStop(paused[0], packet);
+    // Keep the observed breakpoint, exception or interrupt reason.
+    const packet = this.#pausePacketByTid.get(paused[0]);
+    if (!packet) throw new Error("paused thread has no captured pause packet");
+    const operation = this.armAllStop();
+    this.#beginStop?.(paused[0], packet);
+    await operation.promise;
     return true;
   }
 
@@ -1876,6 +1716,10 @@ export class RdpWasmSession extends EventEmitter {
     return actor || null;
   }
 
+  consoleActorForThread(tid: number): string | null {
+    return this.#threads.get(tid)?.consoleActor || null;
+  }
+
   /** Fetch a frame's environment form (with the parent scope chain). */
   frameEnvironment(frameActor: string): Promise<RdpPacket> {
     return this.#client.request(frameActor, { type: REQUESTS.getEnvironment });
@@ -1901,69 +1745,92 @@ export class RdpWasmSession extends EventEmitter {
     frameActor?: string,
     consoleActorOverride?: string
   ): Promise<RdpPacket> {
+    if (this.#closed) throw new Error("session closed");
     const consoleActor =
       consoleActorOverride ?? [...this.#threads.values()].find((t) => t.consoleActor)?.consoleActor;
     if (!consoleActor) throw new Error("no console actor");
     // Firefox may send evaluationResult immediately after the acknowledgement,
     // in the same TCP chunk. Install the listener before sending the request so
-    // the promise continuation after `await request()` cannot miss that result.
-    let resultID: string | undefined;
-    const earlyResults = new Map<string, RdpPacket>();
-    let cleanup!: () => void;
-    const result = new Promise<RdpPacket>((resolve, reject) => {
-      let done = false;
-      cleanup = () => {
-        if (done) return;
-        done = true;
+    // the request promise's continuation cannot miss that result.
+    // One operation owns the acknowledgement, result, deadline, and listeners.
+    // A separate result promise can reject unobserved while awaiting the ack.
+    return new Promise<RdpPacket>((resolve, reject) => {
+      let settled = false;
+      let resultID: string | undefined;
+      const earlyResults = new Map<string, RdpPacket>();
+      const cleanup = () => {
+        settled = true;
         clearTimeout(timer);
         this.#client.off("event", onEvent);
         this.off("close", onClose);
+        earlyResults.clear();
+      };
+      const fail = (error: unknown) => {
+        if (settled) return;
+        cleanup();
+        reject(error);
+      };
+      const succeed = (packet: RdpPacket) => {
+        if (settled) return;
+        cleanup();
+        resolve(packet);
       };
       const timer = setTimeout(() => {
-        cleanup();
-        reject(new Error("JavaScript evaluation timed out after 5000 ms"));
+        this.#record({
+          domain: "rdp",
+          event: "evaluation-timeout",
+          actor: consoleActor,
+          state: resultID === undefined ? "awaiting-ack" : "awaiting-result",
+          detail: resultID,
+        });
+        fail(new Error("JavaScript evaluation timed out after 5000 ms"));
+        // Without an ack, the actor FIFO still contains this request. Dropping
+        // it would let a late reply satisfy a different request. After the ack,
+        // only an event is missing, so the connection remains safe to use.
+        if (resultID === undefined) this.close();
       }, 5000);
       const onEvent = (p: RdpPacket) => {
-        if (p.type !== EVENTS.evaluationResult) return;
+        if (settled || p.from !== consoleActor || p.type !== EVENTS.evaluationResult) return;
         const id = (p as { resultID?: string }).resultID;
         if (!id) return;
         if (resultID === undefined) {
           earlyResults.set(id, p);
         } else if (id === resultID) {
-          cleanup();
-          resolve(p);
+          succeed(p);
         }
       };
-      const onClose = () => {
-        cleanup();
-        reject(new Error("session closed"));
-      };
+      const onClose = () => fail(new Error("session closed"));
       this.#client.on("event", onEvent);
       this.once("close", onClose);
+      this.#client
+        .request(consoleActor, {
+          type: REQUESTS.evaluateJSAsync,
+          text,
+          ...(frameActor ? { frameActor } : {}),
+        })
+        .then((ack) => {
+          if (settled) return;
+          resultID = (ack as EvaluateJSAsyncAck).resultID;
+          if (!resultID) {
+            fail(new Error("Firefox did not return an evaluation result ID"));
+            return;
+          }
+          const early = earlyResults.get(resultID);
+          earlyResults.clear();
+          if (early) succeed(early);
+        })
+        .catch(fail);
     });
-    try {
-      const ack = (await this.#client.request(consoleActor, {
-        type: REQUESTS.evaluateJSAsync,
-        text,
-        ...(frameActor ? { frameActor } : {}),
-      })) as EvaluateJSAsyncAck;
-      resultID = ack.resultID;
-      if (!resultID) throw new Error("Firefox did not return an evaluation result ID");
-      const early = earlyResults.get(resultID);
-      if (early) {
-        cleanup();
-        return early;
-      }
-      return await result;
-    } catch (err) {
-      cleanup();
-      throw err;
-    }
   }
 
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
+    // Do not wait for the socket's asynchronous close event. A collector must
+    // distinguish terminal close from replacement before scheduling more work.
+    this.#activeStop?.cancel(new Error("session closed during stop"));
+    this.#breakpoints.close();
+    this.#generationAbort.abort(new Error("RDP session closed"));
     this.#clearPendingDetachChecks();
     this.#record({ domain: "cleanup", event: "session-close-requested" });
     this.#client.close();

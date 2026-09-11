@@ -37,6 +37,18 @@ static int32_t check_types() {
 
 extern "C" {
 
+// Keep numeric arguments in wasm locals at function entry. Integer-valued
+// floats must not be interpreted as i32 just because RDP uses a JS number.
+EMSCRIPTEN_KEEPALIVE __attribute__((noinline))
+double typed_arguments(float f, double d, int64_t wide) {
+    return f + d + static_cast<double>(wide);
+}
+
+EMSCRIPTEN_KEEPALIVE
+double run_typed_arguments() {
+    return typed_arguments(2.0f, -0.0, INT64_C(9007199254740993));
+}
+
 EMSCRIPTEN_KEEPALIVE
 int32_t run_types() {
     return check_types();

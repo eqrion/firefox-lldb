@@ -6,15 +6,19 @@
 // "session" API (structured SB-API queries), the same path the `firefox-lldb`
 // command uses — no native lldb, everything runs in this Node process.
 
-import net from "node:net";
 import http from "node:http";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { readFileSync } from "node:fs";
 import { LLDBClient } from "lldb-wasm";
-import { parseCliArgs, startPlatformServer } from "../../src/core/platform-session.ts";
-import { DebugFileRegistry } from "../../src/core/debug-files.ts";
+import { parseCliArgs } from "../../src/cli/options.ts";
+import { startPlatformServer } from "../../src/core/platform-session.ts";
+import { EmbeddedLldbBridge } from "../../src/lldb/bridge.ts";
+import { attachLldb, LLDB_FAILED_STATUS } from "../../src/lldb/attach.ts";
+import { isTransientConnectionError } from "../../src/rdp/startup.ts";
+import { DebugFileRegistry } from "../../src/symbols/debug-files.ts";
 import { freePort } from "../../src/platform/gdb-server-spawner.ts";
+import { openSessionLog, temporaryLogPath } from "../../src/diagnostics/session-log.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..", "..");
@@ -172,7 +176,7 @@ const MIME = { ".html": "text/html", ".js": "text/javascript", ".wasm": "applica
 
 export function startStaticServer(
   pageDir,
-  { requireAuth = false, crossOriginIsolation = true } = {}
+  { requireAuth = false, crossOriginIsolation = true, transformResponse, mapPath } = {}
 ) {
   const dir = path.join(REPO, pageDir);
   let debuggerFetchCount = 0;
@@ -195,7 +199,8 @@ export function startStaticServer(
       return;
     }
     try {
-      const body = readFileSync(path.join(dir, rel));
+      const original = readFileSync(path.join(dir, mapPath ? mapPath(rel) : rel));
+      const body = transformResponse ? transformResponse(rel, original, req) : original;
       res.writeHead(200, {
         "Content-Type": MIME[path.extname(rel)] ?? "application/octet-stream",
         ...(requireAuth && path.extname(rel) === ".html"
@@ -230,29 +235,30 @@ export function startStaticServer(
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// A logger that keeps the tail of the debug trace in memory. Debug lines are
-// emitted unconditionally at the call sites (see rdp/transport.ts) and dropped
-// by the console logger unless verbose, so recording here costs nothing in a
-// normal run and gives an attach that times out something to say beyond "30s
-// elapsed": the last RDP exchange before it stopped making progress.
+// Use the production transcript writer, plus a short tail and current setup
+// state for assertion messages. Verbose echo does not control file recording.
 export function tracingLogger(keep = 20) {
+  // One production transcript per attempt. Keep it even when a later retry or
+  // test succeeds; process exit closes the writer and flushes its final records.
+  const transcript = openSessionLog(temporaryLogPath(), process.argv.slice(1));
   const lines = [];
   const states = new Map();
   const bounded = (line) =>
     line.length > 240 ? `${line.slice(0, 240)}… (${line.length} chars)` : line;
   const record = (line) => {
-    // Trace lines carry whole RDP payloads: a `source`/`substring` reply is the
-    // full text of a script. What matters here is which exchange came last, so
-    // keep the head of each line — 28 untruncated blowouts would bury the log.
+    transcript.record("debug", line);
+    // Bound assertion output, not the transcript. Large source replies should
+    // not bury the operation state when a deadline prints its recent tail.
     lines.push(bounded(line));
     if (lines.length > keep) lines.shift();
   };
   const echo = process.env.E2E_VERBOSE ? (level, m) => console.error(`[${level}] ${m}`) : () => {};
   return {
-    // State summaries are evaluated when the deadline fires and always occupy
-    // the end of the retained tail. This keeps slow-moving facts such as the
-    // active setup stage and per-channel byte counts from being evicted by a
-    // burst of RDP packets immediately before a hang.
+    logPath: transcript.path,
+    flush: () => transcript.flush(),
+    close: () => transcript.close(),
+    // Current setup state survives packet bursts. The session also records
+    // production RDP and bridge snapshots before collecting this tail.
     tail: () => {
       const stateLines = [...states].map(([key, value]) =>
         bounded(`[state] ${key}: ${typeof value === "function" ? value() : value}`)
@@ -270,7 +276,10 @@ export function tracingLogger(keep = 20) {
       record(m);
       echo("debug", m);
     },
-    info: (m) => echo("info", m),
+    info: (m) => {
+      record(`INFO ${m}`);
+      echo("info", m);
+    },
     warn: (m) => {
       record(`WARN ${m}`);
       console.error(`[warn] ${m}`);
@@ -282,11 +291,11 @@ export function tracingLogger(keep = 20) {
   };
 }
 
-// A Firefox launch can occasionally wedge without returning an RDP error. A
-// deadline cleans that attempt up, but retrying only `process attach` cannot
-// recover because the browser and LLDB worker from that attempt are already
-// unusable. Retry the factory so every attempt gets a fresh browser, worker,
-// client, and set of transport sockets.
+// A setup deadline is retryable only after its attempt has fully cleaned up.
+export class SessionDeadlineError extends Error {}
+
+// Retry classified connection failures and cleaned-up deadlines with fresh
+// browser/LLDB lifetimes. Protocol errors, assertions and failed cleanup stop here.
 export async function retrySessionSetup(factory, maxAttempts = 3, { quiet = false } = {}) {
   const errors = [];
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -294,10 +303,9 @@ export async function retrySessionSetup(factory, maxAttempts = 3, { quiet = fals
       return await factory();
     } catch (err) {
       errors.push(err);
-      // Surface each consumed attempt: a retry that succeeds otherwise leaves
-      // no trace but a slow test, which is how a high setup-failure rate stays
-      // invisible for weeks. Quiet for this helper's own test, whose synthetic
-      // failures would otherwise read as real ones in a CI log.
+      const retryable = isTransientConnectionError(err) || err instanceof SessionDeadlineError;
+      // Keep recovered failures visible. Only this helper's injected-error tests
+      // suppress output, so synthetic failures do not resemble real CI failures.
       if (!quiet) {
         // Prefix every line, not just the first: node delivers a multi-line
         // write as one stderr event per line, and the e2e reporter only lets
@@ -306,162 +314,19 @@ export async function retrySessionSetup(factory, maxAttempts = 3, { quiet = fals
           .split("\n")
           .join("\n[harness]   ");
         process.stderr.write(
-          `[harness] session setup attempt ${attempt}/${maxAttempts} failed: ${detail}\n`
+          `[harness] session setup attempt ${attempt}/${maxAttempts} failed (retryable=${retryable}): ${detail}\n`
         );
       }
+      if (!retryable) break;
       if (attempt < maxAttempts) await sleep(250);
     }
   }
-  throw new AggregateError(errors, `session setup failed after ${maxAttempts} attempts`);
+  throw new AggregateError(errors, `session setup failed after ${errors.length} attempts`);
 }
 
 // lldb::ReturnStatus: values below this are Invalid/Started/Success*; this
 // and above are Failed/Quit. sessionCommand()'s `status` is that raw enum.
-export const LLDB_FAILED_STATUS = 6;
-
-// Retain packet summaries at the TCP bridge instead of enabling the gdbstub's
-// very verbose Rust trace. This stays close to the wire, has negligible impact
-// on timing, and records the last complete request and response even when RSP
-// packets are split across TCP chunks.
-function rspPacketTracer(trace, label, direction) {
-  let buffered = Buffer.alloc(0);
-  let lastPacket = "none";
-  trace?.state(`rsp ${label} ${direction}`, () => lastPacket);
-
-  return (data) => {
-    if (!trace) return;
-    buffered = Buffer.concat([buffered, Buffer.from(data)]);
-    for (;;) {
-      const start = buffered.indexOf(0x24); // '$'
-      if (start === -1) {
-        buffered = Buffer.alloc(0); // acknowledgements and interrupts
-        return;
-      }
-      if (start > 0) buffered = buffered.subarray(start);
-
-      let escaped = false;
-      let hash = -1;
-      for (let i = 1; i < buffered.length; i++) {
-        const byte = buffered[i];
-        if (escaped) {
-          escaped = false;
-        } else if (byte === 0x7d) {
-          escaped = true;
-        } else if (byte === 0x23) {
-          hash = i;
-          break;
-        }
-      }
-      if (hash === -1 || buffered.length < hash + 3) return;
-
-      const payload = buffered.subarray(1, hash).toString("latin1");
-      const printable = payload.replace(/[^\x20-\x7e]/g, ".");
-      const summary =
-        printable.length <= 160
-          ? printable
-          : `${printable.slice(0, 160)}… (${payload.length} byte payload)`;
-      const checksum = buffered.toString("latin1", hash + 1, hash + 3);
-      lastPacket = `$${summary}#${checksum}`;
-      trace.mark(`[bridge ${label}] ${direction} RSP ${lastPacket}`);
-      buffered = buffered.subarray(hash + 3);
-    }
-  };
-}
-
-// Bridge a localhost TCP port to an in-process wasm-LLDB channel, tracking
-// the socket in `sockets` so callers can force-close it on shutdown. Shared
-// by both harnesses' platform/per-tab connections.
-export async function bridgeTcp(client, sockets, port, { trace, label = `tcp-${port}` } = {}) {
-  const startedAt = Date.now();
-  let channelId;
-  let tcpState = "creating";
-  let lldbToTcpChunks = 0;
-  let lldbToTcpBytes = 0;
-  let tcpToLldbChunks = 0;
-  let tcpToLldbBytes = 0;
-  let tcpToLldbWritesCompleted = 0;
-  let tcpToLldbBytesAccepted = 0;
-  let tcpToLldbWritesPending = 0;
-  let lastActivityAt = startedAt;
-  let lastError = "none";
-  const summary = () =>
-    `channel=${channelId ?? "pending"} tcp=${tcpState} ` +
-    `LLDB->TCP=${lldbToTcpChunks} chunks/${lldbToTcpBytes} bytes ` +
-    `TCP->LLDB=${tcpToLldbChunks} chunks/${tcpToLldbBytes} bytes ` +
-    `LLDB-writes=${tcpToLldbWritesCompleted} completed/${tcpToLldbBytesAccepted} bytes-accepted/${tcpToLldbWritesPending} pending ` +
-    `last-activity=${Date.now() - lastActivityAt}ms-ago error=${lastError}`;
-  trace?.state(`bridge ${label}`, summary);
-  trace?.mark(`[bridge ${label}] creating LLDB channel for TCP port ${port}`);
-  const traceLldbToTcp = rspPacketTracer(trace, label, "LLDB->TCP");
-  const traceTcpToLldb = rspPacketTracer(trace, label, "TCP->LLDB");
-
-  channelId = await client.createChannel();
-  trace?.mark(`[bridge ${label}] created LLDB channel ${channelId}`);
-  const socket = net.connect(port, "127.0.0.1");
-  sockets.add(socket);
-  socket.setNoDelay(true);
-  socket.on("data", (d) => {
-    tcpToLldbChunks++;
-    tcpToLldbBytes += d.length;
-    lastActivityAt = Date.now();
-    if (tcpToLldbChunks === 1)
-      trace?.mark(`[bridge ${label}] first TCP->LLDB data (${d.length} bytes)`);
-    traceTcpToLldb(d);
-    tcpToLldbWritesPending++;
-    void client
-      .channelServerWrite(channelId, new Uint8Array(d))
-      .then((written) => {
-        tcpToLldbWritesPending--;
-        tcpToLldbWritesCompleted++;
-        tcpToLldbBytesAccepted += written;
-        if (written !== d.length) {
-          lastError = `TCP->LLDB partial write: accepted ${written}/${d.length} bytes`;
-          trace?.mark(`[bridge ${label}] ${lastError}`);
-        }
-      })
-      .catch((err) => {
-        tcpToLldbWritesPending--;
-        lastError = `TCP->LLDB write: ${err instanceof Error ? err.message : String(err)}`;
-        trace?.mark(`[bridge ${label}] ${lastError}`);
-      });
-  });
-  socket.on("connect", () => {
-    tcpState = "connected";
-    lastActivityAt = Date.now();
-    trace?.mark(`[bridge ${label}] TCP connected to 127.0.0.1:${port}`);
-  });
-  socket.on("close", () => {
-    tcpState = "closed";
-    lastActivityAt = Date.now();
-    trace?.mark(`[bridge ${label}] TCP closed`);
-  });
-  socket.on("error", (err) => {
-    tcpState = "error";
-    lastError = err.message;
-    lastActivityAt = Date.now();
-    trace?.mark(`[bridge ${label}] TCP error: ${err.message}`);
-  });
-  // Register before bridgeChannel: on loopback the TCP handshake completes
-  // while bridgeChannel awaits, and a post-await socket.once("connect") misses
-  // the already-fired event, leaving the promise permanently unresolved.
-  const connected = new Promise((resolve, reject) => {
-    socket.once("connect", resolve);
-    socket.once("error", reject);
-  });
-  await client.bridgeChannel(channelId, (data) => {
-    lldbToTcpChunks++;
-    lldbToTcpBytes += data.length;
-    lastActivityAt = Date.now();
-    if (lldbToTcpChunks === 1)
-      trace?.mark(`[bridge ${label}] first LLDB->TCP data (${data.length} bytes)`);
-    traceLldbToTcp(data);
-    void socket.write(Buffer.from(data));
-  });
-  trace?.mark(`[bridge ${label}] LLDB channel ${channelId} drain registered`);
-  await connected;
-  trace?.mark(`[bridge ${label}] active`);
-  return channelId;
-}
+export { LLDB_FAILED_STATUS };
 
 // Select the gdb-remote platform and connect it to a bridged channel.
 export async function platformConnect(client, channelId, trace) {
@@ -473,39 +338,35 @@ export async function platformConnect(client, channelId, trace) {
   trace?.stage(`platform connected on channel ${channelId}`);
 }
 
-// Cold launch + wasm load can exceed the attach timeout; retry a few times.
-export async function attachWithRetry(client, maxAttempts = 4, trace) {
-  let lastErr = "";
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    trace?.stage(`submitting process attach attempt ${attempt + 1}/${maxAttempts}`);
-    const res = await client.sessionCommand("process attach --plugin wasm --pid 1");
-    trace?.stage(
-      `process attach attempt ${attempt + 1}/${maxAttempts} returned status ${res.status}`
-    );
-    if (res.status < LLDB_FAILED_STATUS) {
-      const st = await client.sessionState();
-      if (st.reason !== "none" && st.reason !== "exited") {
-        trace?.stage(`process attached and stopped (${st.reason})`);
-        return;
-      }
-      lastErr = `attach left process in state ${st.reason}`;
-    } else {
-      lastErr = res.error;
-    }
-    await sleep(1000);
-  }
-  throw new Error(`process attach failed after retries: ${lastErr}`);
+// Share production attach classification: only observed replacement can retry.
+export async function attachWithRetry(client, maxAttempts = 4, trace, navigationRevision) {
+  trace?.stage("submitting process attach");
+  await attachLldb(client, 1, { attempts: maxAttempts, logger: trace, navigationRevision });
+  trace?.stage("process attached and stopped");
 }
 
 // Shared shutdown sequence for both harnesses' session classes.
-export async function shutdownSession({ sockets, handle, client, staticServer }) {
-  for (const s of sockets) s.destroy();
-  await handle?.shutdown().catch(() => {});
-  await client.destroy(); // await full worker teardown before the next attach
+export async function shutdownSession({ bridge, handle, client, staticServer, debugFiles }) {
+  const failures = [];
+  for (const work of [
+    () => bridge.close(),
+    () => handle?.shutdown(),
+    () => client.destroy(),
+    () => debugFiles?.close(),
+  ]) {
+    try {
+      await work();
+    } catch (error) {
+      failures.push(error);
+    }
+  }
   // close() alone waits for open connections to end naturally, which can
   // hang forever on a lingering keep-alive socket; force them closed too.
-  staticServer?.server.closeAllConnections();
-  await new Promise((resolve) => staticServer?.server.close(resolve));
+  if (staticServer) {
+    staticServer.server.closeAllConnections();
+    await new Promise((resolve) => staticServer.server.close(resolve));
+  }
+  if (failures.length) throw new AggregateError(failures, "session shutdown failed");
 }
 
 // Unconditional, direct SIGKILL of the Firefox process group, independent of
@@ -543,7 +404,7 @@ export async function withDeadline(session, work, ms, trace, operation = "Firefo
       const where = tail.length
         ? `; last ${tail.length} trace lines:\n${tail.join("\n")}`
         : " (no trace captured)";
-      reject(new Error(`timed out after ${ms}ms waiting for ${operation}${where}`));
+      reject(new SessionDeadlineError(`timed out after ${ms}ms waiting for ${operation}${where}`));
     }, ms);
   });
   try {
@@ -578,6 +439,11 @@ export async function withDeadline(session, work, ms, trace, operation = "Firefo
     clearTimeout(cleanupTimer);
     trace?.mark(`[cleanup] session shutdown ${cleanupOutcome}`);
     if (err instanceof Error) err.message += `\ncleanup: session shutdown ${cleanupOutcome}`;
+    trace?.flush();
+    if (err instanceof Error && trace?.logPath)
+      err.message += `\nSession transcript retained at ${trace.logPath}`;
+    if (cleanupOutcome !== "completed")
+      throw new AggregateError([err], `session cleanup ${cleanupOutcome}; retry is unsafe`);
     throw err;
   }
 }
@@ -604,16 +470,22 @@ export class Session {
   #client;
   #handle;
   #staticServer;
-  #sockets = new Set();
+  #moduleFetches = 0;
+  #debugFiles;
+  #navigationRevision = 0;
+  #bridge;
   #rdpSession;
   #trace;
-  #tabBridgeSerial = 0;
+  #startup;
+  #startupAbort = new AbortController();
+  #shutdown;
 
   constructor(client, handle, staticServer, trace) {
     this.#client = client;
     this.#handle = handle;
     this.#staticServer = staticServer;
     this.#trace = trace;
+    this.#bridge = new EmbeddedLldbBridge(client, trace);
   }
 
   // Fire-and-forget JS evaluation on the page, for use *after* attach (the
@@ -643,6 +515,10 @@ export class Session {
     return this.#staticServer?.debuggerFetchCount() ?? 0;
   }
 
+  moduleFetchCount() {
+    return this.#moduleFetches;
+  }
+
   // Whether Firefox paused before LLDB armed its next all-stop wait. Navigation
   // regressions use this to make the otherwise timing-sensitive stale-pause
   // scenario deterministic before replacing that target again.
@@ -666,10 +542,16 @@ export class Session {
 
   logState(event = "snapshot") {
     this.#rdpSession?.logState(event);
+    this.#bridge.logState();
   }
 
   diagnosticTail() {
     return this.#trace?.tail() ?? [];
+  }
+
+  transcriptPath() {
+    this.#trace.flush();
+    return this.#trace.logPath;
   }
 
   // An absolute URL for another file served by this fixture's static server
@@ -679,28 +561,47 @@ export class Session {
     return `http://127.0.0.1:${this.#staticServer.port}/${rel}`;
   }
 
-  #bridgeTcp(port, label = `tab-${++this.#tabBridgeSerial}`) {
-    return bridgeTcp(this.#client, this.#sockets, port, { trace: this.#trace, label });
-  }
-
   // Launch headless Firefox at the fixture, attach via the platform, and
   // return a Session. `fire` overrides the fixture's default fire expression
   // (used by JS tests that need a second deferred call, e.g.
   // "runFactorial(); setTimeout(...)").
   static async attach(
     fxName,
-    { headless = true, fire, channel = "release", setupTimeoutMs = 30_000, setupAttempts = 3 } = {}
+    {
+      headless = true,
+      fire,
+      channel = "release",
+      setupTimeoutMs = 30_000,
+      setupAttempts = 3,
+      transformResponse,
+      mapPath,
+    } = {}
   ) {
     const fx = FIXTURES[fxName];
     if (!fx) throw new Error(`unknown fixture: ${fxName}`);
     return retrySessionSetup(
-      () => Session.#attachOnce(fx, { headless, fire, channel, setupTimeoutMs }),
+      () =>
+        Session.#attachOnce(fx, {
+          headless,
+          fire,
+          channel,
+          setupTimeoutMs,
+          transformResponse,
+          mapPath,
+        }),
       setupAttempts
     );
   }
 
-  static async #attachOnce(fx, { headless, fire, channel, setupTimeoutMs }) {
-    const staticServer = await startStaticServer(fx.pageDir, { requireAuth: fx.requireAuth });
+  static async #attachOnce(
+    fx,
+    { headless, fire, channel, setupTimeoutMs, transformResponse, mapPath }
+  ) {
+    const staticServer = await startStaticServer(fx.pageDir, {
+      requireAuth: fx.requireAuth,
+      transformResponse,
+      mapPath,
+    });
     const url = `http://127.0.0.1:${staticServer.port}/index.html`;
 
     const trace = tracingLogger();
@@ -708,9 +609,10 @@ export class Session {
     trace.stage("LLDB client ready");
     // Serve each module's separate DWARF file from the fixture's own server.
     // Nothing else is served: LLDB has no access to the host source tree here.
-    const debugFiles = new DebugFileRegistry();
+    const debugFiles = new DebugFileRegistry(trace);
     client.setFileProvider((path) => debugFiles.read(path));
     const session = new Session(client, null, staticServer, trace);
+    session.#debugFiles = debugFiles;
 
     return withDeadline(
       session,
@@ -737,20 +639,32 @@ export class Session {
           "--fire",
           fire ?? fx.fire,
         ]);
-        const handle = await startPlatformServer(args, {
-          wrapConnectPort: (port) => session.#bridgeTcp(port),
+        const handle = await (session.#startup = startPlatformServer(args, {
+          signal: session.#startupAbort.signal,
+          wrapConnectPort: (port) => session.#bridge.bridgeTcp(port),
           debugFiles,
           logger: trace,
           onRdpSession: (rdpSession) => {
             session.#rdpSession = rdpSession;
+            const fetch = rdpSession.fetchModuleBytes.bind(rdpSession);
+            rdpSession.fetchModuleBytes = (...args) => {
+              session.#moduleFetches++;
+              return fetch(...args);
+            };
           },
-        });
+          onSession: (rdpSession) => {
+            rdpSession.on("navigated", () => {
+              session.#navigationRevision++;
+            });
+          },
+        }));
         session.#handle = handle;
+        session.#startupAbort.signal.throwIfAborted();
         trace.stage(`platform server ready on TCP port ${handle.port}`);
 
-        const c0 = await session.#bridgeTcp(handle.port, "platform");
+        const c0 = await session.#bridge.bridgeTcp(handle.port, "platform");
         await platformConnect(client, c0, trace);
-        await attachWithRetry(client, 4, trace);
+        await attachWithRetry(client, 4, trace, () => session.#navigationRevision);
         return session;
       })(),
       setupTimeoutMs,
@@ -768,11 +682,11 @@ export class Session {
     const rdpPort = await freePort();
     const args = parseCliArgs(["--connect", "--port", "0", "--rdp-port", String(rdpPort)]);
     const handle = await startPlatformServer(args, {
-      wrapConnectPort: (port) => session.#bridgeTcp(port),
+      wrapConnectPort: (port) => session.#bridge.bridgeTcp(port),
       logger: trace,
     });
     session.#handle = handle;
-    const c0 = await session.#bridgeTcp(handle.port, "platform");
+    const c0 = await session.#bridge.bridgeTcp(handle.port, "platform");
     await platformConnect(client, c0, trace);
     return session;
   }
@@ -780,8 +694,8 @@ export class Session {
   // Attach to a fixture, set a breakpoint on its target function, and
   // continue until stopped there. Continues past signals (e.g. SIGSEGV from
   // -fwasm-exceptions throw) until a breakpoint or terminal state is reached.
-  static async stoppedAtBreakpoint(fxName) {
-    const session = await Session.attach(fxName);
+  static async stoppedAtBreakpoint(fxName, options) {
+    const session = await Session.attach(fxName, options);
     const fx = FIXTURES[fxName];
     return withDeadline(
       session,
@@ -870,12 +784,21 @@ export class Session {
   }
 
   shutdown() {
-    return shutdownSession({
-      sockets: this.#sockets,
-      handle: this.#handle,
-      client: this.#client,
-      staticServer: this.#staticServer,
-    });
+    this.#startupAbort.abort(new Error("session startup cancelled by shutdown"));
+    return (this.#shutdown ??= (async () => {
+      let rollbackError;
+      await this.#startup?.catch((error) => {
+        if (error instanceof AggregateError) rollbackError = error;
+      });
+      await shutdownSession({
+        bridge: this.#bridge,
+        handle: this.#handle,
+        client: this.#client,
+        staticServer: this.#staticServer,
+        debugFiles: this.#debugFiles,
+      });
+      if (rollbackError) throw rollbackError;
+    })());
   }
 
   forceKillFirefox() {

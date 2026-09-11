@@ -6,6 +6,27 @@ on:
   pull_request:
 
 jobs:
+  component:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Regenerate gdbstub from locked Rust and jco inputs
+        run: npm run component
+      - name: Verify checked-in bindings and wasm match their sources
+        run: git diff --exit-code -- src/gdb/generated
+      - name: Regenerate source-map converter from locked inputs
+        run: npm run sourcemap
+      - name: Verify source-map bindings and wasm match their sources
+        run: git diff --exit-code -- src/sourcemap/generated
+      - name: Test source-map conversion
+        run: npm run test:rust
+
   ci:
     runs-on: ubuntu-latest
     timeout-minutes: 10

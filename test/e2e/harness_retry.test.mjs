@@ -4,15 +4,16 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import net from "node:net";
-import { bridgeTcp, retrySessionSetup, tracingLogger, withDeadline } from "./harness.mjs";
+import { readFileSync } from "node:fs";
+import { retrySessionSetup, tracingLogger, withDeadline } from "./harness.mjs";
 
 test("session setup retries with a fresh attempt after transient failures", async () => {
   let attempts = 0;
   const session = await retrySessionSetup(
     async () => {
       attempts++;
-      if (attempts < 3) throw new Error(`transient failure ${attempts}`);
+      if (attempts < 3)
+        throw Object.assign(new Error(`transient failure ${attempts}`), { code: "ECONNRESET" });
       return { attempt: attempts };
     },
     3,
@@ -26,7 +27,7 @@ test("session setup reports every failure after exhausting retries", async () =>
   await assert.rejects(
     retrySessionSetup(
       async () => {
-        throw new Error("still wedged");
+        throw Object.assign(new Error("still disconnected"), { code: "ECONNRESET" });
       },
       2,
       { quiet: true }
@@ -40,69 +41,32 @@ test("session setup reports every failure after exhausting retries", async () =>
   );
 });
 
-test("bridge diagnostics retain channel state and byte flow", async (t) => {
-  let peer;
-  let resolveTcpReceived;
-  const tcpReceived = new Promise((resolve) => {
-    resolveTcpReceived = resolve;
-  });
-  const server = net.createServer((socket) => {
-    peer = socket;
-    socket.on("data", (data) => resolveTcpReceived(data));
-    // Write the response in pieces; TCP is allowed to coalesce them.
-    socket.write("+$E");
-    socket.write("79#b5");
-  });
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolve);
-  });
-
-  const sockets = new Set();
-  t.after(async () => {
-    peer?.destroy();
-    for (const socket of sockets) socket.destroy();
-    await new Promise((resolve) => server.close(resolve));
-  });
-
-  let sendFromLldb;
-  let resolveLldbReceived;
-  const lldbReceived = new Promise((resolve) => {
-    resolveLldbReceived = resolve;
-  });
-  const client = {
-    createChannel: async () => 7,
-    bridgeChannel: async (_channelId, onData) => {
-      sendFromLldb = onData;
-    },
-    channelServerWrite: async (_channelId, data) => {
-      resolveLldbReceived(Buffer.from(data));
-      return data.length;
-    },
-  };
-  const trace = tracingLogger();
-  const port = server.address().port;
-  const channelId = await bridgeTcp(client, sockets, port, { trace, label: "platform" });
-  assert.equal(channelId, 7);
-
-  await lldbReceived;
-  sendFromLldb(new TextEncoder().encode("$m40000001000001a1,400#65"));
-  await tcpReceived;
-  await new Promise((resolve) => setImmediate(resolve));
-
-  const tail = trace.tail().join("\n");
-  assert.match(tail, /\[bridge platform\] first TCP->LLDB data/);
-  assert.match(tail, /\[bridge platform\] first LLDB->TCP data \(25 bytes\)/);
-  assert.match(
-    tail,
-    /\[state\] bridge platform: channel=7 tcp=connected LLDB->TCP=1 chunks\/25 bytes TCP->LLDB=\d+ chunks\/8 bytes LLDB-writes=\d+ completed\/8 bytes-accepted\/0 pending/
-  );
-  assert.match(tail, /\[state\] rsp platform LLDB->TCP: \$m40000001000001a1,400#65/);
-  assert.match(tail, /\[state\] rsp platform TCP->LLDB: \$E79#b5/);
+test("session setup never retries assertions or unclassified failures", async () => {
+  for (const error of [
+    new Error("unexpected protocol reply"),
+    new assert.AssertionError({ message: "wrong value" }),
+  ]) {
+    let attempts = 0;
+    await assert.rejects(
+      retrySessionSetup(
+        async () => {
+          attempts++;
+          throw error;
+        },
+        3,
+        { quiet: true }
+      ),
+      /after 1 attempts/
+    );
+    assert.equal(attempts, 1);
+  }
 });
 
-test("deadline diagnostics report the active stage and cleanup outcome", async () => {
+test("deadline diagnostics retain the full attempt, active stage, and cleanup outcome", async (t) => {
   const trace = tracingLogger();
+  t.after(() => trace.close());
+  trace.debug("first attempt diagnostic outside the recent tail");
+  for (let i = 0; i < 30; i++) trace.debug(`packet ${i}`);
   trace.stage("submitting process attach attempt 1/4");
   trace.state("bridge tab-1", "channel=2 tcp=connected LLDB->TCP=0 chunks/0 bytes");
   const session = {
@@ -120,6 +84,10 @@ test("deadline diagnostics report the active stage and cleanup outcome", async (
     assert.match(err.message, /\[state\] rdp.deadline/);
     assert.match(err.message, /"activeGeneration":0/);
     assert.match(err.message, /cleanup: session shutdown completed/);
+    assert.ok(err.message.includes(trace.logPath));
+    const contents = readFileSync(trace.logPath, "utf8");
+    assert.match(contents, /first attempt diagnostic outside the recent tail/);
+    assert.match(contents, /session shutdown completed/);
     return true;
   });
 });

@@ -2,12 +2,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-// The LLDB platform server.
-//
-// Models the browser as an LLDB platform: tabs are processes and qLaunchGDBServer
-// spawns a per-tab GDB server. Implements the platform packet set documented in
-// lldb/docs/resources/lldbplatformpackets.md. Wire formats were validated
-// against GDBRemoteCommunicationClient.cpp.
+// Models tabs as platform processes and launches per-tab servers over RSP.
+// Packet shapes follow LLDB's lldbplatformpackets.md and client implementation.
 
 import os from "node:os";
 import type { RspHandler, RspSession } from "../protocol/rsp-server.js";
@@ -44,17 +40,18 @@ export class PlatformServer implements RspHandler {
   #wrapConnectPort?: (port: number) => Promise<number>;
 
   // Stable mapping between synthetic integer PIDs and Firefox tab actors.
-  #tabPidMap = new Map<number, string>();
-  #tabActorPid = new Map<string, number>();
+  #tabPidMap = new Map<number, number>();
+  #tabIdPid = new Map<number, number>();
   #nextTabPid = 1;
+  #liveTabIds = new Set<number>();
 
-  // Deduplication of per-tab GDB server launches. A single promise per actor
+  // Deduplication of per-tab GDB server launches. A single promise per tabId
   // is shared across concurrent qLaunchGDBServer calls for the same tab, so a
   // retry that races with an in-flight launch re-uses the same server rather
   // than opening a second RDP session. The full response (including the
   // wrapped connect port) is stored so wrapConnectPort is also called once.
-  #serverByActor = new Map<string, Promise<{ pid: number; connectPort: number }>>();
-  #actorByServerPid = new Map<number, string>();
+  #serverByTab = new Map<number, Promise<{ pid: number; connectPort: number }>>();
+  #tabByServerPid = new Map<number, number>();
 
   // State for the platform's single supported LLDB connection.
   #workingDir = process.cwd();
@@ -68,35 +65,42 @@ export class PlatformServer implements RspHandler {
     this.#wrapConnectPort = deps.wrapConnectPort;
   }
 
-  #tabPid(actor: string): number {
-    let pid = this.#tabActorPid.get(actor);
+  #tabPid(tabId: number): number {
+    let pid = this.#tabIdPid.get(tabId);
     if (pid === undefined) {
       pid = this.#nextTabPid++;
-      this.#tabActorPid.set(actor, pid);
-      this.#tabPidMap.set(pid, actor);
+      this.#tabIdPid.set(tabId, pid);
+      this.#tabPidMap.set(pid, tabId);
     }
     return pid;
   }
 
-  /** Get or assign a stable integer PID for a tab actor. */
-  tabPid(actor: string): number {
-    return this.#tabPid(actor);
+  /** Get or assign a stable integer PID for Firefox's connection-independent browserId. */
+  tabPid(tabId: number): number {
+    return this.#tabPid(tabId);
   }
 
   /** Whether a PID was assigned to a tab advertised by this platform. */
   hasTabPid(pid: number): boolean {
-    return this.#tabPidMap.has(pid);
+    const id = this.#tabPidMap.get(pid);
+    return id !== undefined && this.#liveTabIds.has(id);
+  }
+
+  updateTabs(tabs: TabInfo[]): void {
+    this.#liveTabIds = new Set(tabs.map((tab) => tab.id));
+    for (const tab of tabs) this.#tabPid(tab.id);
   }
 
   async #listProcesses(): Promise<ProcessInfo[]> {
     if (!this.#listTabs) return [];
     try {
       const tabs = await this.#listTabs();
+      this.updateTabs(tabs);
       const uid = typeof process.getuid === "function" ? process.getuid() : 0;
       const gid = typeof process.getgid === "function" ? process.getgid() : 0;
       return tabs.map((tab) => ({
-        pid: this.#tabPid(tab.actor),
-        name: tab.url || tab.actor,
+        pid: this.#tabPid(tab.id),
+        name: tab.url || String(tab.id),
         triple: "wasm32-unknown-unknown-wasm",
         parentPid: 0,
         uid,
@@ -135,10 +139,10 @@ export class PlatformServer implements RspHandler {
     if (data === "qQueryGDBServer") return this.#queryGdbServer();
     if (data.startsWith("qKillSpawnedProcess:")) {
       const pid = parseInt(data.slice("qKillSpawnedProcess:".length), 10);
-      const actor = this.#actorByServerPid.get(pid);
-      if (actor) {
-        this.#serverByActor.delete(actor);
-        this.#actorByServerPid.delete(pid);
+      const tabId = this.#tabByServerPid.get(pid);
+      if (tabId) {
+        this.#serverByTab.delete(tabId);
+        this.#tabByServerPid.delete(pid);
       }
       return (await this.#spawner.kill(pid)) ? "OK" : "E01";
     }
@@ -205,19 +209,7 @@ export class PlatformServer implements RspHandler {
     const list = await this.#listProcesses();
     const match = list.find((p) => p.pid === pid);
     if (match) return this.#encodeProcess(match);
-    // Fall back to the stable map for PIDs assigned in a previous listing.
-    const actor = this.#tabPidMap.get(pid);
-    if (!actor) return "E01";
-    const uid = typeof process.getuid === "function" ? process.getuid() : 0;
-    const gid = typeof process.getgid === "function" ? process.getgid() : 0;
-    return this.#encodeProcess({
-      pid,
-      name: actor,
-      triple: "wasm32-unknown-unknown-wasm",
-      parentPid: 0,
-      uid,
-      gid,
-    });
+    return "E01";
   }
 
   async #firstProcessInfo(data: string): Promise<string> {
@@ -240,37 +232,58 @@ export class PlatformServer implements RspHandler {
 
   async #launchGdbServer(data: string): Promise<string> {
     // data may be "qLaunchGDBServer;host:..;port:..;pid:N" when triggered by
-    // `process attach --pid N`. Extract the pid and resolve it to a tab actor.
+    // `process attach --pid N`. Extract the pid and resolve it to a tab tabId.
     const params = parseKeyVals(data.includes(";") ? data.slice(data.indexOf(";") + 1) : "");
     const pidParam = params.get("pid");
-    const tabActor = pidParam !== undefined ? this.#tabPidMap.get(Number(pidParam)) : undefined;
-    const url = tabActor ? undefined : this.#resolveLaunchUrl();
+    if (pidParam !== undefined) {
+      await this.#listProcesses();
+      if (!/^\d+$/.test(pidParam) || !this.hasTabPid(Number(pidParam))) return "E01";
+    }
+    const tabId = pidParam !== undefined ? this.#tabPidMap.get(Number(pidParam)) : undefined;
+    const url = tabId ? undefined : this.#resolveLaunchUrl();
 
-    if (tabActor) {
-      const existing = this.#serverByActor.get(tabActor);
+    if (tabId) {
+      const existing = this.#serverByTab.get(tabId);
       if (existing) {
         const { pid, connectPort } = await existing;
         return `pid:${pid};port:${connectPort};`;
       }
-      const responseP = this.#spawner
-        .launch(0, url, tabActor)
-        .then(async (s) => {
-          this.#actorByServerPid.set(s.pid, tabActor);
-          const connectPort = this.#wrapConnectPort ? await this.#wrapConnectPort(s.port) : s.port;
-          return { pid: s.pid, connectPort };
+      const responseP = this.#launchServer(url, tabId)
+        .then((server) => {
+          this.#tabByServerPid.set(server.pid, tabId);
+          return server;
         })
         .catch((err) => {
-          this.#serverByActor.delete(tabActor);
+          this.#serverByTab.delete(tabId);
           throw err as Error;
         });
-      this.#serverByActor.set(tabActor, responseP);
+      this.#serverByTab.set(tabId, responseP);
       const { pid, connectPort } = await responseP;
       return `pid:${pid};port:${connectPort};`;
     }
 
-    const { pid, port } = await this.#spawner.launch(0, url, undefined);
-    const connectPort = this.#wrapConnectPort ? await this.#wrapConnectPort(port) : port;
+    const { pid, connectPort } = await this.#launchServer(url);
     return `pid:${pid};port:${connectPort};`;
+  }
+
+  async #launchServer(url?: string, tabId?: number): Promise<{ pid: number; connectPort: number }> {
+    const { pid, port } = await this.#spawner.launch(0, url, tabId);
+    try {
+      const connectPort = this.#wrapConnectPort ? await this.#wrapConnectPort(port) : port;
+      if (!this.#spawner.list().some((server) => server.pid === pid))
+        throw new Error("GDB server stopped before connect port publication");
+      return { pid, connectPort };
+    } catch (error) {
+      try {
+        await this.#spawner.kill(pid);
+      } catch (rollbackError) {
+        throw new AggregateError(
+          [error, rollbackError],
+          "connect port setup and server rollback failed"
+        );
+      }
+      throw error;
+    }
   }
 
   #queryGdbServer(): string {

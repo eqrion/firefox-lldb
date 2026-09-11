@@ -2,11 +2,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-// Node-side interactive REPL for the embedded wasm LLDB. Owns the terminal so
-// we can offer line history (arrow keys), Ctrl-C interrupt of a running target,
-// async notices printed above the prompt, and `js` subcommands that query the
-// page over RDP. Lines are driven command-by-command through the off-worker
-// session API (LLDBClient.sessionCommand), not the wasm interpreter's own REPL.
+// Owns readline input, command serialization, console output and Ctrl-C routing.
+// Commands use embedded LLDB's off-worker session API; JS inspection uses RDP.
 
 import readline from "node:readline";
 import type { Readable, Writable } from "node:stream";
@@ -19,6 +16,8 @@ export interface ReplDeps {
   getSession: () => RdpWasmSession | undefined;
   input?: Readable;
   output?: Writable;
+  /** Private completion record for the PTY driver; not emitted on prompt redraw. */
+  promptMarker?: string;
   /** Called when the REPL exits (Ctrl-D, `quit`, or double Ctrl-C). */
   onExit?: () => void;
   /** Called when the user resumes the target (c/continue). */
@@ -70,6 +69,10 @@ export function runRepl(deps: ReplDeps): Repl {
   const write = (text: string): void => {
     output.write(text.endsWith("\n") ? text : text + "\n");
     deps.record?.("stdout", text);
+  };
+  const prompt = () => {
+    rl.prompt();
+    if (deps.promptMarker) output.write(deps.promptMarker);
   };
 
   // Print an async notice. While a command is running, the prompt isn't shown,
@@ -126,7 +129,7 @@ export function runRepl(deps: ReplDeps): Repl {
       }
     }
     draining = false;
-    if (!closed) rl.prompt();
+    if (!closed) prompt();
   }
 
   function onInterrupt(): void {
@@ -153,7 +156,7 @@ export function runRepl(deps: ReplDeps): Repl {
       lastSigintAt = Date.now();
       write("(^C again to quit)");
     }
-    rl.prompt();
+    prompt();
   }
 
   async function dispatch(cmd: string): Promise<void> {
@@ -315,7 +318,7 @@ export function runRepl(deps: ReplDeps): Repl {
   function start(banner?: string): void {
     ready = true;
     if (banner) write(banner);
-    rl.prompt();
+    prompt();
     if (queue.length) void drain();
   }
 

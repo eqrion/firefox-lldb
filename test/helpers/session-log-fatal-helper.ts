@@ -9,7 +9,7 @@
 // argv[2]: log file path
 // argv[3]: "uncaughtException" | "unhandledRejection"
 
-import { captureFatalErrors, openSessionLog } from "../../src/cli/session-log.js";
+import { captureFatalErrors, openSessionLog } from "../../src/diagnostics/session-log.js";
 
 const [, , logPath, mode] = process.argv;
 const sessionLog = openSessionLog(logPath!, process.argv.slice(2));

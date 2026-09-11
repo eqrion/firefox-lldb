@@ -97,6 +97,7 @@ export interface GetCharPrefResponse {
 
 export interface RdpTabForm {
   actor: string;
+  browserId?: number;
   url?: string;
   title?: string;
   selected?: boolean;
@@ -300,6 +301,7 @@ export const EVENTS = {
 } as const;
 
 export interface PauseEvent {
+  from?: string;
   why?: { type?: string };
   frame?: FrameForm;
 }
@@ -315,7 +317,7 @@ export interface PageErrorEvent {
 // --- higher-level session-derived shapes (not wire forms, but built from them) ---
 
 export interface TabInfo {
-  actor: string;
+  id: number;
   url: string;
   title: string;
 }
@@ -324,6 +326,9 @@ export interface TabInfo {
 export interface StoppedEvent {
   tid: number;
   pausePacket: PauseEvent;
+  generation: number;
+  stopId: number;
+  pausedTids: number[];
 }
 
 /** Render an RDP grip (console argument or binding value) as a display string. */

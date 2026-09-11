@@ -2,6 +2,7 @@
 
 mod addr;
 mod api;
+mod diagnostics;
 mod target;
 
 use crate::{
@@ -27,29 +28,6 @@ use wstd::{
     net::{TcpListener, TcpStream},
 };
 
-/// Forwards `log` records to the host via `log-line`, one call per record,
-/// so verbose output interleaves live with the host's own logging instead of
-/// going through WASI stderr (which Node's worker-thread stdio plumbing only
-/// flushes on exit, batching everything into one late burst).
-struct HostLogger;
-
-impl log::Log for HostLogger {
-    fn enabled(&self, _metadata: &log::Metadata) -> bool {
-        true
-    }
-
-    fn log(&self, record: &log::Record) {
-        api::log_line(&format!(
-            "{} {}: {}",
-            record.level(),
-            record.target(),
-            record.args()
-        ));
-    }
-
-    fn flush(&self) {}
-}
-
 /// Command-line options.
 #[derive(Parser)]
 struct Options {
@@ -67,7 +45,7 @@ impl api::exports::bytecodealliance::wasmtime::debugger::Guest for Component {
     fn debug(d: &api::Debuggee, args: Vec<String>) {
         let options = Options::parse_from(args);
         if options.verbose {
-            log::set_logger(&HostLogger).ok();
+            log::set_logger(&diagnostics::HostLogger).ok();
             log::set_max_level(log::LevelFilter::Trace);
         }
         let mut debugger = Debugger {
@@ -84,7 +62,7 @@ impl api::exports::bytecodealliance::wasmtime::debugger::Guest for Component {
         };
         wstd::runtime::block_on(async {
             if let Err(e) = debugger.run().await {
-                trace!("debugger exited with error: {e}");
+                panic!("debugger failed: {e:#}");
             }
         });
     }
@@ -93,6 +71,7 @@ impl api::exports::bytecodealliance::wasmtime::debugger::Guest for Component {
 pub(crate) struct ThreadState {
     pub current_pc: WasmAddr,
     pub frame_cache: Vec<api::Frame>,
+    pub frames_available: bool,
 }
 
 struct Debugger<'a> {
@@ -113,6 +92,15 @@ struct Debugger<'a> {
 }
 
 impl<'a> Debugger<'a> {
+    /// Validate the live frame before returning LLDB's possibly adjusted PC.
+    fn validated_pc(&self, tid: Tid) -> Option<WasmAddr> {
+        let thread = self.threads.get(&tid).filter(|thread| thread.frames_available)?;
+        if let Some(frame) = thread.frame_cache.first() {
+            self.addr_space.frame_to_pc(frame, self.debuggee)?;
+        }
+        Some(thread.current_pc)
+    }
+
     async fn run(&mut self) -> Result<()> {
         // Load module info and initial thread state from the debuggee. Modules
         // are pre-registered on the debuggee store before the Debuggee is
@@ -124,6 +112,7 @@ impl<'a> Debugger<'a> {
             .expect("Could not bind to TCP port");
 
         let bound_addr = listener.local_addr().expect("Could not get local address");
+        api::debugger_listening(bound_addr.port());
 
         api::print_debugger_info(&format!("Debugger listening on {}", bound_addr,));
         api::print_debugger_info(&format!(
@@ -235,21 +224,37 @@ impl<'a> Debugger<'a> {
                 continue;
             };
             let mut frames: Vec<api::Frame> = vec![];
-            let mut next = self.debuggee.exit_frames(n).into_iter().next();
+            let snapshot = self.debuggee.exit_frames(n);
+            let mut frames_available = snapshot.is_ok();
+            let mut next = snapshot.unwrap_or_default().into_iter().next();
             while let Some(f) = next {
-                next = f.parent_frame(self.debuggee).unwrap();
+                match f.parent_frame(self.debuggee) {
+                    Ok(parent) => next = parent,
+                    Err(_) => {
+                        frames_available = false;
+                        break;
+                    }
+                }
                 frames.push(f);
             }
-            let current_pc = frames
+            let observed_pc = frames
                 .first()
-                .map(|f| self.addr_space.frame_to_pc(f, self.debuggee))
-                .unwrap_or_else(|| WasmAddr::from_raw(0).unwrap());
+                .and_then(|f| self.addr_space.frame_to_pc(f, self.debuggee));
+            if !frames.is_empty() && observed_pc.is_none() {
+                frames_available = false;
+            }
+            if !frames_available {
+                frames.clear();
+            }
+            let current_pc = observed_pc.unwrap_or_else(|| WasmAddr::from_raw(0).unwrap());
             let ts = self.threads.entry(tid).or_insert(ThreadState {
                 current_pc: WasmAddr::from_raw(0).unwrap(),
                 frame_cache: vec![],
+                frames_available,
             });
             ts.current_pc = current_pc;
             ts.frame_cache = frames;
+            ts.frames_available = frames_available;
         }
         new_modules
     }
@@ -425,8 +430,7 @@ impl<'a> Debugger<'a> {
 struct Conn {
     buf: Vec<u8>,
     conn: TcpStream,
-    // Accumulates inbound bytes to reconstruct complete RSP frames for tracing.
-    trace_in: Vec<u8>,
+    trace_in: diagnostics::Inbound,
 }
 
 impl Conn {
@@ -434,13 +438,13 @@ impl Conn {
         Conn {
             buf: vec![],
             conn,
-            trace_in: vec![],
+            trace_in: diagnostics::Inbound::default(),
         }
     }
 
     async fn flush(&mut self) -> anyhow::Result<()> {
         if !self.buf.is_empty() {
-            log::trace!(">> {}", String::from_utf8_lossy(&self.buf));
+            diagnostics::outbound(&self.buf);
         }
         self.conn.write_all(&self.buf).await?;
         self.buf.clear();
@@ -455,47 +459,18 @@ impl Conn {
         }
         let b = buf[0];
         if log::log_enabled!(log::Level::Trace) {
-            self.log_inbound(b);
+            self.trace_in.push(b);
         }
         Ok(Some(b))
-    }
-
-    fn log_inbound(&mut self, b: u8) {
-        if self.trace_in.is_empty() {
-            match b {
-                b'+' => {
-                    log::trace!("<< +");
-                    return;
-                }
-                b'-' => {
-                    log::trace!("<< -");
-                    return;
-                }
-                0x03 => {
-                    log::trace!("<< interrupt");
-                    return;
-                }
-                _ => {}
-            }
-        }
-        self.trace_in.push(b);
-        // RSP packets are $<body>#<cc>. '#' cannot appear unescaped in the body,
-        // so the first '#' marks end-of-body; two bytes follow for the checksum.
-        if let Some(hash) = self.trace_in.iter().position(|&c| c == b'#') {
-            if self.trace_in.len() >= hash + 3 {
-                log::trace!("<< {}", String::from_utf8_lossy(&self.trace_in));
-                self.trace_in.clear();
-            }
-        }
     }
 }
 
 impl Drop for Conn {
     fn drop(&mut self) {
-        assert!(
-            self.buf.is_empty(),
-            "failed to async-flush before dropping connection write buffer"
-        );
+        self.trace_in.finish(true);
+        if !self.buf.is_empty() {
+            log::warn!("connection closed with {} unflushed bytes", self.buf.len());
+        }
     }
 }
 

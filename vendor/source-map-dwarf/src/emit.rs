@@ -5,34 +5,32 @@ use crate::{Options, Result, dwarf::DebugSection, wasm::ModuleInfo};
 /// We append rather than re-encode the module so all byte offsets in the
 /// original binary remain valid (source map columns are file-relative).
 ///
-/// Existing `.debug_*` sections and the `sourceMappingURL` section are dropped
-/// when `opts.keep_source_mapping_url` is false.
+/// Existing `.debug_*` sections are hidden by changing their first name byte.
+/// Hide `sourceMappingURL` too unless requested. Keeping their sizes preserves
+/// code offsets even when these custom sections precede the code section.
 pub fn append(
     wasm: &[u8],
     module: &ModuleInfo,
     sections: Vec<DebugSection>,
     opts: &Options,
 ) -> Result<Vec<u8>> {
-    // Build a sorted list of byte ranges to skip from the original bytes.
-    let mut skip_ranges: Vec<std::ops::Range<usize>> = module.existing_debug_ranges.clone();
+    let mut hidden_ranges = module.existing_debug_ranges.clone();
     if !opts.keep_source_mapping_url {
         if let Some(ref r) = module.source_mapping_url_range {
-            skip_ranges.push(r.clone());
+            hidden_ranges.push(r.clone());
         }
     }
-    skip_ranges.sort_by_key(|r| r.start);
-
-    // Copy original bytes minus skipped ranges.
     let mut out = Vec::with_capacity(wasm.len() + sections.iter().map(|s| s.data.len() + 64).sum::<usize>());
-    let mut pos = 0usize;
-    for skip in &skip_ranges {
-        if pos < skip.start {
-            out.extend_from_slice(&wasm[pos..skip.start]);
+    out.extend_from_slice(wasm);
+    for range in hidden_ranges {
+        // parse() validated the section and both LEB lengths. Skip the section
+        // size and name length, including non-minimal encodings from LLVM.
+        let mut pos = range.start + 1;
+        for _ in 0..2 {
+            while out[pos] & 0x80 != 0 { pos += 1; }
+            pos += 1;
         }
-        pos = skip.end;
-    }
-    if pos < wasm.len() {
-        out.extend_from_slice(&wasm[pos..]);
+        out[pos] = b'_';
     }
 
     // Append each debug section.

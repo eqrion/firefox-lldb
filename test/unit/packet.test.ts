@@ -53,3 +53,26 @@ test("parser flags a bad checksum", () => {
   assert.equal(item.type, "packet");
   assert.equal((item as { valid: boolean }).valid, false);
 });
+
+test("parser rejects partially valid checksum hex and truncated binary escapes", () => {
+  const [item] = new PacketParser().feed(Buffer.from([36, 1, 35, 49, 122]));
+  assert.equal(item.type === "packet" && item.valid, false);
+  assert.throws(() => unescapeBinary(new Uint8Array([125])), /truncated/);
+});
+
+test("parser bounds individual frames, including incomplete frames", () => {
+  assert.throws(() => new PacketParser(3).feed(Buffer.from("$1234")), /exceeds/);
+  assert.throws(() => new PacketParser(3).feed(framePacket("1234")), /exceeds/);
+  assert.equal(
+    new PacketParser(3).feed(Buffer.concat([framePacket("123"), framePacket("456")])).length,
+    2
+  );
+});
+
+test("parser transfers unparsed bytes at an adapter handoff", () => {
+  const parser = new PacketParser();
+  const remaining = Buffer.from([0, 1, 2, 3, 255]);
+  assert.equal(parser.feed(Buffer.concat([framePacket("vAttach;1"), remaining]), 1).length, 1);
+  assert.deepEqual(parser.takeBuffered(), remaining);
+  assert.equal(parser.takeBuffered().length, 0);
+});

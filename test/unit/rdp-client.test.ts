@@ -112,6 +112,21 @@ test("malformed RDP JSON closes the transport and rejects pending work", async (
 });
 
 test("RDP framing rejects malformed and oversized length prefixes", () => {
+  assert.throws(
+    () => sliceRdpFrame(Buffer.from("0000000000000000000002:{}")),
+    /malformed length prefix/i
+  );
   assert.throws(() => sliceRdpFrame(Buffer.from("3x:{}")), /invalid packet length/i);
   assert.throws(() => sliceRdpFrame(Buffer.from(`${64 * 1024 * 1024 + 1}:`)), /exceeds limit/i);
+});
+
+test("a synchronous serialization failure closes and settles all pending requests", async (t) => {
+  const srv = await startFakeRdpServer();
+  t.after(() => srv.close());
+  const client = await RdpClient.connect(srv.port);
+  t.after(() => client.close());
+  const first = assert.rejects(client.request("root", { type: "waiting" }), /BigInt/);
+  const second = assert.rejects(client.request("root", { type: "invalid", value: 1n }), /BigInt/);
+  await Promise.all([first, second]);
+  assert.equal(client.pendingSnapshot().count, 0);
 });

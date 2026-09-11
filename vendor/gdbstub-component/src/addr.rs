@@ -101,6 +101,10 @@ impl AddrSpace {
             self.modules.remove(&id);
             self.module_bytecode.remove(&id);
         }
+        // The adapter exposes one Emscripten memory space at index zero.
+        // Rebind handles on each stop so navigation cannot retain retired ones.
+        self.memories.clear();
+        self.memory_ids.clear();
         for instance in d.all_instances() {
             let mut idx = 0;
             loop {
@@ -131,7 +135,7 @@ impl AddrSpace {
     ///
     /// Module bytecode regions are reported as `rom` (read-only), and
     /// linear memories as `ram` (read-write).
-    pub fn memory_map_xml(&self, debuggee: &Debuggee) -> String {
+    pub fn memory_map_xml(&self, debuggee: &Debuggee) -> Result<String, crate::api::Error> {
         use std::fmt::Write;
         let mut xml = String::from(
             "<?xml version=\"1.0\"?><!DOCTYPE memory-map SYSTEM \"memory-map.dtd\"><memory-map>",
@@ -152,7 +156,7 @@ impl AddrSpace {
         for (idx, mem) in self.memories.iter().enumerate() {
             let start =
                 WasmAddr::new(WasmAddrType::Memory, u32::try_from(idx).unwrap(), 0).unwrap();
-            let len = mem.size_bytes(debuggee);
+            let len = mem.size_bytes(debuggee)?;
             if len > 0 {
                 write!(
                     xml,
@@ -164,30 +168,17 @@ impl AddrSpace {
             }
         }
         xml.push_str("</memory-map>");
-        xml
+        Ok(xml)
     }
 
-    pub fn frame_to_pc(&self, frame: &Frame, debuggee: &Debuggee) -> WasmAddr {
-        let module = frame.get_instance(debuggee).unwrap().get_module(debuggee);
-        let &module_id = self
-            .module_ids
-            .get(&module.unique_id())
-            .expect("module not found in addr space");
-        let pc = frame.get_pc(debuggee).unwrap();
-        WasmAddr::new(WasmAddrType::Object, module_id, pc).unwrap()
+    pub fn frame_to_pc(&self, frame: &Frame, debuggee: &Debuggee) -> Option<WasmAddr> {
+        let module = frame.get_instance(debuggee).ok()?.get_module(debuggee);
+        let &module_id = self.module_ids.get(&module.unique_id())?;
+        let pc = frame.get_pc(debuggee).ok()?;
+        WasmAddr::new(WasmAddrType::Object, module_id, pc)
     }
 
-    pub fn frame_to_return_addr(&self, frame: &Frame, debuggee: &Debuggee) -> Option<WasmAddr> {
-        let module = frame.get_instance(debuggee).unwrap().get_module(debuggee);
-        let &module_id = self
-            .module_ids
-            .get(&module.unique_id())
-            .expect("module not found in addr space");
-        let ret_pc = frame.get_pc(debuggee).ok()?;
-        Some(WasmAddr::new(WasmAddrType::Object, module_id, ret_pc).unwrap())
-    }
-
-    pub fn lookup(&self, addr: WasmAddr, d: &Debuggee) -> AddrSpaceLookup<'_> {
+    pub fn lookup(&self, addr: WasmAddr, _d: &Debuggee) -> AddrSpaceLookup<'_> {
         match addr.addr_type() {
             WasmAddrType::Object => {
                 // Module ids are sparse (see the AddrSpace doc comment) —

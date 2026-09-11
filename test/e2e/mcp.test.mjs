@@ -124,7 +124,7 @@ async function withSession(
           { timeout: MCP_LAUNCH_TIMEOUT_MS }
         );
         assert.match(banner, /marionette-port \d+/, `launch banner: ${banner}`);
-        await fn(client, fx, banner);
+        await fn(client, fx, banner, url);
       })(),
       SESSION_TIMEOUT_MS
     );
@@ -172,10 +172,40 @@ test("MCP: launch, set a breakpoint, continue, hit it", async () => {
     // prompt. Omitting timeoutMs must let the server return its documented
     // no-prompt result before the MCP SDK's own 60-second request deadline.
     await send(client, "lldb_send", { command: "breakpoint delete 1" });
+    await send(client, "lldb_send", {
+      command: `js p setTimeout(() => console.log('(lldb) page output, not completion'), 100)`,
+    });
     const running = await send(client, "lldb_send", { command: "continue" });
     assert.match(running, /no prompt returned/i, `continue output: ${running}`);
-    const interrupted = await send(client, "lldb_interrupt");
+    assert.match(await send(client, "lldb_send", { command: "version" }), /still running/);
+    const [observed, interrupted] = await Promise.all([
+      send(client, "lldb_read", { timeoutMs: 0 }),
+      send(client, "lldb_interrupt"),
+    ]);
+    assert.match(observed, /page output, not completion/);
     assert.doesNotMatch(interrupted, /no prompt returned/i, `interrupt output: ${interrupted}`);
+    assert.match(await send(client, "lldb_send", { command: "version" }), /lldb version/i);
+    assert.match(
+      await send(client, "lldb_read", { timeoutMs: 2 ** 32 }, { timeout: 10_000 }),
+      /timeoutMs must be/
+    );
+  });
+});
+
+test("MCP: concurrent replacements and shutdown retain one CLI owner", async () => {
+  await withSession("factorial", async (client, _fx, _banner, url) => {
+    const launch = () =>
+      send(client, "lldb_launch", { url, headless: true }, { timeout: MCP_LAUNCH_TIMEOUT_MS });
+    const first = launch();
+    const second = launch();
+    const stopped = send(client, "lldb_shutdown");
+    const results = await Promise.all([first, second, stopped]);
+    assert.match(results[0], /superseded|cancelled|closed|exited/i);
+    assert.match(results[1], /superseded|cancelled|closed|exited/i);
+    assert.equal(results[2], "shut down");
+    assert.match(await send(client, "lldb_send", { command: "version" }), /no session/);
+    assert.match(await launch(), /Attached/);
+    assert.match(await send(client, "lldb_send", { command: "version" }), /lldb version/i);
   });
 });
 
@@ -185,7 +215,12 @@ test("MCP: launch survives a page reload racing automatic attach (#46)", async (
     async (client, fx, banner) => {
       assert.match(banner, /page navigating; re-syncing/i, `launch banner: ${banner}`);
       assert.match(banner, /Process 1 stopped/i, `launch banner: ${banner}`);
-      assert.doesNotMatch(banner, /attach failed/i, `launch banner: ${banner}`);
+      // A recovered attempt remains visible; only terminal attach failure is disallowed.
+      assert.doesNotMatch(
+        banner,
+        /process attach failed after \d+ attempt/i,
+        `launch banner: ${banner}`
+      );
       const bp = await send(client, "lldb_send", { command: `breakpoint set -n ${fx.breakFunc}` });
       assert.match(bp, /Breakpoint 1/, `breakpoint set output: ${bp}`);
     },

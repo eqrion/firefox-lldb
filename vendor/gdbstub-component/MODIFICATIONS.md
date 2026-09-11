@@ -15,7 +15,7 @@ wasmtime, which is a manual, rare action. Each edit is commented in place.
 - `src/api.rs` — `wit_bindgen::generate!` path changed `../debugger/wit` -> `wit`
   (we co-locate the WIT). `Resumption` no longer uses the wstd `AsyncPollable`
   reactor (unavailable under jco from gdbstub's synchronous `resume()`):
-  `wait()` is a no-op and `result()` calls `EventFuture::finish`, which blocks
+  `result()` calls `EventFuture::finish`, which blocks
   until the next event (bridged synchronously by the host worker RPC).
 - `src/lib.rs` — the Running-state arm drops the wstd `select!` over a wasi
   pollable + the connection; it awaits `resumption.result()` directly. `Debugger`
@@ -24,12 +24,10 @@ wasmtime, which is a manual, rare action. Each edit is commented in place.
   now index `self.threads[&tid]`; `list_active_threads` iterates the full map.
   `get_libraries()` calls `m.name()` instead of `"wasm-{i}"` for real source names.
 - `src/addr.rs` — `modules_with_addrs()` pairs each module with its base address.
-- `src/lib.rs` (RSP tracing) — `Conn` gains a `trace_in: Vec<u8>` field and a
-  `log_inbound` method that reconstructs complete `$<body>#<cc>` RSP frames from
-  individual bytes and emits them via `log::trace!("<< ...")`. `flush` logs
-  `">> ..."` before writing the outbound buffer. Both are gated behind the
-  existing `-v` / `env_logger` trace level, matching the platform server's
-  `>>` / `<<` convention.
+- `src/diagnostics.rs`, `src/lib.rs` — producer-side bounded tracing retains
+  a 1 KiB RSP prefix, full byte count and omitted count without rescanning a
+  growing packet. The WIT logger caps formatting at 3 KiB before crossing to
+  JavaScript. `Conn` reports incomplete input/output on teardown.
 - `src/lib.rs` (library change signal) — `update_on_stop()` now returns `bool`
   (true when new modules were added to `addr_space`). On `Event::Breakpoint`,
   if new modules appeared, the stop reply uses `MultiThreadStopReason::Library`
@@ -53,17 +51,20 @@ wasmtime, which is a manual, rare action. Each edit is commented in place.
 - `wit/world.wit` — extended the `debuggee` resource with `list-threads`,
   `stopped-thread`; `exit-frames` and `single-step` now take an explicit `tid: u32`.
   `resource module` gains `name: func() -> string` for source URL basenames.
+- `wit/world.wit`, `src/lib.rs` — `debugger-listening(u16)` reports readiness
+  explicitly after initial state and socket binding. Run errors trap instead
+  of returning as a successful debugger exit.
+- `rust-toolchain.toml`, `Cargo.lock` — pin the build toolchain and resolved
+  dependencies. CI regenerates the component and checks the resulting artifacts.
 
 To diff against pristine upstream: re-fetch the upstream files and compare, or
 keep this list current when editing.
 
 ## 2. jco-generated JS patch (regenerated; reapplied by a script)
 
-`jco transpile` regenerates `../../src/gdb/generated/` and would clobber any hand
-edit. There is exactly one needed patch (a jco 1.24 codegen bug: a bare
-`currentSubtask` referenced in trampoline catch blocks, which throws a
-`ReferenceError` instead of lifting a WIT `result` Err). It is applied by
-`scripts/patch-generated.mjs`, which is:
+`jco transpile` regenerates `../../src/gdb/generated/`. Two jco 1.24.3 patches
+are applied by `scripts/patch-generated.mjs`: declare `currentSubtask` in
+trampoline error paths, and release completed `AsyncSubtask` handles. The script is:
 
 - **idempotent** (skips if already applied),
 - **guarded** (errors loudly if jco's output format changes — the anchor it
@@ -72,7 +73,7 @@ edit. There is exactly one needed patch (a jco 1.24 codegen bug: a bare
 
 The patched output is also committed, so a fresh checkout runs without rust/jco.
 
-`@bytecodealliance/jco` is pinned via `package-lock.json`; bumping it may move or
+`@bytecodealliance/jco` is pinned in `package.json` and the lockfile; bumping it may move or
 fix the bug — re-run `npm run component` and the guard will tell you if the anchor
 changed.
 
@@ -84,9 +85,26 @@ generated or vendored-from-upstream — normal version control.
 
 ## Build
 
-`npm run component` = `cargo build --release --target wasm32-wasip2` then
+`npm run component` = `cargo build --locked --release --target wasm32-wasip2` then
 `jco transpile ... --instantiation async` then `node scripts/patch-generated.mjs`.
 Needs `rustup target add wasm32-wasip2`. The transpile is SYNC mode (no
 `--async-mode jspi`): the component runs on a worker and blocks synchronously on
 the SAB RPC, so debuggee imports are synchronous and no JSPI / Node >=24 is
 required.
+## Per-thread snapshot and read availability
+
+`debuggee.exit-frames` returns a WIT result. Thread state retains whether its
+snapshot is available; register reads reject unavailable snapshots instead of
+reporting a fabricated zero PC. Other threads remain inspectable when Firefox
+cannot serialize a suspended worker's frames.
+
+Frame instance/parent/PC lookups propagate unavailability instead of unwrapping
+fallible WIT results. A target arriving during LLDB inspection can retire the
+published stop: register reads validate their live frame, and call-stack replies
+are assembled before any address is emitted. The duplicate return-address helper
+was removed; it performed the same lookup as the frame-PC helper.
+
+`frame.get-local` reads a single value without requiring every local to be
+available. `memory.size-bytes` is fallible, and memory handles are rebound on
+each stop so a reload cannot retain the old module's memory. Missing module
+bytecode is represented by the existing WIT option, not synthetic wasm bytes.

@@ -10,11 +10,14 @@ the full Firefox RDP surface this tool depends on.
 ```
 src/protocol/      RSP framing + TCP server + attach-shim
 src/platform/      LLDB platform server (process list, qLaunchGDBServer)
-src/rdp/           RDP client, RdpWasmSession, headless Firefox launcher
+src/rdp/           RDP client, browser discovery, target/stop session, breakpoints
 src/gdb/           RdpDebuggee, worker + SAB-RPC, jco-generated gdbstub
 src/sourcemap/     source-map -> DWARF converter (host glue + jco-generated component)
-src/core/          shared Firefox + per-tab launcher + platform server bring-up
-src/cli/           CLI entry points (firefox-lldb, firefox-lldb-server) + REPL
+src/symbols/       module bytes/transforms, source files, separate DWARF registry
+src/core/          Firefox acquisition/cleanup + per-tab launcher + runtime bring-up
+src/lldb/          shared embedded LLDB bridge + classified attach
+src/diagnostics/   session transcript + bounded RSP/DAP summaries
+src/cli/           REPL, DAP, and standalone-server entry points + options
 src/mcp/           MCP server that drives the real REPL for coding agents
 test/unit/         unit tests (protocol + platform server)
 test/e2e/          Node e2e suite (primary)

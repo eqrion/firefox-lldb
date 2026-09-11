@@ -9,7 +9,7 @@ wit_bindgen::generate!({
 });
 
 use exports::firefox_lldb::source_map::source_map_converter::{
-    ConvertResult, Guest, InspectResult, SourceFile,
+    ConvertResult, FunctionValues, Guest, InspectResult, ModuleValues, SourceFile, ValueType,
 };
 use source_map_dwarf::{Options, SourceMapInput, convert_with_sources, inspect};
 
@@ -17,6 +17,41 @@ struct Component;
 export!(Component);
 
 impl Guest for Component {
+    fn values(wasm: Vec<u8>) -> Result<ModuleValues, String> {
+        let info = source_map_dwarf::module_metadata(&wasm).map_err(|e| e.to_string())?;
+        let count = info.funcs.iter().map(|f| f.locals.len()).sum::<usize>() + info.globals.len();
+        if count > 2_000_000 {
+            return Err("value metadata exceeds 2000000 entries".into());
+        }
+        fn value_type(ty: source_map_dwarf::WasmValType) -> ValueType {
+            use source_map_dwarf::WasmValType as T;
+            match ty {
+                T::I32 => ValueType::I32,
+                T::I64 => ValueType::I64,
+                T::F32 => ValueType::F32,
+                T::F64 => ValueType::F64,
+                _ => ValueType::Unsupported,
+            }
+        }
+        Ok(ModuleValues {
+            functions: info
+                .funcs
+                .into_iter()
+                .map(|f| FunctionValues {
+                    start: f.range_start as u32,
+                    end: f.range_end as u32,
+                    locals: f
+                        .locals
+                        .into_iter()
+                        .map(|l| value_type(l.val_type))
+                        .collect(),
+                })
+                .collect(),
+            globals: info.globals.into_iter().map(value_type).collect(),
+            memories: info.memory_count,
+        })
+    }
+
     fn inspect(wasm: Vec<u8>) -> Result<InspectResult, String> {
         let i = inspect(&wasm).map_err(|e| e.to_string())?;
         Ok(InspectResult {

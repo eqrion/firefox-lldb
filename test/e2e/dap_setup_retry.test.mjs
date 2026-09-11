@@ -15,7 +15,10 @@ test("DAP setup cleans up a pending attach before retrying", async () => {
     configure: async (dap, fixture) => {
       attempts++;
       const response = await dap.setFunctionBreakpoints([fixture.breakFunc]);
-      if (attempts === 1) throw new Error("intentional setup failure with attach pending");
+      if (attempts === 1)
+        throw Object.assign(new Error("intentional connection failure with attach pending"), {
+          code: "ECONNRESET",
+        });
       assert.equal(response.body.breakpoints[0].verified, true, JSON.stringify(response));
     },
   });

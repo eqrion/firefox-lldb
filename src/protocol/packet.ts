@@ -52,6 +52,7 @@ export function unescapeBinary(data: Uint8Array): Uint8Array {
   const out: number[] = [];
   for (let i = 0; i < data.length; i++) {
     if (data[i] === ESCAPE) {
+      if (i + 1 === data.length) throw new Error("truncated RSP binary escape");
       out.push(data[++i] ^ 0x20);
     } else {
       out.push(data[i]);
@@ -76,11 +77,21 @@ const CTRL_C = 0x03;
 export class PacketParser {
   #buffer: Buffer = Buffer.alloc(0);
 
-  feed(data: Buffer): ParsedItem[] {
-    this.#buffer = this.#buffer.length ? Buffer.concat([this.#buffer, data]) : data;
+  constructor(private readonly maxPayloadBytes = 1024 * 1024) {}
+
+  /** Transfer unparsed bytes when a protocol adapter becomes a transparent pipe. */
+  takeBuffered(): Buffer {
+    const bytes = this.#buffer;
+    this.#buffer = Buffer.alloc(0);
+    return bytes;
+  }
+
+  feed(data: Buffer, maxItems = Infinity): ParsedItem[] {
+    if (data.length)
+      this.#buffer = this.#buffer.length ? Buffer.concat([this.#buffer, data]) : data;
     const items: ParsedItem[] = [];
 
-    while (this.#buffer.length > 0) {
+    while (this.#buffer.length > 0 && items.length < maxItems) {
       const ch = this.#buffer[0];
 
       if (ch === PLUS) {
@@ -100,12 +111,16 @@ export class PacketParser {
       }
       if (ch === DOLLAR) {
         const hashIdx = this.#buffer.indexOf(HASH, 1);
+        if ((hashIdx === -1 ? this.#buffer.length - 1 : hashIdx - 1) > this.maxPayloadBytes) {
+          this.#buffer = Buffer.alloc(0);
+          throw new Error(`RSP payload exceeds ${this.maxPayloadBytes} bytes`);
+        }
         if (hashIdx === -1 || this.#buffer.length < hashIdx + 3) {
           return items; // incomplete; wait for more bytes
         }
         const view = this.#buffer.subarray(1, hashIdx);
         const csHex = this.#buffer.subarray(hashIdx + 1, hashIdx + 3).toString("latin1");
-        const valid = parseInt(csHex, 16) === checksum(view);
+        const valid = /^[0-9a-fA-F]{2}$/.test(csHex) && parseInt(csHex, 16) === checksum(view);
         const payload = Buffer.allocUnsafe(view.length);
         view.copy(payload);
         items.push({ type: "packet", payload, valid });

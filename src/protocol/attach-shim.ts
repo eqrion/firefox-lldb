@@ -2,24 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-// RSP man-in-the-middle that makes the gdbstub component obey LLDB's native
-// `process attach` contract.
-//
-// The component presents an already-attached, stopped process (pid 1) the
-// instant LLDB connects. LLDB's PlatformRemoteGDBServer::Attach connects first
-// (ConnectRemote, which then treats the connection as a completed attach and
-// relocates modules) and THEN calls Process::Attach, whose ClearAllLoadedSections
-// wipes that relocation without reapplying it — so breakpoints never arm.
-//
-// A real lldb-server spawned for attach is *unattached* on connect: ConnectRemote
-// sees no process and defers everything to the `vAttach` that Process::Attach
-// sends. This shim emulates that: until it sees `vAttach`, it answers the three
-// pid-discovery queries LLDB uses (qProcessInfo -> chain) as "no process yet",
-// so ConnectRemote lands in eStateConnected and the real attach happens at
-// vAttach. Once vAttach is forwarded, the shim is a transparent byte pipe, so
-// no binary RSP payloads are ever parsed.
+// Defers process publication until vAttach so LLDB preserves module relocation.
+// After attach it forwards bytes unchanged. See docs/COMPATIBILITY.md.
 
 import net from "node:net";
+import { PacketParser, framePacket } from "./packet.js";
 
 // Replies that keep LLDB's ConnectRemote in eStateConnected (no process yet),
 // so the real attach happens at vAttach. LLDB derives the current pid from this
@@ -38,16 +25,6 @@ const PRE_ATTACH_REPLIES: Record<string, string> = {
   qC: "E44",
   qfThreadInfo: "E01",
 };
-
-function checksum(payload: string): string {
-  let sum = 0;
-  for (let i = 0; i < payload.length; i++) sum = (sum + payload.charCodeAt(i)) & 0xff;
-  return sum.toString(16).padStart(2, "0");
-}
-
-function frame(payload: string): Buffer {
-  return Buffer.from(`$${payload}#${checksum(payload)}`, "latin1");
-}
 
 export interface AttachShim {
   port: number;
@@ -76,91 +53,109 @@ export function startAttachShim(opts: {
     const upstream = net.connect(opts.componentPort, host);
     let attached = false;
     let noAck = false;
-    let buf = Buffer.alloc(0);
+    const parser = new PacketParser(64 * 1024);
+    sockets.add(upstream);
+    upstream.on("close", () => sockets.delete(upstream));
 
     // component -> LLDB is always a transparent pipe.
-    upstream.on("data", (d) => client.write(d));
+    upstream.pipe(client);
     upstream.on("close", () => {
-      // When the component closes after vAttach, send a clean exit notification
-      // so LLDB reports "exited with status = 0" instead of "lost connection".
-      if (attached && client.writable) client.write(frame("W00"));
+      // EOF is not a process exit status. In particular, detach already sent
+      // its reply; inventing W00 here races LLDB closing its channel. Only the
+      // component can report a target exit, through the transparent data path.
+      trace?.("component connection closed; forwarding EOF");
       client.end();
     });
     upstream.on("error", () => client.destroy());
-    client.on("close", () => upstream.end());
+    client.on("close", () => upstream.destroy());
     client.on("error", () => upstream.destroy());
 
+    const resumeClient = () => {
+      if (!upstream.writableNeedDrain && !client.writableNeedDrain) client.resume();
+    };
+    upstream.on("drain", resumeClient);
+    client.on("drain", resumeClient);
+    const write = (destination: net.Socket, bytes: string | Uint8Array) => {
+      if (!destination.write(bytes)) client.pause();
+      // A single pre-attach chunk can contain many packets, so pausing reads
+      // alone does not bound the writes made while processing that chunk.
+      if (destination.writableLength > 4 * 1024 * 1024) {
+        trace?.("attach connection closed: 4 MiB queued output limit");
+        client.destroy();
+        upstream.destroy();
+      }
+    };
+
     const replyToClient = (payload: string) => {
-      if (!noAck) client.write("+");
-      client.write(frame(payload));
+      if (!noAck) write(client, "+");
+      write(client, framePacket(payload));
     };
 
     client.on("data", (chunk) => {
       if (attached) {
-        upstream.write(chunk);
+        write(upstream, chunk);
         return;
       }
-      buf = Buffer.concat([buf, chunk]);
-
-      // Parse complete RSP units out of `buf`. Pre-attach traffic is all simple
-      // ASCII query packets (no `}`-escaped binary), so locating `#` is safe.
-      for (;;) {
-        if (buf.length === 0) break;
-        const b0 = buf[0];
-
-        // Acks / interrupt: forward the single byte untouched.
-        if (b0 === 0x2b /* + */ || b0 === 0x2d /* - */ || b0 === 0x03 /* ^C */) {
-          upstream.write(buf.subarray(0, 1));
-          buf = buf.subarray(1);
-          continue;
-        }
-
-        if (b0 === 0x24 /* $ */) {
-          const hash = buf.indexOf(0x23 /* # */);
-          if (hash === -1 || buf.length < hash + 3) break; // incomplete packet
-          const payload = buf.toString("latin1", 1, hash);
-          const raw = buf.subarray(0, hash + 3);
-          buf = buf.subarray(hash + 3);
-
-          if (payload.startsWith("QStartNoAckMode")) {
-            upstream.write(raw);
+      try {
+        let input = chunk;
+        for (;;) {
+          if (client.destroyed || upstream.destroyed) return;
+          const [item] = parser.feed(input, 1);
+          input = Buffer.alloc(0);
+          if (!item) return;
+          if (item.type !== "packet") {
+            write(
+              upstream,
+              item.type === "ack" ? "+" : item.type === "nack" ? "-" : Buffer.from([3])
+            );
+            continue;
+          }
+          if (!item.valid) {
+            trace?.("reject pre-attach packet: invalid checksum");
+            if (!noAck) write(client, "-");
+            continue;
+          }
+          const payload = item.payload.toString("latin1");
+          const raw = framePacket(item.payload);
+          if (payload === "QStartNoAckMode") {
+            write(upstream, raw);
             noAck = true;
             continue;
           }
           if (payload.startsWith("vAttach")) {
             const pidHex = payload.startsWith("vAttach;") ? payload.slice("vAttach;".length) : "";
             const pid = /^[0-9a-fA-F]+$/.test(pidHex) ? parseInt(pidHex, 16) : Number.NaN;
-            if (opts.isValidPid && (!Number.isSafeInteger(pid) || !opts.isValidPid(pid))) {
+            if (
+              !Number.isSafeInteger(pid) ||
+              pid <= 0 ||
+              (opts.isValidPid && !opts.isValidPid(pid))
+            ) {
               trace?.(`reject ${payload}: unknown platform pid`);
               replyToClient("E01");
               continue;
             }
-            upstream.write(raw);
+            write(upstream, raw);
             attached = true;
             trace?.("vAttach forwarded; switching to transparent pipe");
-            if (buf.length) {
-              upstream.write(buf);
-              buf = Buffer.alloc(0);
-            }
+            const remaining = parser.takeBuffered();
+            if (remaining.length) write(upstream, remaining);
             return;
           }
           const synthetic = PRE_ATTACH_REPLIES[payload];
           if (synthetic !== undefined) {
             trace?.(`intercept ${payload} -> ${synthetic}`);
             replyToClient(synthetic);
-            continue;
-          }
-          upstream.write(raw);
-          continue;
+          } else write(upstream, raw);
         }
-
-        // Unexpected leading byte: forward it and resync.
-        upstream.write(buf.subarray(0, 1));
-        buf = buf.subarray(1);
+      } catch (error) {
+        trace?.(`pre-attach framing failed: ${error}`);
+        client.destroy();
+        upstream.destroy();
       }
     });
   });
 
+  let closing: Promise<void> | undefined;
   return new Promise((resolve, reject) => {
     server.on("error", reject);
     server.listen(opts.listenPort, host, () => {
@@ -170,8 +165,9 @@ export function startAttachShim(opts: {
         close: () => {
           // Without this, server.close() would wait indefinitely for LLDB
           // (or the upstream component connection) to disconnect voluntarily.
+          if (closing) return closing;
           for (const s of sockets) s.destroy();
-          return new Promise<void>((res) => server.close(() => res()));
+          return (closing = new Promise<void>((res) => server.close(() => res())));
         },
       });
     });

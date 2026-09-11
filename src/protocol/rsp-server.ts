@@ -9,7 +9,7 @@
 
 import net from "node:net";
 import { PacketParser, framePacket } from "./packet.js";
-import { noopLogger, type Logger } from "../logging.js";
+import { noopLogger, type Logger } from "../diagnostics/logger.js";
 
 export interface RspHandler {
   /**
@@ -20,9 +20,6 @@ export interface RspHandler {
   handle(payload: Buffer, session: RspSession): Promise<Uint8Array | string | null>;
 }
 
-/** @deprecated Import Logger from logging.ts in non-RSP code. */
-export type RspLogger = Logger;
-
 /** One client connection. Created by RspServer for each accepted socket. */
 export class RspSession {
   #socket: net.Socket;
@@ -30,7 +27,9 @@ export class RspSession {
   #handler: RspHandler;
   #log: Logger;
   #noAck = false;
+  #closed = false;
   #queue: Promise<void> = Promise.resolve();
+  #queuedBytes = 0;
 
   constructor(socket: net.Socket, handler: RspHandler, log: Logger) {
     this.#socket = socket;
@@ -39,6 +38,9 @@ export class RspSession {
 
     socket.on("data", (data: Buffer) => this.#onData(data));
     socket.on("error", (err) => this.#log.warn(`socket error: ${err.message}`));
+    socket.on("close", () => {
+      this.#closed = true;
+    });
   }
 
   setNoAckMode(on: boolean): void {
@@ -47,6 +49,7 @@ export class RspSession {
 
   /** Send a framed packet (used for responses and async notifications). */
   send(payload: Uint8Array | string): void {
+    if (this.#closed || this.#socket.destroyed) return;
     const printable = typeof payload === "string" ? payload : "<binary>";
     this.#log.debug(`>> ${truncate(printable)}`);
     this.#socket.write(framePacket(payload));
@@ -57,16 +60,31 @@ export class RspSession {
   }
 
   #onData(data: Buffer): void {
+    if (this.#closed) return;
+    this.#queuedBytes += data.length;
+    if (this.#queuedBytes > 4 * 1024 * 1024) {
+      this.#log.error("RSP input queue exceeds 4 MiB; closing connection");
+      this.close();
+      return;
+    }
     // Serialize handling so async handlers reply in packet order.
     // The catch prevents a rejection (e.g. an unexpected parser throw) from
     // permanently breaking the queue and silently dropping all future packets.
     this.#queue = this.#queue
       .then(() => this.#process(data))
-      .catch((err) => this.#log.error(`packet processing error: ${(err as Error).message}`));
+      .catch((err) => {
+        this.#log.error(`packet processing error: ${(err as Error).message}`);
+        this.close();
+      })
+      .finally(() => {
+        this.#queuedBytes -= data.length;
+      });
   }
 
   async #process(data: Buffer): Promise<void> {
+    if (this.#closed || this.#socket.destroyed) return;
     for (const item of this.#parser.feed(data)) {
+      if (this.#closed || this.#socket.destroyed) return;
       switch (item.type) {
         case "ack":
         case "nack":
@@ -97,6 +115,7 @@ export class RspSession {
   }
 
   close(): void {
+    this.#closed = true;
     this.#socket.destroy();
   }
 }
@@ -106,8 +125,10 @@ export class RspServer {
   #server: net.Server;
   #log: Logger;
   #port = 0;
-  #sockets = new Set<net.Socket>();
+  #sessions = new Set<RspSession>();
   #listening = false;
+  #closed = false;
+  #listenPromise: Promise<number> | undefined;
   #closePromise: Promise<void> | undefined;
 
   constructor(handler: RspHandler, options: { logger?: Logger; singleConnection?: boolean } = {}) {
@@ -115,6 +136,10 @@ export class RspServer {
     let active: RspSession | null = null;
 
     this.#server = net.createServer((socket) => {
+      if (this.#closed) {
+        socket.destroy();
+        return;
+      }
       if (options.singleConnection && active) {
         this.#log.warn("rejecting second connection");
         socket.destroy();
@@ -122,11 +147,11 @@ export class RspServer {
       }
       socket.setNoDelay(true);
       this.#log.info("client connected");
-      this.#sockets.add(socket);
       const session = new RspSession(socket, handler, this.#log);
+      this.#sessions.add(session);
       active = session;
       socket.on("close", () => {
-        this.#sockets.delete(socket);
+        this.#sessions.delete(session);
         if (active === session) active = null;
         this.#log.info("client disconnected");
       });
@@ -138,16 +163,20 @@ export class RspServer {
 
   /** Begin listening. Port 0 auto-selects. Resolves with the bound port. */
   listen(port = 0, host = "127.0.0.1"): Promise<number> {
-    return new Promise((resolve, reject) => {
-      this.#server.once("error", reject);
+    if (this.#closed) return Promise.reject(new Error("RSP server is closed"));
+    if (this.#listenPromise) return Promise.reject(new Error("RSP server already started"));
+    return (this.#listenPromise = new Promise((resolve, reject) => {
+      const failed = (error: Error) => reject(error);
+      this.#server.once("error", failed);
       this.#server.listen(port, host, () => {
+        this.#server.removeListener("error", failed);
         const addr = this.#server.address();
         this.#port = typeof addr === "object" && addr ? addr.port : port;
         this.#listening = true;
         this.#log.info(`listening on ${host}:${this.#port}`);
         resolve(this.#port);
       });
-    });
+    }));
   }
 
   get port(): number {
@@ -156,18 +185,24 @@ export class RspServer {
 
   close(): Promise<void> {
     if (this.#closePromise) return this.#closePromise;
-    if (!this.#listening) return Promise.resolve();
+    this.#closed = true;
     // Destroy any open client sockets so the close callback fires promptly even
     // if LLDB is still connected. Without this, server.close() would wait
     // indefinitely for LLDB to disconnect voluntarily.
-    for (const s of this.#sockets) s.destroy();
-    this.#closePromise = new Promise((resolve, reject) =>
-      this.#server.close((err) => {
-        this.#listening = false;
-        if (err) reject(err);
-        else resolve();
-      })
-    );
+    for (const session of this.#sessions) session.close();
+    this.#closePromise = (async () => {
+      // A pending bind still owns a listener. Join it before closing, even when
+      // close() runs in the same turn as listen(). Failed binds own no socket.
+      await this.#listenPromise?.catch(() => {});
+      if (!this.#listening) return;
+      await new Promise<void>((resolve, reject) =>
+        this.#server.close((err) => {
+          this.#listening = false;
+          if (err) reject(err);
+          else resolve();
+        })
+      );
+    })();
     return this.#closePromise;
   }
 }

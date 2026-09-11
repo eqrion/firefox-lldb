@@ -8,6 +8,9 @@ world debug-main {
   /// on port 1234") to the user. The host decides how to display this.
   import print-debugger-info: func(message: string);
 
+  /// Report the bound listener port after initial debugger state is loaded.
+  import debugger-listening: func(port: u16);
+
   /// Emit one already-formatted verbose/trace log line. The host decides
   /// how to display this; it is expected to be interleaved live with the
   /// host's own logging, so implementations should not buffer this.
@@ -101,7 +104,7 @@ interface debuggee {
     /// Get the current exit frames for the given thread.
     ///
     /// If invoked while already running, causes a trap.
-    exit-frames: func(tid: u32) -> list<frame>;
+    exit-frames: func(tid: u32) -> result<list<frame>, error>;
   }
 
   /// A future that represents asynchronous execution of the
@@ -234,7 +237,7 @@ interface debuggee {
 
   resource memory {
     /// Get the current memory size, in bytes.
-    size-bytes: func(d: borrow<debuggee>) -> u64;
+    size-bytes: func(d: borrow<debuggee>) -> result<u64, error>;
 
     /// Get the page size, in bytes.
     page-size-bytes: func(d: borrow<debuggee>) -> u64;
@@ -361,6 +364,8 @@ interface debuggee {
 
     /// Wasm locals.
     get-locals: func(d: borrow<debuggee>) -> result<list<wasm-value>, error>;
+    /// Read one local so an unavailable peer does not invalidate the whole list.
+    get-local: func(d: borrow<debuggee>, index: u32) -> result<wasm-value, error>;
 
     /// Operand stack.
     get-stack: func(d: borrow<debuggee>) -> result<list<wasm-value>, error>;

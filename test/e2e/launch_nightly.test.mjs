@@ -9,10 +9,12 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseCliArgs } from "../../src/core/platform-session.ts";
-import { findFirefoxBinary, launchFirefox } from "../../src/rdp/firefox.ts";
-import { verifyFirefoxLaunchToken } from "../../src/rdp/session.ts";
+import { execFileSync } from "node:child_process";
+import { parseCliArgs } from "../../src/cli/options.ts";
+import { findFirefoxBinary, launchFirefox } from "../../src/core/firefox.ts";
+import { verifyFirefoxLaunchToken } from "../../src/rdp/browser.ts";
 import { freePort } from "../../src/platform/gdb-server-spawner.ts";
+import { tracingLogger } from "./harness.mjs";
 
 async function closeWithin(firefox, ms) {
   let timer;
@@ -42,11 +44,14 @@ test("--nightly launches and shuts down cleanly", async (t) => {
     String(await freePort()),
   ]);
   assert.equal(args.channel, "nightly");
+  const trace = tracingLogger();
+  t.after(() => trace.close());
 
   const firefox = await launchFirefox({
     rdpPort: args.rdpPort,
     channel: args.channel,
     headless: args.headless,
+    logger: trace,
   });
   let closed = false;
   try {
@@ -59,6 +64,23 @@ test("--nightly launches and shuts down cleanly", async (t) => {
       // close() has its own bounded group/direct-PID SIGKILL fallback. Retain
       // this outer guard so the test also catches regressions in that bound.
       await closeWithin(firefox, 15_000).catch(() => {});
+    }
+    if (process.platform !== "win32") {
+      const snapshot = execFileSync("/bin/ps", ["-ax", "-ww", "-o", "pid=,args="], {
+        encoding: "utf8",
+        timeout: 2000,
+        maxBuffer: 8 * 1024 * 1024,
+      });
+      const survivors = snapshot
+        .split("\n")
+        .filter((line) =>
+          line.includes(`--profile ${firefox.profileDir} --start-debugger-server ${args.rdpPort} `)
+        );
+      assert.deepEqual(
+        survivors,
+        [],
+        `test Firefox survived cleanup; transcript: ${trace.logPath}`
+      );
     }
   }
 });

@@ -8,7 +8,8 @@
 // bridge, for use with an external native lldb.
 
 import { pathToFileURL } from "node:url";
-import { parseCliArgs, startPlatformServer } from "../core/platform-session.js";
+import { parseCliArgs } from "./options.js";
+import { startPlatformServer } from "../core/platform-session.js";
 import { exitWhenOrphaned, debugEnvEnabled } from "../config.js";
 import { createLogger } from "./logger.js";
 import {
@@ -17,7 +18,7 @@ import {
   formatErrorWithLog,
   openSessionLog,
   temporaryLogPath,
-} from "./session-log.js";
+} from "../diagnostics/session-log.js";
 import type { RdpWasmSession } from "../rdp/session.js";
 
 async function main(): Promise<void> {
@@ -30,53 +31,82 @@ async function main(): Promise<void> {
     process.argv.slice(2)
   );
   sessionLog.captureStdio({ stdout: true });
-  captureFatalErrors(sessionLog);
+  let fatalCleanup: (() => Promise<void>) | undefined;
+  captureFatalErrors(sessionLog, () => fatalCleanup?.());
   if (persistentLog) process.stderr.write(`logging this session to ${sessionLog.path}\n`);
   const logger = createLogger({ verbose, quiet: false, sessionLog });
 
-  let handle: Awaited<ReturnType<typeof startPlatformServer>>;
+  let handle: Awaited<ReturnType<typeof startPlatformServer>> | undefined;
+  let startup: ReturnType<typeof startPlatformServer> | undefined;
+  const startupAbort = new AbortController();
   let session: RdpWasmSession | undefined;
   const reportFailure = (error: unknown): void => {
     session?.logState("error");
     logger.error(formatErrorWithLog(error, sessionLog));
   };
-  try {
-    handle = await startPlatformServer(
-      { ...args, log: true },
-      {
-        logger,
-        onRdpSession: (rdpSession) => {
-          session = rdpSession;
-        },
-      }
-    );
-  } catch (err) {
-    reportFailure(err);
-    sessionLog.close();
-    process.exit(1);
-  }
-  // Stdout is the control channel for the firefox-lldb wrapper; stderr carries logs.
-  process.stdout.write(`platform server ready on connect://localhost:${handle.port}\n`);
-
   let shuttingDown = false;
-  const onSignal = () => {
-    if (shuttingDown) return;
+  let shutdownPromise: Promise<void> | undefined;
+  let exitCode = 0;
+  let startupRetried = false;
+  const cleanup = (code = 0): Promise<void> => {
+    exitCode ||= code;
+    process.exitCode = exitCode;
+    if (shutdownPromise) return shutdownPromise;
     shuttingDown = true;
-    void handle.shutdown().then(
-      () => {
-        sessionLog.close({ remove: !persistentLog });
-        process.exit(0);
-      },
-      (err) => {
-        reportFailure(err);
+    const keepalive = setInterval(() => {}, 1000);
+    return (shutdownPromise = Promise.resolve().then(async () => {
+      startupAbort.abort(new Error("platform startup cancelled by shutdown"));
+      try {
+        await startup?.catch((error) => {
+          if (error instanceof AggregateError) throw error;
+        });
+        await handle?.shutdown();
+        if (startupRetried && !persistentLog)
+          process.stderr.write(
+            `Session transcript retained after startup retry at ${sessionLog.path}\n`
+          );
+        sessionLog.close({ remove: exitCode === 0 && !persistentLog && !startupRetried });
+      } catch (error) {
+        reportFailure(error);
         sessionLog.close();
-        process.exit(1);
+        process.exitCode = 1;
+      } finally {
+        clearInterval(keepalive);
+        process.exit();
       }
-    );
+    }));
+  };
+  fatalCleanup = () => cleanup(1);
+  const onSignal = () => {
+    void cleanup();
   };
   process.on("SIGINT", onSignal);
   process.on("SIGTERM", onSignal);
   process.on("SIGHUP", onSignal);
+  try {
+    handle = await (startup = startPlatformServer(args, {
+      signal: startupAbort.signal,
+      logger,
+      onStartupRetry: () => {
+        startupRetried = true;
+      },
+      onRdpSession: (rdpSession) => {
+        session = rdpSession;
+      },
+    }));
+    void handle.failed.then((error) => {
+      reportFailure(error);
+      return cleanup(1);
+    });
+    if (shuttingDown) return;
+  } catch (err) {
+    if (shuttingDown) return;
+    reportFailure(err);
+    await cleanup(1);
+    return;
+  }
+  // Stdout is the control channel for the firefox-lldb wrapper; stderr carries logs.
+  process.stdout.write(`platform server ready on connect://localhost:${handle.port}\n`);
 
   // When launched session-detached (e.g. the e2e harness uses setsid), a killed
   // parent does not signal us, so we would orphan the launched Firefox. Poll for

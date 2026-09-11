@@ -8,7 +8,7 @@
 // so it can test a newly-published Firefox before this range is updated.
 
 import { allowUnsupportedFirefox } from "../config.js";
-import type { Logger } from "../logging.js";
+import type { Logger } from "../diagnostics/logger.js";
 import { RdpClient } from "./client.js";
 import {
   REQUESTS,

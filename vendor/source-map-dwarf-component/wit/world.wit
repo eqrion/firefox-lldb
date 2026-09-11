@@ -5,6 +5,20 @@ world converter {
 }
 
 interface source-map-converter {
+  enum value-type { i32, i64, %f32, %f64, unsupported }
+  record function-values {
+    start: u32,
+    end: u32,
+    locals: list<value-type>,
+  }
+  record module-values {
+    functions: list<function-values>,
+    globals: list<value-type>,
+    memories: u32,
+  }
+  /// Wasm types cannot be inferred from untyped JavaScript number grips.
+  values: func(wasm: list<u8>) -> result<module-values, string>;
+
   /// What a wasm module offers in the way of debug info.
   record inspect-result {
     /// The module already carries `.debug_*` sections.

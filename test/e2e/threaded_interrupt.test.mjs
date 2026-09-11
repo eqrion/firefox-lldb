@@ -23,11 +23,25 @@ test("Ctrl-C snapshots a live worker while peers are futex-blocked", async () =>
     }
     assert.ok(s.session.listTids().length >= 5, "interrupt workers were not discovered");
 
+    const queried = new Set();
+    const available = new Map();
+    const frames = s.session.frames.bind(s.session);
+    s.session.frames = async (tid, ...args) => {
+      queried.add(tid);
+      const snapshot = await frames(tid, ...args);
+      available.set(tid, snapshot);
+      return snapshot;
+    };
     s.interrupt();
     const out = await typing;
     assert.match(out, /\* thread #(?!1\b)\d+/);
     assert.match(out, /interrupt_spin_worker|emscripten_futex_wait|_do_futex_wait/);
     assert.doesNotMatch(out, /frame #0: 0x00000000/);
+    assert.deepEqual([...queried].sort(), s.session.listTids().sort());
+    assert.ok(
+      [...available].some(([tid, snapshot]) => tid !== s.session.stoppedTid && snapshot.length > 0),
+      "non-triggering threads must have real snapshots too"
+    );
   } finally {
     await s.shutdown();
   }

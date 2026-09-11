@@ -9,7 +9,11 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { formatErrorWithLog, openSessionLog, temporaryLogPath } from "../../src/cli/session-log.js";
+import {
+  formatErrorWithLog,
+  openSessionLog,
+  temporaryLogPath,
+} from "../../src/diagnostics/session-log.js";
 
 const HELPER = join(
   dirname(fileURLToPath(import.meta.url)),

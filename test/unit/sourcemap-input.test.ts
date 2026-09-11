@@ -4,7 +4,10 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { sanitizeSourceMapBytes, sourceMapDataUrlBytes } from "../../src/sourcemap/input.js";
+import {
+  sanitizeSourceMapBytes,
+  sourceMapDataUrlBytes,
+} from "../../src/symbols/source-map-input.js";
 
 test("sanitizeSourceMapBytes preserves indexes while relocating unsafe source names", () => {
   const input = new TextEncoder().encode(

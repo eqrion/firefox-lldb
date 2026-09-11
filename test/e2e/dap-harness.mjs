@@ -5,13 +5,14 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { tmpdir } from "node:os";
 import { FIXTURES, retrySessionSetup, sleep, startStaticServer } from "./harness.mjs";
 import { freePort } from "../../src/platform/gdb-server-spawner.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..", "..");
 
-class DAPClient {
+export class DAPClient {
   #child;
   #buffer = Buffer.alloc(0);
   #seq = 1;
@@ -20,12 +21,18 @@ class DAPClient {
   #eventWaiters = [];
   #stderr = "";
   #exit;
+  #logPath;
+  #failure;
 
   constructor(child) {
     this.#child = child;
+    child.once("error", (error) => this.#fail(error));
+    child.stdin.on("error", (error) => this.#fail(error));
     child.stdout.on("data", (data) => this.#receive(data));
     child.stderr.on("data", (data) => {
       this.#stderr += data.toString();
+      const log = this.#stderr.match(/logging this session to (.+\.log)/);
+      if (log) this.#logPath = path.resolve(REPO, log[1]);
       if (this.#stderr.length > 16_000) this.#stderr = this.#stderr.slice(-16_000);
       if (process.env.E2E_VERBOSE) process.stderr.write(data);
     });
@@ -35,31 +42,33 @@ class DAPClient {
     child.once("exit", (code, signal) => {
       const error = new Error(
         `firefox-lldb-dap exited before completing a request (${String(code ?? signal)})${
-          this.#stderr ? `\nstderr:\n${this.#stderr}` : ""
+          this.stderr() ? `\nstderr:\n${this.stderr()}` : ""
         }`
       );
-      for (const pending of this.#pending.values()) pending.reject(error);
-      this.#pending.clear();
-      for (const waiter of this.#eventWaiters) waiter.reject(error);
-      this.#eventWaiters = [];
+      this.#fail(error);
     });
   }
 
   stderr() {
-    return this.#stderr;
+    return this.#stderr + (this.#logPath ? `\nSession transcript: ${this.#logPath}` : "");
+  }
+
+  logPath() {
+    return this.#logPath;
   }
 
   async request(command, args = {}, timeoutMs = 45_000) {
+    if (this.#failure) throw this.#failure;
     const seq = this.#seq++;
     const body = Buffer.from(JSON.stringify({ seq, type: "request", command, arguments: args }));
     const frame = Buffer.concat([Buffer.from(`Content-Length: ${body.length}\r\n\r\n`), body]);
-    const response = new Promise((resolve, reject) => {
+    return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.#pending.delete(seq);
         reject(
           new Error(
             `timed out waiting for DAP ${command} response${
-              this.#stderr ? `\nstderr:\n${this.#stderr}` : ""
+              this.stderr() ? `\nstderr:\n${this.stderr()}` : ""
             }`
           )
         );
@@ -74,14 +83,20 @@ class DAPClient {
           reject(error);
         },
       });
+      // One promise owns both the write and reply. A failed write must not
+      // strand an unobserved response timer while setup starts another attempt.
+      try {
+        this.#child.stdin.write(frame, (error) => {
+          if (error) this.#fail(error);
+        });
+      } catch (error) {
+        this.#fail(error);
+      }
     });
-    await new Promise((resolve, reject) => {
-      this.#child.stdin.write(frame, (error) => (error ? reject(error) : resolve()));
-    });
-    return response;
   }
 
   waitForEvent(event, predicate = () => true, timeoutMs = 45_000) {
+    if (this.#failure) return Promise.reject(this.#failure);
     const queued = this.#events.findIndex(
       (message) => message.event === event && predicate(message)
     );
@@ -93,7 +108,7 @@ class DAPClient {
         reject(
           new Error(
             `timed out waiting for DAP ${event} event${
-              this.#stderr ? `\nstderr:\n${this.#stderr}` : ""
+              this.stderr() ? `\nstderr:\n${this.stderr()}` : ""
             }`
           )
         );
@@ -112,6 +127,18 @@ class DAPClient {
 
   terminate() {
     this.#child.kill("SIGTERM");
+  }
+
+  #fail(error) {
+    if (this.#failure) return;
+    this.#failure = error;
+    for (const pending of this.#pending.values()) pending.reject(error);
+    this.#pending.clear();
+    for (const waiter of this.#eventWaiters) {
+      clearTimeout(waiter.timer);
+      waiter.reject(error);
+    }
+    this.#eventWaiters = [];
   }
 
   #receive(data) {
@@ -133,9 +160,7 @@ class DAPClient {
         this.#dispatch(message);
       }
     } catch (error) {
-      for (const pending of this.#pending.values()) pending.reject(error);
-      this.#pending.clear();
-      throw error;
+      this.#fail(error);
     }
   }
 
@@ -203,6 +228,7 @@ export class DAPFixtureSession {
         "src/cli/firefox-lldb-dap.ts",
         "--launch",
         "--headless",
+        "--log",
         ...(process.env.E2E_VERBOSE ? ["--verbose"] : []),
         "--port",
         "0",
@@ -215,7 +241,11 @@ export class DAPFixtureSession {
       {
         cwd: REPO,
         stdio: ["pipe", "pipe", "pipe"],
-        env: { ...process.env, FIREFOX_LLDB_EXIT_WHEN_ORPHANED: "1" },
+        env: {
+          ...process.env,
+          FIREFOX_LLDB_EXIT_WHEN_ORPHANED: "1",
+          FIREFOX_LLDB_LOG_DIR: process.env.FIREFOX_LLDB_LOG_DIR ?? tmpdir(),
+        },
       }
     );
     const client = new DAPClient(child);
@@ -267,7 +297,13 @@ export class DAPFixtureSession {
       const pendingAttach = attachResponse?.catch(() => undefined);
       await session.shutdown();
       await pendingAttach;
-      throw error;
+      // Preserve the classification; attaching diagnostics must not turn a
+      // transient connection error into an unclassified retry of every failure.
+      if (error instanceof Error) {
+        error.message += `\n${session.stderr()}`;
+        throw error;
+      }
+      throw new Error(`${String(error)}\n${session.stderr()}`, { cause: error });
     }
   }
 
@@ -302,6 +338,10 @@ export class DAPFixtureSession {
     return this.#client.stderr();
   }
 
+  logPath() {
+    return this.#client.logPath();
+  }
+
   async continueAndWait(threadId) {
     const stopped = this.waitForEvent("stopped");
     await this.requestOk("continue", { threadId });
@@ -322,13 +362,14 @@ export class DAPFixtureSession {
         .catch(() => {});
     }
     this.#client.end();
-    const exited = await Promise.race([this.#client.exit(), sleep(10_000).then(() => null)]);
+    let exited = await Promise.race([this.#client.exit(), sleep(10_000).then(() => null)]);
     if (!exited) {
       this.#client.terminate();
-      await Promise.race([this.#client.exit(), sleep(5_000)]);
+      exited = await Promise.race([this.#client.exit(), sleep(5_000).then(() => null)]);
     }
     this.#staticServer.server.closeAllConnections();
     await new Promise((resolve) => this.#staticServer.server.close(resolve));
+    return exited;
   }
 
   async disconnect({ allowFailure = false } = {}) {

@@ -12,7 +12,7 @@ npm run test:e2e
 ```
 
 Requires Firefox installed in a standard location (see `findFirefoxBinary` in
-`src/rdp/firefox.ts`) and pre-built fixtures.
+`src/core/firefox.ts`) and pre-built fixtures.
 
 ## How it works
 
@@ -35,21 +35,141 @@ bypassing its CLI or transport plumbing.
 
 ### Infrastructure (no Firefox required)
 
-- `session_smoke.test.mjs` — platform connect, `version`, process state before attach.
+- `session_smoke.test.mjs` — platform connect, `version`, process state before attach, and bounded platform-only shutdown.
+- `embedded_bridge.test.mjs` — production bridge channel ownership, real LLDB
+  disconnect handling, short writes, and cleanup during channel creation or drain
+  registration, including a cleanup deadline.
+- `harness_retry.test.mjs` — retry reporting and retained full failure transcripts.
+- `dap_client_failure.test.mjs` — the DAP harness settles write/reply failure
+  through one promise, clears pending event timers, and rejects new work after
+  adapter exit without orphan response timers. Includes a real adapter early exit.
+
+### RDP failure handling
+
+- `rdp_catalog.test.mjs` — destroy-before-available tombstones and bounded source catalogs.
+- `source_actor_retirement.test.mjs` — held source/substring/ArrayBuffer replies
+  cancel on navigation; late replies cannot poison replacement actors.
+- `frame_unavailable.test.mjs` — unavailable frame instance/PC reads cannot panic
+  the component or publish a partial call stack.
+- `runtime_failure.test.mjs` — idle RDP loss, published worker failure and fatal
+  exception cleanup terminate the owned real browser and retain evidence.
+- `tab_watcher_lifecycle.test.mjs` — coalesced refresh, priming cancellation,
+  classified startup retries and greeting deadlines.
+- `startup_target_recovery.test.mjs` — one same-tab startup reacquisition after
+  confirmed target loss, with rollback, retry exhaustion and shutdown coverage.
+- `startup_retry_log.test.mjs` — all three CLI frontends retain recovered startup
+  diagnostics after clean exit, without requiring `--log`.
+- `wasm_value_types.test.mjs` — exact float widths/negative zero and explicit
+  unavailable wide i64/operand-stack values through LLDB's packet command.
+- `mcp_owner_failure.test.mjs` — failed cleanup prevents a replacement CLI;
+  concurrent MCP launch/command/read/interrupt behavior is in `mcp.test.mjs`.
+
+- `stop_coordination.test.mjs` — withheld worker acknowledgements and close during
+  collection cannot publish an incomplete all-stop.
+- `breakpoint_reconciliation.test.mjs` — shared physical sites, removal during
+  replay, JS reload, and close during installation use one desired/applied owner.
+- `protocol_boundaries.test.mjs` — real component attach rejects malformed
+  checksums and oversized pre-attach frames without publishing a false attach.
+- `tab_identity.test.mjs` — stable Firefox tab IDs survive cross-connection lookup
+  and removal of an earlier tab; a mismatched bound-tab PID is rejected.
+
+- `rdp_evaluation.test.mjs` — a packet proxy withholds or replaces real Firefox
+  evaluation replies to exercise acknowledgement/result deadlines, late-result
+  isolation, disconnects, malformed acknowledgements, and request errors. These
+  tests drive the RDP session directly; `repl_basic.test.mjs` covers evaluation
+  through the embedded LLDB frontend.
 
 ### CLI diagnostics
 
 - `session_log.test.mjs` — failed default runs retain their temporary transcript
   and print its tail/path; `--log` persists the complete interactive transcript
   while keeping debug traffic out of the terminal (the latter case uses Firefox).
+- `session_log_io.test.mjs` — transcript short writes, disk-write failure reporting,
+  and final partial-line flushing, with fault injection isolated in child processes.
+
+Direct, REPL, and DAP harness attempts write full transcripts using the production
+session-log writer. Files go to `FIREFOX_LLDB_LOG_DIR` when set, otherwise the
+system temporary directory. Each attempt gets a distinct path, retained even if
+a later retry succeeds. Deadline errors include the transcript path; the writer
+flushes and closes at test-process exit. These files may contain page content,
+console output, and protocol data. Test transcripts are intentionally retained
+on successful runs too; remove them when no longer needed.
+
+Whole-session setup retries are limited to typed socket failures and setup
+deadlines whose cleanup completed. Assertions, protocol errors and unclassified
+failures stop after one attempt. Automatic attach shares the production helper
+and retries only an observed target replacement during that attempt. Recovered
+startup target loss has a separate one-reacquisition budget inside the per-tab
+transaction, before a component/port is published and always for the same tab ID.
+Recovered attempts remain visible in logs and test output; eventual success is not a clean
+first attempt. Fault-injection tests explicitly label their expected retries.
+
+CI uploads the configured log directory after each matrix job, including
+successful runs and recovered attempts, with a 14-day retention period. Explicit
+CLI `--log` also honors `FIREFOX_LLDB_LOG_DIR`; without it, explicit logs stay in
+the working directory. DAP setup errors include the retained transcript path.
+
+To measure the production writer against an existing transcript:
+
+```sh
+node --import tsx scripts/benchmark-logging.mjs /path/to/session.log
+```
+
+The replay reports seven samples after warmup: wall time, CPU time, bytes, and
+the longest individual record call (including any threshold-triggered flush).
+It verifies the output and removes only its own temporary replay files. It does
+not measure log-message construction, DAP parsing, or end-to-end debugger timing;
+do not interpret the result as a percentage overhead on debugging operations.
 
 ### Launch safety (Firefox binary must be present, but none is spawned)
 
 - `launch_port_conflict.test.mjs` — launch refuses an occupied RDP port and rolls Firefox back when the platform port bind fails.
+- `launch_handoff.test.mjs` — controlled POSIX launcher hands off to a detached
+  replacement with its own child. Covers launcher-alive/launcher-exited cleanup,
+  unrelated-profile/port isolation, RDP startup rollback, and discovery failure
+  retaining the profile. The fixture has an independent lifetime limit and
+  failure cleanup; no real Firefox is launched.
 
 ### Channel launch
 
-- `launch_nightly.test.mjs` — when Firefox Nightly is installed, `--nightly` launches it, verifies its RDP endpoint, and cleans it up without hanging.
+- `authenticated_module.test.mjs` — browser-owned bytes preserve credentials and
+  are not replaced by a different HTTP response at the module URL.
+- `custom_section_offsets.test.mjs` — custom sections before code retain correct
+  breakpoints and instruction stepping after symbol preparation.
+- `sourcemap_limits.test.mjs` — excessive symbol expansion fails enrichment while
+  leaving the real debugger responsive.
+- `resource_lifetime.test.mjs` — actual jco resource drops retire host handles
+  across repeated recursive stops.
+- `memory_failure.test.mjs` — Firefox read failures and out-of-bounds addresses
+  are errors, followed by a successful read in the same session.
+- `library_xml.test.mjs` — a module name containing `&` reaches LLDB intact.
+
+- `generation_ownership.test.mjs` — real reload/disposal while module or source
+  replies are delayed rejects stale commits and prevents post-disposal files.
+- `symbol_fetch.test.mjs` — stalled headers/bodies, declared/streaming limits,
+  and cancellation release real HTTP requests.
+- `component_regeneration.test.mjs` — both generated-code patches are idempotent
+  and reject missing or ambiguous anchors without partially modifying output.
+- `cli_startup_shutdown.test.mjs` — SIGTERM during real Firefox acquisition in
+  each CLI must join rollback before exit and remove the browser/profile.
+- `worker_lifecycle.test.mjs` — a real component over a real RDP session reports
+  typed readiness, bounds blocked startup, propagates initialization failure,
+  and shares one termination promise.
+- `launch_shutdown.test.mjs` — real embedded LLDB attach pauses at the initial
+  Firefox target boundary while platform shutdown begins. Even a delayed
+  continuation that ignores cancellation cannot advance to navigation or worker
+  creation. LLDB's failed attach currently still takes its roughly 40-second
+  command timeout; the test does not claim immediate command cancellation.
+- `launch_cancellation.test.mjs` — a packet proxy withholds real Firefox traffic
+  at greeting, initialization, initial target, sources, navigation, prime stop,
+  and worker readiness. Production platform shutdown must reject the launch and
+  close all proxy connections within two seconds without releasing held packets.
+  This includes the `--connect` probe, tab watcher, and a real component worker
+  blocked on its initial synchronous debuggee RPC.
+- `launch_nightly.test.mjs` — when Firefox Nightly is installed, `--nightly`
+  launches it, verifies its RDP endpoint, and cleans it up without hanging. On
+  POSIX it independently checks that no process with the test launch's profile
+  and port remains, including when startup fails.
 
 ### DAP frontend
 
@@ -65,6 +185,9 @@ bypassing its CLI or transport plumbing.
 - `dap_sourcemap.test.mjs` — source-map-derived locations and synthesized variable-name behavior.
 - `dap_navigation.test.mjs` — target replacement, module re-sync, and source-breakpoint rebinding.
 - `dap_lifecycle.test.mjs` — invalid attach failure and clean disconnect.
+- `dap_log.test.mjs` — real request/response/event correlation, failed evaluation,
+  pending-request cleanup, payload omission, and a quiet, successful adapter exit
+  without a fabricated RSP exit packet after detach.
 - `dap_pause.test.mjs` — the current `SBProcess::Stop()` timeout is reported as a structured DAP failure; the TUI's direct RDP interrupt remains the working pause path.
 - `dap_breakpoint_updates.test.mjs` — replaces function and source breakpoints while stopped, including conditions across recursive calls.
 - `dap_disassembly.test.mjs` — disassembles the live wasm PC, installs an instruction breakpoint from the result, and stops at its exact address.
@@ -136,6 +259,7 @@ test update.
 - `nav_reload.test.mjs` — same-URL `location.reload()`; module bytecode is re-fetched, not served stale.
 - `nav_module_unload.test.mjs` — navigating to a different wasm URL unloads the old module from `image list`.
 - `nav_consecutive.test.mjs` — replacing a target that paused before LLDB listened discards that target's stale pause state.
+- `navigation_target_loss.test.mjs` — accepted navigation without a replacement announcement fails with diagnostics; late real events cannot complete the failed operation.
 - `nav_while_running.test.mjs` — a target swap during `continue` does not leak the reused tid's all-stop listener.
 
 A genuine tab close (as opposed to a navigation) still correctly emits

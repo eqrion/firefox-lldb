@@ -2,32 +2,38 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-// Launch a headless Firefox with an isolated, throwaway profile and the RDP
-// debugger server enabled. Used by the live test bridge so an lldb test can
-// debug real wasm in a real browser without touching the user's Firefox.
+// Owns a launched Firefox, its profile changes and verified process cleanup.
+// Existing browsers reached through --connect are owned by their caller.
 
 import { spawn, execFileSync, type ChildProcess, type StdioOptions } from "node:child_process";
 import { mkdir, mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
 import { accessSync, existsSync, readFileSync, createWriteStream } from "node:fs";
-import { connect as netConnect } from "node:net";
+import { createServer } from "node:net";
 import { tmpdir, homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import { firefoxLogDir } from "../config.js";
+import { noopLogger, type Logger } from "../diagnostics/logger.js";
+import { stopFirefoxReplacements } from "./firefox-processes.js";
+import { LAUNCH_TOKEN_PREF } from "../rdp/constants.js";
 
-/** True if something is already accepting connections on host:port. */
-function isPortOpen(port: number, host = "127.0.0.1", timeoutMs = 200): Promise<boolean> {
-  return new Promise((resolve) => {
-    const socket = netConnect({ port, host, timeout: timeoutMs });
-    socket.once("connect", () => {
-      socket.destroy();
-      resolve(true);
+export class FirefoxPortInUseError extends Error {
+  constructor(port: number) {
+    super(`RDP port 127.0.0.1:${port} is already in use; choose another --rdp-port`);
+    this.name = "FirefoxPortInUseError";
+  }
+}
+
+/** Check binding directly, without sending a probe connection to an unrelated service. */
+function checkPortAvailable(port: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.once("error", (error: NodeJS.ErrnoException) => {
+      reject(error.code === "EADDRINUSE" ? new FirefoxPortInUseError(port) : error);
     });
-    socket.once("timeout", () => {
-      socket.destroy();
-      resolve(false);
+    probe.listen(port, "127.0.0.1", () => {
+      probe.close((error) => (error ? reject(error) : resolve()));
     });
-    socket.once("error", () => resolve(false));
   });
 }
 
@@ -49,10 +55,6 @@ export function focusFirefoxWindow(pid: number): void {
       });
       break;
   }
-}
-
-function bringToForeground(pid: number): void {
-  setTimeout(() => focusFirefoxWindow(pid), 1500);
 }
 
 function isExecutable(p: string): boolean {
@@ -250,11 +252,6 @@ const CONVENIENCE_PREFS = [
   ["javascript.options.wasm_js_promise_integration", true],
 ] as const;
 
-/** Pref used to confirm an RDP connection actually reached the Firefox this
- * process launched, rather than an unrelated (e.g. stale leftover) instance
- * that happens to be listening on the same port. See verifyFirefoxLaunchToken. */
-export const LAUNCH_TOKEN_PREF = "firefoxLldb.launchToken";
-
 export interface FirefoxHandle {
   profileDir: string;
   exited: Promise<void>;
@@ -297,7 +294,12 @@ export async function launchFirefox(opts: {
    * instead of a throwaway one. Firefox can't run two instances against the
    * same profile, so this fails if that profile is already running. */
   defaultProfile?: boolean;
+  logger?: Logger;
+  /** Cancels acquisition; rejection joins cleanup before returning. */
+  signal?: AbortSignal;
 }): Promise<FirefoxHandle> {
+  opts.signal?.throwIfAborted();
+  const logger = opts.logger ?? noopLogger;
   const binary = opts.binary ?? findFirefoxBinary(opts.channel);
   if (!binary) {
     throw new Error(
@@ -305,12 +307,8 @@ export async function launchFirefox(opts: {
         "Install it in a standard location or pass --firefox <path>."
     );
   }
-  if (await isPortOpen(opts.rdpPort)) {
-    throw new Error(
-      `something is already listening on 127.0.0.1:${opts.rdpPort} (the RDP port). ` +
-        `This is likely a leftover Firefox from a previous run — kill it or pass a different --rdp-port.`
-    );
-  }
+  await checkPortAvailable(opts.rdpPort);
+  opts.signal?.throwIfAborted();
 
   let profileDir: string;
   if (opts.defaultProfile) {
@@ -348,19 +346,31 @@ export async function launchFirefox(opts: {
   if (opts.marionettePort !== undefined) {
     prefs += `user_pref("marionette.port", ${opts.marionettePort});\n`;
   }
-  const cleanFailedProfileSetup = async () => {
-    if (opts.defaultProfile) await removeUserJsBlock(profileDir).catch(() => {});
-    else await rm(profileDir, { recursive: true, force: true }).catch(() => {});
+  let wroteProfile = false;
+  const rollbackProfile = async (error: unknown): Promise<never> => {
+    try {
+      if (opts.defaultProfile) {
+        if (wroteProfile) await removeUserJsBlock(profileDir);
+      } else await rm(profileDir, { recursive: true, force: true });
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        `Firefox startup and profile rollback failed: ${profileDir}`
+      );
+    }
+    throw error;
   };
   try {
+    logger.debug(`[firefox] launch.profile-acquired ${JSON.stringify({ profileDir })}`);
+    opts.signal?.throwIfAborted();
+    wroteProfile = true;
     if (opts.defaultProfile) {
       await writeUserJsBlock(profileDir, prefs);
     } else {
       await writeFile(join(profileDir, "user.js"), prefs);
     }
   } catch (err) {
-    await cleanFailedProfileSetup();
-    throw err;
+    return rollbackProfile(err);
   }
 
   const args = [
@@ -395,10 +405,10 @@ export async function launchFirefox(opts: {
   const stdio: StdioOptions = captureOutput ? ["ignore", "pipe", "pipe"] : "ignore";
   let child: ChildProcess;
   try {
+    opts.signal?.throwIfAborted();
     child = spawn(binary, args, { stdio, detached: true });
   } catch (err) {
-    await cleanFailedProfileSetup();
-    throw err;
+    return rollbackProfile(err);
   }
   // Some Firefox launchers (notably macOS Nightly) hand off to the browser
   // process and exit almost immediately. Subscribe before doing any other
@@ -416,6 +426,7 @@ export async function launchFirefox(opts: {
       child.once("error", () => resolve());
     }
   });
+  const stdioClosed = new Promise<void>((resolve) => child.once("close", () => resolve()));
   let outputLog: ReturnType<typeof createWriteStream> | undefined;
   let outputClosed: Promise<void> = Promise.resolve();
   if (captureOutput && logDir) {
@@ -427,31 +438,48 @@ export async function launchFirefox(opts: {
     outputLog.on("error", (err) => {
       process.stderr.write(`warning: could not write Firefox log: ${err.message}\n`);
     });
-    // Two readable streams share this destination. Neither owns its end: close
-    // it once the child exits so one stream cannot end it while the other still
-    // has buffered diagnostics, and so the write stream never keeps Node alive
-    // after the browser is gone.
+    // Child 'exit' precedes pipe drainage. Only 'close' proves both streams
+    // reached EOF, including pipes inherited by a replacement browser.
     child.stdout?.pipe(outputLog, { end: false });
     child.stderr?.pipe(outputLog, { end: false });
-    void exited.then(() => outputLog?.end());
+    void stdioClosed.then(() => outputLog?.end());
   }
   try {
     await started;
   } catch (err) {
-    await cleanFailedProfileSetup();
-    throw new Error(
-      `could not start Firefox (${binary}): ${err instanceof Error ? err.message : String(err)}`
+    await exitsWithin(outputClosed, FIREFOX_CLOSE_GRACE_MS);
+    outputLog?.destroy();
+    return rollbackProfile(
+      new Error(
+        `could not start Firefox (${binary}): ${err instanceof Error ? err.message : String(err)}`,
+        { cause: err }
+      )
     );
   }
   child.unref();
+  logger.debug(
+    `[firefox] launch.spawned ${JSON.stringify({
+      pid: child.pid,
+      profileDir,
+      rdpPort: opts.rdpPort,
+      launchToken,
+    })}`
+  );
+  void exited.then(() =>
+    logger.debug(
+      `[firefox] launcher.exited ${JSON.stringify({
+        pid: child.pid,
+        code: child.exitCode,
+        signal: child.signalCode,
+      })}`
+    )
+  );
 
-  if (!(opts.headless ?? false) && child.pid !== undefined) {
-    bringToForeground(child.pid);
-  }
-
+  let focusTimer: ReturnType<typeof setTimeout> | undefined;
   let closePromise: Promise<void> | undefined;
   const close = () =>
     (closePromise ??= (async () => {
+      clearTimeout(focusTimer);
       // launchFirefox deliberately unrefs the detached browser so an abandoned
       // handle cannot keep its caller alive forever. Once close() is awaited,
       // however, the child exit event is the work the caller is waiting for;
@@ -499,7 +527,29 @@ export async function launchFirefox(opts: {
           `Firefox process ${child.pid ?? "unknown"} did not exit after two SIGKILL attempts`
         );
       }
-      await outputClosed;
+      // macOS can relaunch through Launch Services into a new PID and process
+      // group. The original child's exit proves nothing about that replacement.
+      // Keep the profile if discovery or termination cannot be verified.
+      if (process.platform !== "win32") {
+        try {
+          await stopFirefoxReplacements(profileDir, opts.rdpPort, logger);
+        } catch (error) {
+          logger.error(`[firefox] cleanup.failed profile=${profileDir}: ${String(error)}`);
+          child.stdout?.destroy();
+          child.stderr?.destroy();
+          outputLog?.destroy();
+          child.unref();
+          throw error;
+        }
+      }
+      if (!(await exitsWithin(outputClosed, FIREFOX_CLOSE_GRACE_MS))) {
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        outputLog?.destroy();
+        throw new Error(
+          `Firefox output did not drain; transcript incomplete for profile ${profileDir}`
+        );
+      }
       if (opts.defaultProfile) {
         await removeUserJsBlock(profileDir);
       } else {
@@ -507,6 +557,21 @@ export async function launchFirefox(opts: {
       }
     })());
 
+  if (opts.signal?.aborted) {
+    try {
+      await close();
+    } catch (error) {
+      throw new AggregateError(
+        [opts.signal.reason, error],
+        "Firefox cancellation and rollback failed"
+      );
+    }
+    opts.signal.throwIfAborted();
+  }
+  if (!(opts.headless ?? false) && child.pid !== undefined) {
+    const pid = child.pid;
+    focusTimer = setTimeout(() => focusFirefoxWindow(pid), 1500);
+  }
   return {
     profileDir,
     exited,

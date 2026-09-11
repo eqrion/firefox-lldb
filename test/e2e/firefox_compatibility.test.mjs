@@ -7,8 +7,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { launchFirefox } from "../../src/rdp/firefox.ts";
-import { verifyFirefoxLaunchToken } from "../../src/rdp/session.ts";
+import { launchFirefox } from "../../src/core/firefox.ts";
+import { verifyFirefoxLaunchToken } from "../../src/rdp/browser.ts";
 import { freePort } from "../../src/platform/gdb-server-spawner.ts";
 import { firefoxCompatibilityError } from "../../src/rdp/firefox-compatibility.ts";
 import { Session } from "./harness.mjs";

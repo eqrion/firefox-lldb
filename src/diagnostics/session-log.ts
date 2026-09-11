@@ -2,10 +2,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-// Session transcript for bug reports: everything the user typed, everything
-// printed back, and the debug stream that `-v` would otherwise dump over the
-// prompt, all in one file. Records are written synchronously (buffered) because
-// both CLIs exit via process.exit(), which truncates an async write stream.
+// Owns the session transcript, recent failure tail and write-health reporting.
+// Buffered synchronous writes survive explicit process.exit; they do not imply fsync.
 
 import { closeSync, mkdirSync, openSync, readFileSync, rmSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -16,6 +14,9 @@ export type LogKind = "stdin" | "stdout" | "stderr" | "debug";
 
 export interface SessionLog {
   path: string;
+  /** First write/close failure; a failed transcript must not claim completeness. */
+  readonly failure: string | undefined;
+  flush(): void;
   record(kind: LogKind, text: string): void;
   /** Most recent formatted records, newest last. */
   tail(limit?: number): string[];
@@ -27,22 +28,31 @@ export interface SessionLog {
 const FLUSH_THRESHOLD_BYTES = 8 * 1024;
 const FLUSH_INTERVAL_MS = 500;
 const ANSI = /\x1b\[[0-9;?]*[A-Za-z]/g;
+let logSerial = 0;
 
-/** ./firefox-lldb-<YYYYMMDD-HHMMSS>-<pid>.log */
-export function defaultLogPath(): string {
+/** Unique within this process, including multiple setup attempts in one second. */
+function logFileName(): string {
   const d = new Date();
   const p = (n: number, width = 2) => String(n).padStart(width, "0");
   const stamp =
     `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}` +
     `-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
-  return `firefox-lldb-${stamp}-${process.pid}.log`;
+  return `firefox-lldb-${stamp}-${process.pid}-${++logSerial}.log`;
+}
+
+/** Explicit --log uses the configured artifact directory, or the working directory. */
+export function defaultLogPath(): string {
+  const dir = firefoxLogDir();
+  if (!dir) return logFileName();
+  mkdirSync(dir, { recursive: true });
+  return join(dir, logFileName());
 }
 
 /** Default always-on transcript location. Removed after a clean run. */
 export function temporaryLogPath(): string {
   const dir = firefoxLogDir() ?? tmpdir();
   mkdirSync(dir, { recursive: true });
-  return join(dir, defaultLogPath());
+  return join(dir, logFileName());
 }
 
 function toolVersion(): string {
@@ -60,25 +70,45 @@ export function openSessionLog(path: string, argv: string[]): SessionLog {
   let buffer = "";
   let bufferedBytes = 0;
   let closed = false;
+  let failure: string | undefined;
   const recent: string[] = [];
   const keepRecent = 100;
 
+  const failed = (error: unknown): void => {
+    if (failure !== undefined) return;
+    failure = error instanceof Error ? error.message : String(error);
+    const notice = `[session-log] transcript incomplete at ${path}: ${failure}`;
+    recent.push(notice);
+    // Bypass captured stdio: reporting a failed log through its own mirror can
+    // recursively trigger another flush. A broken stderr is also non-fatal.
+    try {
+      writeSync(2, `${notice}\n`);
+    } catch {
+      /* no writable diagnostic sink */
+    }
+  };
+
   const flush = (): void => {
-    if (!buffer) return;
-    const pending = buffer;
+    if (!buffer || closed || failure !== undefined) return;
+    const pending = Buffer.from(buffer, "utf8");
     buffer = "";
     bufferedBytes = 0;
     try {
-      writeSync(fd, pending);
-    } catch {
-      // A failing transcript must not take the debug session down with it.
+      let offset = 0;
+      while (offset < pending.length) {
+        const written = writeSync(fd, pending, offset, pending.length - offset);
+        if (written === 0) throw new Error("transcript write made no progress");
+        offset += written;
+      }
+    } catch (error) {
+      failed(error);
     }
   };
 
   const append = (text: string): void => {
-    if (closed) return;
+    if (closed || failure !== undefined) return;
     buffer += text;
-    bufferedBytes += text.length;
+    bufferedBytes += Buffer.byteLength(text);
     if (bufferedBytes >= FLUSH_THRESHOLD_BYTES) flush();
   };
 
@@ -109,7 +139,7 @@ export function openSessionLog(path: string, argv: string[]): SessionLog {
 
   const timer = setInterval(flush, FLUSH_INTERVAL_MS);
   timer.unref();
-  const onExit = () => flush();
+  const onExit = () => close();
   process.on("exit", onExit);
 
   const restores: (() => void)[] = [];
@@ -140,8 +170,27 @@ export function openSessionLog(path: string, argv: string[]): SessionLog {
     });
   };
 
+  const close = (opts?: { remove?: boolean }): void => {
+    if (closed) return;
+    for (const restore of restores.splice(0).reverse()) restore();
+    clearInterval(timer);
+    process.off("exit", onExit);
+    flush();
+    closed = true;
+    try {
+      closeSync(fd);
+    } catch (error) {
+      failed(error);
+    }
+    if (opts?.remove && failure === undefined) rmSync(path, { force: true });
+  };
+
   return {
     path,
+    get failure() {
+      return failure;
+    },
+    flush,
     record,
     tail(limit = 20) {
       return recent.slice(-Math.max(0, limit));
@@ -150,27 +199,22 @@ export function openSessionLog(path: string, argv: string[]): SessionLog {
       mirror(process.stderr, "stderr");
       if (opts?.stdout) mirror(process.stdout, "stdout");
     },
-    close(opts) {
-      if (closed) return;
-      for (const restore of restores.splice(0).reverse()) restore();
-      clearInterval(timer);
-      process.off("exit", onExit);
-      flush();
-      closed = true;
-      closeSync(fd);
-      if (opts?.remove) rmSync(path, { force: true });
-    },
+    close,
   };
 }
 
 /** Render an error with the tail and the location of the complete transcript. */
 export function formatErrorWithLog(error: unknown, sessionLog: SessionLog, keep = 20): string {
+  sessionLog.flush();
   const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
   const tail = sessionLog.tail(keep);
   const recent = tail.length
     ? `\nLast ${tail.length} session log lines:\n${tail.join("\n")}`
     : "\nSession log has no diagnostic records.";
-  return `${message}${recent}\nFull session log retained at ${sessionLog.path}`;
+  const location = sessionLog.failure
+    ? `Session log incomplete at ${sessionLog.path}: ${sessionLog.failure}`
+    : `Full session log retained at ${sessionLog.path}`;
+  return `${message}${recent}\n${location}`;
 }
 
 /**
@@ -179,14 +223,53 @@ export function formatErrorWithLog(error: unknown, sessionLog: SessionLog, keep 
  * captureStdio's mirror) entirely. Without this, a genuine crash never
  * appears in the transcript even though it's exactly what a bug report needs.
  */
-export function captureFatalErrors(sessionLog: SessionLog): void {
+export function captureFatalErrors(
+  sessionLog: SessionLog,
+  cleanup?: () => void | Promise<void>
+): void {
+  let handling = false;
   const handle = (err: unknown): void => {
     const text = err instanceof Error ? (err.stack ?? err.message) : String(err);
     sessionLog.record("stderr", text);
     console.error(err);
-    console.error(`Full session log retained at ${sessionLog.path}`);
-    sessionLog.close();
-    process.exit(1);
+    sessionLog.flush();
+    console.error(
+      sessionLog.failure
+        ? `Session log incomplete at ${sessionLog.path}: ${sessionLog.failure}`
+        : `Full session log retained at ${sessionLog.path}`
+    );
+    if (handling) return;
+    handling = true;
+    process.exitCode = 1;
+    const finish = () => {
+      sessionLog.close();
+      process.exit(1);
+    };
+    if (!cleanup) {
+      finish();
+      return;
+    }
+    // Fatal exceptions do not make detached Firefox processes disappear.
+    // Give their existing owner one bounded cleanup attempt; never resume work.
+    const timer = setTimeout(() => {
+      sessionLog.record(
+        "stderr",
+        "fatal cleanup timed out after 15000 ms; owned resources may remain"
+      );
+      finish();
+    }, 15_000);
+    void Promise.resolve()
+      .then(cleanup)
+      .catch((error: unknown) => {
+        sessionLog.record(
+          "stderr",
+          `fatal cleanup failed: ${error instanceof Error ? error.stack : String(error)}`
+        );
+      })
+      .finally(() => {
+        clearTimeout(timer);
+        finish();
+      });
   };
   process.on("uncaughtException", handle);
   process.on("unhandledRejection", handle);

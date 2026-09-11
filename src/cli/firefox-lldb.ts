@@ -3,20 +3,15 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-// Convenience wrapper: run the platform server in-process and drive an embedded
-// LLDB (compiled to WebAssembly) as a real interactive (lldb) prompt on this
-// terminal. No native lldb binary is required.
-//
-// The wasm LLDB cannot open TCP sockets, so its RSP connections (the platform
-// connection and each per-tab GDB server) are bridged to the in-process TCP
-// servers through in-memory channels: LLDB connects to "inprocess://<id>" and
-// we pump bytes between channel <id> and a localhost socket.
+// Interactive entry point: owns embedded LLDB, the runtime and the terminal.
+// The shared LLDB bridge connects in-process channels to local RSP listeners.
 
 import { readFile } from "node:fs/promises";
 import { LLDBClient } from "lldb-wasm";
-import { parseCliArgs, startPlatformServer } from "../core/platform-session.js";
-import { DebugFileRegistry } from "../core/debug-files.js";
-import { focusFirefoxWindow } from "../rdp/firefox.js";
+import { parseCliArgs } from "./options.js";
+import { startPlatformServer } from "../core/platform-session.js";
+import { DebugFileRegistry } from "../symbols/debug-files.js";
+import { focusFirefoxWindow } from "../core/firefox.js";
 import { createLogger } from "./logger.js";
 import {
   captureFatalErrors,
@@ -24,45 +19,15 @@ import {
   formatErrorWithLog,
   openSessionLog,
   temporaryLogPath,
-} from "./session-log.js";
+} from "../diagnostics/session-log.js";
 import { runRepl } from "./repl.js";
 import type { RdpWasmSession } from "../rdp/session.js";
-import { debugEnvEnabled } from "../config.js";
-import { EmbeddedLldbBridge } from "./embedded-lldb.js";
-
-// lldb::ReturnStatus values at or above this are failures. Keep the automatic
-// attach retry local to the CLI: an uncontrolled page reload can invalidate the
-// first per-tab server while `process attach` is in flight, but the platform is
-// ready to launch a fresh one as soon as the replacement target arrives.
-const LLDB_FAILED_STATUS = 6;
-const AUTO_ATTACH_ATTEMPTS = 4;
-
-async function attachWithRetry(
-  client: LLDBClient,
-  pid: number,
-  onRetry?: (attempt: number) => void
-): Promise<string> {
-  let lastError = "unknown attach failure";
-  for (let attempt = 1; attempt <= AUTO_ATTACH_ATTEMPTS; attempt++) {
-    const result = await client.sessionCommand(`process attach --plugin wasm --pid ${pid}`);
-    if (result.status < LLDB_FAILED_STATUS) {
-      const state = await client.sessionState();
-      if (state.reason !== "none" && state.reason !== "exited") {
-        return (result.output + result.error).trimEnd();
-      }
-      lastError = `process did not stop (state ${state.reason})`;
-    } else {
-      lastError = (result.error || result.output).trim() || lastError;
-    }
-    if (attempt < AUTO_ATTACH_ATTEMPTS) {
-      onRetry?.(attempt);
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    }
-  }
-  throw new Error(`automatic attach failed after ${AUTO_ATTACH_ATTEMPTS} attempts: ${lastError}`);
-}
+import { debugEnvEnabled, ptyPromptMarker } from "../config.js";
+import { EmbeddedLldbBridge } from "../lldb/bridge.js";
+import { attachLldb } from "../lldb/attach.js";
 
 async function main(): Promise<void> {
+  let navigationRevision = 0;
   const args = parseCliArgs(process.argv.slice(2));
   const verbose = args.verbose || debugEnvEnabled();
 
@@ -72,7 +37,8 @@ async function main(): Promise<void> {
     process.argv.slice(2)
   );
   sessionLog.captureStdio();
-  captureFatalErrors(sessionLog);
+  let fatalCleanup: (() => Promise<void>) | undefined;
+  captureFatalErrors(sessionLog, () => fatalCleanup?.());
   if (persistentLog) process.stderr.write(`logging this session to ${sessionLog.path}\n`);
   const logger = createLogger({ verbose, quiet: true, sessionLog });
 
@@ -86,42 +52,74 @@ async function main(): Promise<void> {
   );
 
   let handle: Awaited<ReturnType<typeof startPlatformServer>> | undefined;
+  let startup: ReturnType<typeof startPlatformServer> | undefined;
+  const startupAbort = new AbortController();
   let session: RdpWasmSession | undefined;
   let exiting = false;
   let exitCode = 0;
   let failureReported = false;
+  let attachRetried = false;
   const reportFailure = (err: unknown) => {
     session?.logState("error");
+    bridge.logState();
     logger.error(formatErrorWithLog(err, sessionLog));
     failureReported = true;
   };
-  const cleanup = async (code = 0) => {
+  let cleanupPromise: Promise<void> | undefined;
+  const cleanup = (code = 0): Promise<void> => {
     exitCode ||= code;
     process.exitCode = exitCode;
-    if (exiting) return;
+    if (cleanupPromise) return cleanupPromise;
     exiting = true;
-    // LLDB worker teardown can release Node's final referenced handle before
-    // this async function reaches process.exit(). Preserve the intended status
-    // if the runtime exits naturally while cleanup is still settling.
-    const cleanupKeepalive = setInterval(() => {}, 1000);
-    bridge.close();
-    for (const work of [handle?.shutdown(), client.destroy()]) {
-      try {
-        await work;
-      } catch (err) {
-        logger.error(`[cleanup] ${err instanceof Error ? err.message : String(err)}`);
-        exitCode ||= 1;
-        process.exitCode = exitCode;
+    return (cleanupPromise = Promise.resolve().then(async () => {
+      startupAbort.abort(new Error("platform startup cancelled by shutdown"));
+      // LLDB worker teardown can release Node's final referenced handle before
+      // this async function reaches process.exit(). Preserve the intended status
+      // if the runtime exits naturally while cleanup is still settling.
+      const cleanupKeepalive = setInterval(() => {}, 1000);
+      await startup?.catch((error) => {
+        if (error instanceof AggregateError) {
+          reportFailure(error);
+          exitCode ||= 1;
+          process.exitCode = exitCode;
+        }
+      });
+      for (const work of [
+        () => bridge.close(),
+        () => handle?.shutdown(),
+        () => debugFiles.close(),
+        () => client.destroy(),
+      ]) {
+        try {
+          await work();
+        } catch (err) {
+          logger.error(`[cleanup] ${err instanceof Error ? err.message : String(err)}`);
+          exitCode ||= 1;
+          process.exitCode = exitCode;
+        }
       }
-    }
-    if (exitCode !== 0 && !failureReported) {
-      session?.logState("cleanup-failed");
-      logger.error(formatErrorWithLog(new Error("session cleanup failed"), sessionLog));
-    }
-    sessionLog.close({ remove: exitCode === 0 && !persistentLog });
-    clearInterval(cleanupKeepalive);
-    process.exit(exitCode);
+      if (bridge.failure && !failureReported)
+        reportFailure(new Error(`embedded bridge failed: ${bridge.failure}`));
+      if (exitCode !== 0 && !failureReported) {
+        session?.logState("cleanup-failed");
+        logger.error(formatErrorWithLog(new Error("session cleanup failed"), sessionLog));
+      }
+      if (attachRetried && !failureReported && !persistentLog)
+        process.stderr.write(
+          `Session transcript retained after attach retry at ${sessionLog.path}\n`
+        );
+      sessionLog.close({
+        remove: exitCode === 0 && !persistentLog && !failureReported && !attachRetried,
+      });
+      clearInterval(cleanupKeepalive);
+      process.exit(exitCode);
+    }));
   };
+  fatalCleanup = () => cleanup(1);
+  void bridge.failed.then((error) => {
+    reportFailure(error);
+    return cleanup(1);
+  });
   process.on("SIGTERM", () => void cleanup(0));
   process.on("SIGHUP", () => void cleanup(0));
 
@@ -137,6 +135,7 @@ async function main(): Promise<void> {
   // live RDP session, which the platform server hands us via onSession.
   let triggerInterrupt: (() => void) | undefined;
   const repl = runRepl({
+    promptMarker: ptyPromptMarker(),
     client,
     getSession: () => session,
     onExit: () => void cleanup(0),
@@ -151,56 +150,57 @@ async function main(): Promise<void> {
   // platform server returns the channel ID as the connection "port" and the
   // wasm LLDB connects to inprocess://<id> (PlatformWasmRemoteGDBServer::MakeUrl).
   try {
-    handle = await startPlatformServer(
-      { ...args, log: true },
-      {
-        wrapConnectPort: (port) => bridge.bridgeTcp(port),
-        logger,
-        debugFiles,
-        onRdpSession: (rdpSession) => {
-          session = rdpSession;
-        },
-        onTab: (tab, pid) => repl.print(`tab available: ${tab.url}\n  attach --pid ${pid}`),
-        onSession: (s, interrupt) => {
-          session = s;
-          triggerInterrupt = interrupt;
-          void s.streamConsole((m) => repl.printConsole(m));
-          // "navigated" fires as soon as the old top-level target is gone, before
-          // the new one (if any) arrives — too early to know the destination URL.
-          // Wait for the next top-level "target" to report where the page landed;
-          // if none ever arrives, "detached" below reports the tab closed instead.
-          let awaitingNavigationTarget = false;
-          s.on("navigated", () => {
-            repl.print("page navigating; re-syncing debug session...");
-            awaitingNavigationTarget = true;
-          });
-          s.on("target", (info) => {
-            if (!info.isTopLevel || !awaitingNavigationTarget) return;
-            awaitingNavigationTarget = false;
-            repl.print(`page navigated to ${info.url}`);
-          });
-          s.on("detached", () => {
-            repl.print("the attached tab was closed; detaching.");
-            session = undefined;
-            triggerInterrupt = undefined;
-            void client
-              .sessionCommand("process detach")
-              .catch((err) => logger.debug(`[cleanup] LLDB detach failed: ${String(err)}`));
-          });
-        },
-      }
-    );
-
-    // Quit when a launched Firefox goes away (#24).
-    void handle.firefoxExited?.then(() => {
-      repl.print("Firefox exited.");
-      void cleanup(0);
+    handle = await (startup = startPlatformServer(args, {
+      signal: startupAbort.signal,
+      wrapConnectPort: (port) => bridge.bridgeTcp(port),
+      logger,
+      debugFiles,
+      onStartupRetry: () => {
+        attachRetried = true;
+      },
+      onRdpSession: (rdpSession) => {
+        session = rdpSession;
+      },
+      onTab: (tab, pid) => repl.print(`tab available: ${tab.url}\n  attach --pid ${pid}`),
+      onSession: (s, interrupt) => {
+        session = s;
+        triggerInterrupt = interrupt;
+        void s.streamConsole((m) => repl.printConsole(m));
+        // "navigated" fires as soon as the old top-level target is gone, before
+        // the new one (if any) arrives — too early to know the destination URL.
+        // Wait for the next top-level "target" to report where the page landed;
+        // if none ever arrives, "detached" below reports the tab closed instead.
+        let awaitingNavigationTarget = false;
+        s.on("navigated", () => {
+          navigationRevision++;
+          repl.print("page navigating; re-syncing debug session...");
+          awaitingNavigationTarget = true;
+        });
+        s.on("target", (info) => {
+          if (!info.isTopLevel || !awaitingNavigationTarget) return;
+          awaitingNavigationTarget = false;
+          repl.print(`page navigated to ${info.url}`);
+        });
+        s.on("detached", () => {
+          repl.print("the attached tab was closed; detaching.");
+          session = undefined;
+          triggerInterrupt = undefined;
+          void client
+            .sessionCommand("process detach")
+            .catch((err) => logger.debug(`[cleanup] LLDB detach failed: ${String(err)}`));
+        });
+      },
+    }));
+    void handle.failed.then((error) => {
+      reportFailure(error);
+      return cleanup(1);
     });
+    if (exiting) return;
 
     // Bridge the platform connection itself, then drive the platform setup the
     // native wrapper used to pass via `-o`. These produce noisy connect chatter,
     // so we run them quietly and only surface the attach / tab list.
-    const platformChannel = await bridge.bridgeTcp(handle.port);
+    const platformChannel = await bridge.bridgeTcp(handle.port, "platform");
     await client.sessionCommand("platform select remote-gdb-server");
     await client.sessionCommand(`platform connect inprocess://${platformChannel}`);
     await client.sessionCommand("command alias attach process attach --plugin wasm");
@@ -208,15 +208,23 @@ async function main(): Promise<void> {
     let intro = "firefox-lldb — `attach --pid N` to attach, `js p <expr>` to evaluate JS.";
     if (args.url) {
       repl.print(intro + "\nattaching...");
-      intro = await attachWithRetry(client, 1, (attempt) =>
-        repl.print(`automatic attach attempt ${attempt} was interrupted; retrying...`)
-      );
+      intro = await attachLldb(client, 1, {
+        navigationRevision: () => navigationRevision,
+        logger,
+        onRetry: (attempt) => {
+          attachRetried = true;
+          repl.print(
+            `automatic attach attempt ${attempt} was interrupted by navigation; retrying...`
+          );
+        },
+      });
     } else {
       const res = await client.sessionCommand("platform process list");
       intro += "\n" + res.output.trimEnd();
     }
     repl.start(intro);
   } catch (err) {
+    if (exiting) return;
     reportFailure(err);
     await cleanup(1);
   }

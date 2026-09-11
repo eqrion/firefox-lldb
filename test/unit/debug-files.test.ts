@@ -4,8 +4,8 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DebugFileRegistry } from "../../src/core/debug-files.js";
-import type { Logger } from "../../src/logging.js";
+import { DebugFileRegistry } from "../../src/symbols/debug-files.js";
+import type { Logger } from "../../src/diagnostics/logger.js";
 
 const MODULE_URL = "https://example.test/app/math.wasm";
 
@@ -28,12 +28,10 @@ async function withFetch(
     const url = String(input);
     urls.push(url);
     const res = respond(url);
-    return {
-      ok: res.ok,
+    return new Response(res.body ?? new Uint8Array(), {
       status: res.ok ? 200 : 404,
       statusText: res.ok ? "OK" : "Not Found",
-      arrayBuffer: async () => (res.body ?? new Uint8Array()).buffer,
-    };
+    });
   }) as typeof globalThis.fetch;
   try {
     await body(urls);
@@ -121,7 +119,7 @@ test("a debug file that cannot be fetched warns instead of failing the session",
   );
 });
 
-test("two modules naming the same debug file basename warn about the collision", () => {
+test("two modules naming the same debug file basename warn and refuse ambiguous bytes", async () => {
   const { logger, warnings } = recordingLogger();
   const registry = new DebugFileRegistry(logger);
   registry.register("math.debug.wasm", MODULE_URL);
@@ -131,4 +129,12 @@ test("two modules naming the same debug file basename warn about the collision",
   registry.register("math.debug.wasm", "https://other.test/math.wasm");
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /two modules name a separate DWARF file math\.debug\.wasm/);
+  await withFetch(
+    () => {
+      assert.fail("ambiguous symbols must not be fetched");
+    },
+    async () => {
+      assert.equal(await registry.read("/math.debug.wasm"), null);
+    }
+  );
 });

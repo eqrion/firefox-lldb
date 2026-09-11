@@ -1,395 +1,276 @@
 # firefox-lldb internals
 
-Architecture, protocol details, and implementation notes.
+This bridge lets upstream LLDB debug wasm running inside Firefox. LLDB speaks
+GDB Remote Serial Protocol (RSP); Firefox speaks Remote Debugging Protocol
+(RDP). The gdbstub component translates RSP into a synchronous WIT interface,
+and the host implements that interface with asynchronous RDP operations.
 
-## Architecture
+Read [RDP-USAGE](docs/RDP-USAGE.md) for actor/request shapes and the
+[compatibility ledger](docs/COMPATIBILITY.md) for upstream constraints and
+workaround removal criteria. This document describes ownership and execution.
 
-The bridge sits between two protocols:
+## Code map
 
-- **LLDB's GDB remote serial protocol** (RSP, including the wasm extensions) —
-  inbound, from the lldb client
-- **Firefox Remote Debug Protocol** (RDP) — outbound, to the browser
+| Directory          | Owns                                                                            |
+| ------------------ | ------------------------------------------------------------------------------- |
+| `src/cli/`         | Arguments, REPL/DAP/native-server entry points, user-facing shutdown            |
+| `src/lldb/`        | Embedded LLDB channel/TCP bridge and classified automatic attach                |
+| `src/core/`        | Browser acquisition, process cleanup, tab inventory, runtime composition        |
+| `src/platform/`    | Platform RSP commands and pending/live per-tab server registry                  |
+| `src/protocol/`    | RSP framing, TCP listener, pre-attach handshake shim                            |
+| `src/rdp/`         | RDP framing/FIFOs, browser discovery, target generations, all-stop, breakpoints |
+| `src/gdb/`         | WIT resource/snapshot adapter and worker/SAB boundary                           |
+| `src/symbols/`     | Module acquisition, bytecode transforms, source files, separate DWARF registry  |
+| `src/sourcemap/`   | Host wrapper and generated source-map/wasm metadata component                   |
+| `src/diagnostics/` | Transcript writer, logger contract, bounded RSP/DAP summaries                   |
+| `src/mcp/`         | One owned CLI/PTY lifetime and MCP tools that drive it                          |
+| `vendor/`          | Rust components, WIT contracts, locked dependencies and toolchains              |
 
-The **primary** entry points are `firefox-lldb` and `firefox-lldb-dap`. Both
-embed LLDB compiled to WebAssembly and run everything (frontend, platform
-server, per-tab GDB server, RDP client) in a single Node process:
+Generated directories are build output. Behavioral fixes belong in Rust/WIT or
+the checked-in regeneration scripts, not hand-edited generated JavaScript.
 
-```
-REPL (src/cli/repl.ts) or DAP over stdio (upstream lldb-dap)
-   │
-   ▼
-wasm LLDB (Worker)  ──RSP over inprocess://──►  attach-shim ──►  per-tab GDB server
-                                                                        │
-                                                      gdbstub component (Worker thread)
-                                                                        │  synchronous WIT calls
-                                                                        ▼
-                                                            SharedArrayBuffer RPC (Atomics)
-                                                                        │
-                                                                        ▼
-                                                  main thread: RdpDebuggee → RdpWasmSession ──RDP──► Firefox
-```
+## Follow a command
 
-The **secondary** path, `firefox-lldb-server`, runs only the platform + per-tab
-servers and listens on a real TCP port for an external native wasm-plugin lldb.
-The two paths share everything from the per-tab GDB server inward; they differ
-only in how the RSP bytes reach it.
-
-### Embedded wasm LLDB (`firefox-lldb` and `firefox-lldb-dap`)
-
-Neither embedded command spawns a native lldb. They run the platform server
-in-process and drive LLDB compiled to WebAssembly (the `lldb-wasm` package,
-built from `../llvm-project/lldb/tools/lldb-wasm`). Because the wasm LLDB cannot
-open TCP sockets, each RSP connection it would normally make (the platform
-connection and every per-tab GDB server) is bridged through an in-memory
-channel. LLDB connects to `inprocess://<channelId>` and `EmbeddedLldbBridge`
-pumps bytes between that channel and a localhost socket to the in-process
-server.
-
-```
-wasm LLDB (Worker)  ──inprocess://N──►  channel N  ◄──pump──►  net.Socket  ──►  platform / per-tab server (same process)
+```text
+REPL or upstream lldb-dap
+  → embedded wasm LLDB (session/DAP pthread)
+  → inprocess channel ↔ EmbeddedLldbBridge ↔ localhost TCP
+  → attach shim → gdbstub component (Node worker)
+  → synchronous WIT → SharedArrayBuffer RPC
+  → RdpDebuggee → RdpWasmSession → actor FIFO → Firefox
 ```
 
-This requires the wasm LLDB to select `remote-gdb-server`, whose wasm build
-routes connections through `PlatformWasmRemoteGDBServer`; its `MakeUrl` turns
-the per-tab port returned by `qLaunchGDBServer` into an `inprocess://` URL. See
-the package's own docs for the interpreter and transport internals.
+The platform connection follows the same channel bridge but ends at
+`PlatformServer`. Its `qLaunchGDBServer` command creates the per-tab path above.
+`firefox-lldb-server` omits embedded LLDB and accepts a native wasm-plugin LLDB
+over TCP; everything from the platform/per-tab listeners inward is shared.
 
-### DAP frontend (`src/cli/firefox-lldb-dap.ts`)
+[EmbeddedLldbBridge](src/lldb/bridge.ts) owns both ends from channel creation
+through destruction. Incoming TCP writes reach LLDB in order; reads pause until
+the previous write is accepted. A short write is a failure, not a successful
+partial reply. Outgoing queued bytes are bounded. `failed` reports the first
+transport failure even while idle; ordinary EOF remains EOF because detach and
+failure cannot be distinguished from EOF alone. Cleanup has a deadline, after
+which the caller must destroy LLDB to cancel pending channel calls.
 
-`firefox-lldb-dap` starts the builtin `lldb-dap` loop on a pthread inside
-`lldb-wasm`, then pumps its framed byte stream between the DAP session and
-process stdin/stdout. The pthread is essential: attach, stepping, and other
-LLDB operations make synchronous GDB-remote round trips, while the JavaScript
-worker must remain free to pump the in-process channel bytes that complete
-those operations.
+The [attach shim](src/protocol/attach-shim.ts) answers process-discovery queries
+as unattached until `vAttach`. Without it, LLDB clears connect-time module
+relocation during attach. It validates the advertised PID and switches to a
+transparent byte pipe after attach. It never invents a process-exit packet.
 
-The adapter pre-initializes LLDB with the bridged platform connection. A client
-then uses `attachCommands: ["process attach --plugin wasm --pid 1"]`; ordinary
-pid attach does not know to select the wasm process plugin. After that, request
-handling and IDE-facing capabilities are upstream LLDB-DAP. All launcher and
-RDP diagnostics stay on stderr so stdout remains a protocol-only stream.
+## Runtime acquisition and shutdown
 
-### REPL (`src/cli/repl.ts`)
+[startPlatformServer](src/core/platform-session.ts) owns the platform listener,
+browser, tab watcher, and [GdbServerSpawner](src/platform/gdb-server-spawner.ts).
+The spawner registers a pending entry before invoking the per-tab launcher.
+The [launcher](src/core/tab-session.ts) owns rollback until it returns a handle:
 
-The interactive prompt wraps the wasm LLDB. Beyond plumbing input/output it
-adds: command history, Ctrl-C to interrupt a running target (routed to
-`RdpDebuggee.triggerInterrupt`), an `attach` alias for
-`process attach --plugin wasm`, `js` subcommands that answer JS questions over
-RDP (the wasm LLDB cannot evaluate JS — see `js p`/`js bt`/`js frame`), and live
-streaming of the page's console output. LLDB blocks on synchronous GDB-remote
-round-trips, so the REPL drives it through an **off-worker session API**
-(`sessionCommand`/`sessionState`/`sessionFrames`/`sessionVariable`) that runs on
-a dedicated session pthread, keeping the worker that pumps the bridge free.
+1. Connect RDP and establish the initial top-level target.
+2. Inspect sources and navigate if wasm observation was not enabled at compile time.
+3. Create the WIT adapter and collect a genuine initial stop.
+4. Wait for the component's explicit listening notification.
+5. Bind the attach shim and publish its port.
 
-### The attach handshake (`src/protocol/attach-shim.ts`)
+Every acquisition checkpoint checks cancellation. Abort closes pending RDP
+work and terminates a starting worker; a late bind/result still belongs to the
+launcher. Rollback and normal stop use the same resource order: shim, worker,
+adapter, RDP session. A failed cleanup remains recorded, including the original
+failure when rollback also fails.
 
-The gdbstub component presents an already-attached, stopped process the instant
-LLDB connects. That satisfies `process connect`, but breaks LLDB's native
-`process attach`: `PlatformRemoteGDBServer::Attach` relocates modules at connect
-time, then `Process::Attach`'s `ClearAllLoadedSections` wipes that relocation
-without reapplying it, so breakpoints never arm. A real lldb-server spawned for
-attach is _unattached_ on connect and defers everything to the `vAttach` packet.
+Per-entry stop and global shutdown return shared completion promises. Global
+shutdown is terminal: no new launch or late port publication is allowed. It
+joins pending acquisitions, stops live handles, joins the tab watcher, and
+closes the browser. Deadlines report incomplete cleanup; they do not relinquish
+ownership. A published worker failure, per-tab RDP disconnect, or launched
+browser watcher loss resolves the runtime's `failed` outcome and starts cleanup.
+Normal stop marks the handle as stopping before closing its RDP connection.
 
-The shim emulates that. The component listens on a private OS-assigned port; the
-shim fronts the public port and, until it sees `vAttach`, answers the pid-
-discovery queries (`?`, `qProcessInfo`, `qC`, `qfThreadInfo`) as "no process
-yet" so `ConnectRemote` lands in `eStateConnected` and the real attach happens at
-`vAttach`. After forwarding `vAttach` the shim is a transparent byte pipe — no
-binary RSP payloads are ever parsed. See the file header for the exact reply
-codes and why each one is chosen.
+The CLI owns pending runtime acquisition as well as the returned handle. REPL,
+DAP and standalone-server entry points share the same core teardown contract.
+Fatal exception/rejection handlers retain the transcript and give that cleanup
+a bounded opportunity to finish before exit.
 
-### Layer 1 — platform server (`src/platform/`)
+### Browser identity and handoff
 
-Models the browser as an LLDB platform: tabs are processes, and
-`qLaunchGDBServer` spawns a per-tab GDB server. Implements the platform packet
-set from `lldbplatformpackets.md`. Reachable directly via `connect://`.
+[Firefox acquisition](src/core/firefox.ts) creates a temporary profile and
+launch token, then verifies the token through RDP. Abort before publication
+rolls back the profile and any process already acquired. `--connect` does not
+take ownership of an existing browser or profile.
 
-Wire-format note: `triple` and process `name` are hex-encoded on the wire even
-though the protocol docs render them plain — verified against
-`GDBRemoteCommunicationClient.cpp`.
+The launcher's PID is not the browser's lifetime. On POSIX,
+[process cleanup](src/core/firefox-processes.ts) follows observed descendants
+and replacement processes carrying the exact profile and RDP-port arguments.
+It checks start times and a quiet interval before removing the profile. Failed
+discovery/verification retains the profile and reports failure. This is bounded
+process-table verification, not OS containment; Windows retains direct-child
+cleanup. Output pipes drain on child `close`, not merely `exit`, with a bound
+for inherited pipes. See `launch_handoff.test.mjs` for a real Firefox handoff.
 
-### Layer 2 — per-tab GDB server, backed by the gdbstub component
+[Browser discovery](src/rdp/browser.ts) uses Firefox `browserId`, not
+connection-local actor strings, for tab identity. The attach connection
+resolves its own descriptor for that ID and never substitutes a missing tab.
+The watcher subscribes before querying, coalesces change bursts, and joins
+priming/query work on close. Only `--connect` reconnects an established watcher.
 
-The per-tab GDB server is the vendored wasmtime
-[gdbstub-component](https://github.com/bytecodealliance/wasmtime/tree/main/crates/gdbstub-component).
-It embeds the Rust `gdbstub` state machine, handles all RSP framing and the wasm
-extension packets (`qWasmCallStack`/`Local`/`Global`/`StackValue`, breakpoints,
-libraries XML, memory-map, host/process info), opens its own TCP listener for
-lldb, and **imports a WIT `debuggee` interface that we implement** over RDP.
+Startup connection retries have one deadline and retry only classified socket
+failures. Automatic LLDB attach retries only when a navigation observed after
+per-tab initialization invalidated the attempt. Assertions, malformed protocol,
+lost identity and cleanup failure are not generic retry conditions.
 
-#### Sync/async bridge (the worker + SAB RPC)
+An unpublished per-tab acquisition may reacquire once if accepted navigation
+reaches its five-second deadline with the starting target gone and no replacement.
+Ordinary navigation keeps its ten-second budget; the shorter detach grace alone
+cannot fail navigation because a replacement may still arrive.
+The typed loss must survive successful rollback; a new connection resolves the
+same browserId, never whichever tab is now selected. This is not active-session
+watcher reconstruction. The frontend retains the original transcript after
+recovery, and test output reports the consumed attempt.
 
-The WIT `debuggee` interface is synchronous, but RDP is async. The solution:
+## RDP generations and actor FIFOs
 
-- The component runs on a **Worker thread** (`src/gdb/worker/`). Its WASI poll /
-  socket blocking happens on the worker, keeping the main event loop free.
-- Each synchronous `debuggee` call is forwarded to the main thread over a
-  SharedArrayBuffer (`src/gdb/worker/wire.mjs`). The worker blocks on
-  `Atomics.wait`; the main thread services the call asynchronously (RDP
-  round-trip) and wakes the worker via `Atomics.notify`.
-- JSPI is not needed — the bridge runs on plain Node.
+[RdpClient](src/rdp/client.ts) correlates ordinary replies FIFO per actor.
+`resume` and `interrupt` use event delivery, not ordinary request slots. A
+request deadline or malformed frame closes the client and rejects all pending
+work; otherwise a late reply could satisfy the wrong request.
 
-Key modules:
+An actor-lifetime abort is narrower: it permanently retires that actor,
+rejects its pending queue, rejects future requests to it and discards its late
+packets. This is safe because connection-local actor IDs are not reused. It is
+not a general request-cancellation mechanism for reusable actors. Source,
+long-string and ArrayBuffer reads use their generation's lifetime so navigation
+does not wait for an old actor's deadline.
 
-- `src/rdp/transport.ts`, `client.ts` — RDP transport + request/reply/events
-- `src/rdp/session.ts` (`RdpWasmSession`) — the validated wasm-debug RDP flow
-- `src/gdb/rdp-debuggee.ts` (`RdpDebuggee`) — the WIT `debuggee` impl over RDP
-- `src/gdb/worker/host.mjs`, `component-worker.mjs`, `wire.mjs` — the worker +
-  SAB RPC bridge
+[RdpWasmSession](src/rdp/session.ts) owns the live thread table and current
+top-level generation. A replacement retires the previous generation whether
+Firefox sends destroy-before-available or available-before-destroy. Destroying
+an unknown actor also leaves a tombstone, preventing late resurrection. The
+top-level LLDB TID stays stable across replacement; its actor and generation do
+not. Workers receive their own TIDs and retire with their page generation.
 
-RDP replies are FIFO per actor. Every request has a finite deadline; a timeout
-or malformed frame closes the entire RDP connection and rejects all pending
-work, because accepting a late reply after abandoning its request would shift
-the FIFO and corrupt every later reply on that actor.
+Source caches, symbol acquisition and WIT snapshots carry generation identity.
+An asynchronous result checks its owner again before committing. Navigating
+retires source directories, pending fetches and module/resource caches. A
+navigation completes only after request acceptance and destination readiness;
+the previous document's event cannot satisfy the new navigation.
+A destination replaced again before its request acknowledgement cannot be
+published as a successful navigation either.
 
-### Attaching debug info a module only points at
+Session keeps target and pause state together because a target arrival/removal
+changes the same all-stop invariant. Browser discovery, breakpoint reconciliation
+and symbol-file ownership are separate components with their own state. Further
+splitting the session through callbacks that mutate each other's maps would
+obscure that ownership rather than establish a useful boundary.
 
-`RdpDebuggee.#wasmBytecode` fetches a real module's bytes and runs them through
-`#withDebugInfo`, which resolves whatever debug info the module implies. Embedded
-DWARF is served as-is (minus the `name` section, see `wasm-bytecode.ts`); the two
-indirect forms are handled below. Any failure falls back to the original bytes:
-this never breaks a module that would otherwise load.
+## Stops, resume and inspection
 
-#### Separate DWARF (`-gseparate-dwarf`)
+A [StopOperation](src/rdp/session.ts) owns one execution wait, including its
+listeners, cancellation, pause collection and completion. Repeated arming joins
+the same operation. A real pause interrupts other live threads; arriving workers
+join collection, and destroyed workers cease to participate. Publication requires
+every live thread in the generation to be paused. Missing acknowledgements fail
+closed with diagnostics, never publish a partial all-stop snapshot.
 
-A module can keep its DWARF in a companion wasm file, naming it in an
-`external_debug_info` custom section
-([spec](https://yurydelendik.github.io/webassembly-dwarf/#external-DWARF)).
-LLDB already supports this — `SymbolVendorWasm` loads the file and grafts its
-DWARF sections onto the module — but it looks the name up on its own filesystem,
-which for the embedded wasm LLDB is an in-memory FS whose misses are answered by
-a host file provider (`LLDBClient.setFileProvider`). So nothing here parses debug
-info; the work is routing that lookup to the page's server:
+Each completed stop records its ID, generation, trigger, reason and actual
+thread set. Resume/replacement invalidates it immediately. Frame, local, global
+and memory reads check that identity before and after asynchronous work.
+[RdpDebuggee](src/gdb/rdp-debuggee.ts) owns the WIT handles and the corresponding
+per-thread snapshot; it does not reconstruct pause state from event-listener counts.
 
-1. `#withDebugInfo` reads the recorded path and hands it to a
-   `DebugFileRegistry` (`src/core/debug-files.ts`) along with the module URL.
-   The registry resolves one against the other, so a relative path and an
-   absolute `-sSEPARATE_DWARF_URL` both work.
-2. The module's bytes are served to LLDB unchanged, `name` section included:
-   until the debug file loads (or if it can't be fetched) those are the only
-   symbols the module has, and LLDB prefers DWARF once it has both.
-3. LLDB opens the file while vendoring symbols. The registry keys on basename,
-   because `SymbolLocatorDefault` builds each candidate as
-   `<search dir>/<basename>` — any directory in the recorded path is gone by the
-   time the request arrives, and it probes several directories plus `.dwp`
-   variants for one file.
-4. The file provider fetches the URL and returns the bytes. LLDB's own symbol
-   vendor does the rest.
+Resume releases interrupted workers before the thread that triggered the stop.
+This preserves pthread synchronization progress. Navigation during a pending
+execution wait can force a bounded re-sync stop so LLDB reloads its module list.
+The REPL's Ctrl-C calls this real RDP interrupt path. Upstream DAP pause and
+running-disconnect remain separate limitations; no DAP-only RDP bypass is added.
 
-Both CLI entry points reach the registry, but only the embedded wasm LLDB has a
-file provider; an external native lldb driven by `firefox-lldb-server` resolves
-the recorded path against the real filesystem itself.
+### Breakpoints and read results
 
-#### Source maps → DWARF (`src/sourcemap/`)
+[RdpBreakpoints](src/rdp/breakpoints.ts) owns desired locations and each target's
+applied physical sites. Reconciliation is serialized and revision-checked;
+remove-during-replay cannot leave a late installation behind. Multiple desired
+locations sharing one physical site keep it installed until its final reference
+is removed. Firefox's breakpoint-position tables constrain wasm snapping to the
+containing function and JS snapping to executable line/column locations.
 
-Wasm modules built with a source map but no embedded DWARF (e.g. some toolchains
-that emit only `sourceMappingURL`) are made debuggable by synthesizing DWARF from
-the source map at debug time:
+Wasm locals/globals use types parsed from the loaded module, not inferred from
+JavaScript number values. Reads preserve float width, negative zero and exact
+integer grips. Unsafe numeric i64 grips, missing bindings and operand-stack
+values are explicitly unavailable. One unavailable local does not hide peers.
 
-1. `inspect(bytes)` reports whether the module already `hasDwarf` and its
-   `sourceMapUrl`. If it has DWARF, or has no source map, the original bytes are
-   used unchanged.
-2. The source map is fetched (data: URLs are inlined; otherwise resolved against
-   the module URL) and passed to `convert(bytes, mapBytes, compDir)`, which
-   returns rewritten wasm carrying synthesized DWARF plus the list of original
-   source files.
-3. The returned sources are materialized under a per-module temp dir
-   (`<basename>.<url-hash>.src`) so `source list` works without collisions;
-   `compDir` is the DWARF comp-dir.
-   Source names are rewritten to safe relative paths before DWARF conversion,
-   and the materializer independently verifies containment before filesystem
-   access, since source maps are remote page input.
+Memory handles refer to the primary module's one Emscripten linear memory,
+shared by its pthreads. They are rebound on each stop; unrelated module memories
+are not aliased into it. Reads select a paused frame in that module. Invalid
+lengths, missing memory, failed evaluation or changed stop identity remain errors,
+not zeros. Globals use the requesting frame's instance scope. Broader instance
+and multi-memory support requires a separately exercised identity contract.
 
-The converter is a pure-compute wasm component (no host imports beyond WASI),
-vendored as the Rust `source-map-dwarf` crate and its `source-map-dwarf-component`
-wrapper, transpiled by jco into `src/sourcemap/generated/`. `src/sourcemap/converter.ts`
-instantiates it once on the main thread and exposes `inspect` / `convert`. This is
-distinct from the **synthetic modules** above: synthetic modules represent _JS_
-sources LLDB can't otherwise see, while the converter rewrites a _real wasm_
-module to add the DWARF its source map implies.
+## Symbols and addresses
 
-## Enabling wasm debugging in Firefox (the `observeWasm` timing problem)
+The wasm address encoding is `type[63:62] | module_id[61:32] | offset[31:0]`.
+Linear memory uses type 0; module objects use type 1. Sparse, monotonic module IDs
+prevent old addresses from aliasing new modules after navigation. Module names
+also include incarnation IDs because LLDB's library diff uses names.
 
-SpiderMonkey only baseline-compiles a wasm module with debug support if the
-debugger's `allowUnobservedWasm` is already `false` when the module compiles.
-DevTools defaults it to `true`, so observation must be turned on **before the
-page's wasm loads**. The working sequence (no Firefox patch needed):
+Firefox-loaded module bytes are authoritative. A source actor supplies the
+browser's actual bytes, including authenticated/cached loads. HTTP is a bounded
+fallback and warns that loaded-module identity cannot be established. Missing
+bytes use WIT's absent-bytecode option; the bridge never manufactures an empty
+wasm module. Optional symbol enrichment can fall back to the original bytes.
 
-1. `getWatcher` with **`isServerTargetSwitchingEnabled: true`** — so the watcher
-   instantiates server-side targets itself and applies thread-config session data
-   at target creation (before page scripts run). Without this flag the top-level
-   target comes from the legacy `getTarget` path, which never receives the config.
-2. `thread-configuration.updateConfiguration({ observeWasm: true, observeAsmJS: true, pauseOnExceptions: true, ignoreCaughtExceptions: true })`
-3. `watchTargets("frame")` + `watchResources(["source"])`
-4. Navigate; the new target's wasm is debuggable.
+Embedded DWARF takes precedence over wasm names. Hidden custom sections are
+renamed at the same encoded length, preserving Firefox's file-relative PCs.
+Separate DWARF goes through [DebugFileRegistry](src/symbols/debug-files.ts):
+registrations are generation-owned, basename collisions fail explicitly, and
+retired/in-flight fetches cannot populate a new owner's cache.
 
-`pauseOnExceptions` + `ignoreCaughtExceptions` make an **uncaught wasm trap**
-(divide-by-zero, unreachable, out-of-bounds, `call_indirect` signature mismatch)
-surface as a stop with the trapping frame intact, without pausing on routine
-caught JS exceptions. The session reports the RDP `paused` reason via `why.type`;
-the host turns a trap pause into a `SIGTRAP`-style signal stop so LLDB shows the
-fault and lets you inspect the frame.
+The [source-map component](src/sourcemap/converter.ts) parses module metadata and
+converts source maps into appended DWARF. [SourceFiles](src/symbols/source-files.ts)
+owns materialized files under per-generation directories, validates containment,
+and prevents late writes from recreating retired directories. JS frames use
+[synthetic modules](src/symbols/synthetic-module.ts) whose DWARF maps source lines
+to addresses; these are distinct from enriched real wasm modules.
 
-## Launching Firefox
+## Worker contract and resource limits
 
-```
-firefox --headless --no-remote --profile <dir> --start-debugger-server <port> about:blank
-```
+The component worker blocks in WIT while the main event loop performs RDP work.
+[contract.mjs](src/gdb/worker/contract.mjs) validates method, argument, resource
+and sequence envelopes. [wire.mjs](src/gdb/worker/wire.mjs) bounds recursive
+metadata and binary allocation. Modeled WIT errors have explicit tags; an
+unexpected exception with the same text remains fatal. Resource proxies own
+host handles until their final clone is disposed. Worker startup completes only
+on the explicit WIT listening callback; information/trace text is not control flow.
 
-Required prefs (in the profile): `devtools.debugger.remote-enabled=true`,
-`devtools.chrome.enabled=true`, `devtools.debugger.prompt-connection=false`.
-RDP transport is length-prefixed JSON (`<byte-length>:<json>`).
+Principal bounds are 32 MiB per SAB message, 31 MiB per module, 128 MiB cached
+symbol bytecode, 65,536 live host handles, 4,096 modules/desired breakpoints,
+16,384 source actors per generation and 1,024 live targets/pending RDP requests.
+Source materialization is limited to 4,096 files/64 MiB. Fetch, source-map and
+wasm-parser limits apply before expansion. Tombstones are bounded by terminating
+the connection when full, not evicting identities that could resurrect stale work.
+These are safety budgets, not claims that every workload below them is supported.
 
-Before using the debugging actors, the bridge resolves
-`root.getRoot → deviceActor.getDescription` and checks the reported Firefox
-major against the range in `src/rdp/firefox-compatibility.ts`. This works for
-both a browser the tool launched and `--connect`. CI sets
-`FIREFOX_LLDB_ALLOW_UNSUPPORTED=1` so a newly-published channel is exercised
-before that validated range is advanced. The focused version e2e still fails
-when the detected build is outside the declared range, so the scheduled issue
-prompts a maintainer to review the other compatibility results and advance the
-bound when appropriate.
+## Diagnostics, tests and regeneration
 
-## Protocol mapping
+The [transcript](src/diagnostics/session-log.ts) is always on in production and
+retained after failure. It handles partial writes, flushes partial stdio lines,
+and reports its first I/O failure without recursively logging through itself.
+An incomplete transcript is marked as such. Writes are buffered and flushed;
+they are not fsync durability guarantees.
 
-### Address encoding (`wasm_addr_t`)
+RDP records identify connections, request IDs, actors, methods and duration.
+State records identify generation, stop, pending work and cleanup stage. The
+shared bridge and DAP observer retain bounded packet/operation summaries.
+Component traces are bounded before expensive formatting and before crossing
+the worker boundary. Debug snapshots observe state without advancing it.
+Transcripts can contain sensitive page/source content; review before sharing.
 
-64-bit little-endian: `type[63:62] | module_id[61:32] | offset[31:0]`, where
-type `0x00` = linear memory and `0x01` = object (code/data). Each module's code
-section is mapped at `(module_id << 32)`.
+E2E tests drive the production core and bridge against real Firefox and embedded
+LLDB. Feature files usually attach once; lifecycle files deliberately repeat
+acquisition and teardown. Fault tests hold real replies behind explicit gates.
+See the [E2E guide](test/e2e/README.md) and [manual MCP guide](HARNESS.md).
 
-### Firefox-side RDP surface
-
-See [`docs/RDP-USAGE.md`](docs/RDP-USAGE.md) for the full RDP surface (actors,
-requests, events) generated from [`src/rdp/protocol.ts`](src/rdp/protocol.ts),
-the single source of truth. The table below maps each debugger need to the
-part of that surface serving it.
-
-| Need               | RDP source                                                                                                                                                                                                                                                                                   |
-| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| wasm module list   | `thread.sources` (filter `introductionType === "wasm"`)                                                                                                                                                                                                                                      |
-| wasm module bytes  | Use the injectable, validated HTTP provider, then fall back to Firefox's browser-owned ArrayBuffer source actor when Node lacks the page's credentials/cache context. HTTP errors, oversized bodies, and non-wasm responses fall back to an empty module rather than reaching the component. |
-| Stack frames       | `thread.frames` returns interleaved `wasmcall`/`call` frames; both are surfaced to LLDB. `resources-available-array` records each frame's thread-local source actor → URL mapping, including worker actors.                                                                                  |
-| wasm PC            | a `wasmcall` frame's `where.line` is the byte offset (column is always 1; not column as the original design assumed)                                                                                                                                                                         |
-| JS PC              | a `call` frame's `where.line` is the source line (1-based). Reported as `where.line + codeOffset` so LLDB's code-section subtraction recovers the DWARF address = source line.                                                                                                               |
-| JS sources         | each JS source is a synthetic wasm module (`src/gdb/synthetic-module.ts`) with DWARF v4 mapping address L → line L. Source text is fetched via the source actor `source` request and written to a temp file for `source list`.                                                               |
-| Breakpoints (wasm) | `thread.setBreakpoint` at `{ sourceUrl, line: <offset>, column: 1 }` — offset snapped to a valid position from `getBreakpointPositionsCompressed`; an invalid offset is a silent no-op in Firefox                                                                                            |
-| Breakpoints (JS)   | same packet; line = source line number (pc - codeOffset), snapped to a valid (line, column) from `getBreakpointPositionsCompressed` on the JS source actor — an unsnapped column binds to nothing and the breakpoint silently never fires                                                    |
-| Continue / step    | `thread.resume()` / `thread.resume({type:"step"})` for wasm frames, `{type:"next"}` for a JS innermost frame (one wasm instruction jumps an arbitrary number of JS source lines); stop via the `paused` event                                                                                |
-| Locals             | `frame.getEnvironment` → the `wasm function` scope's `var0..varN` bindings (raw i32/i64/f32/f64 values), returned to lldb in wasm-local-index order                                                                                                                                          |
-| Linear memory      | evaluate `new Uint8Array(memory0.buffer, addr, len)` in the wasm frame's scope (`evaluateJSAsync` with `frameActor`); `memory0` lives in the `wasm instance` scope                                                                                                                           |
-| Globals            | `wasm instance` scope `global0..globalN` bindings → `instance.get-global` / `global.get` → `qWasmGlobal`                                                                                                                                                                                     |
-
-## Testing
-
-- **Unit tests** (`npm test`) — protocol layer, platform server, attach-shim,
-  SAB-RPC wire codec, synthetic modules, REPL. Run without Firefox or any lldb.
-- **e2e suite** (`npm run test:e2e`) — the primary correctness signal. Drives the
-  **embedded wasm LLDB** (the same path `firefox-lldb` uses, no native lldb) against
-  headless Firefox, through the off-worker session API. Needs only Firefox plus
-  emsdk-built fixtures (`npm run build:fixtures`). Files run concurrently
-  (`--test-concurrency=4`, override `E2E_CONCURRENCY=N`); each does one attach in
-  `before()` (see `test/e2e/README.md` for the per-file convention). Coverage:
-  call-stack symbolication across all fixtures, breakpoints by name and file:line,
-  multiple breakpoints + continue, struct/pointer/heap inspection, dynamic
-  dispatch, every step mode, locals/args/globals, JS-frame debugging, source maps,
-  wasm traps, and multithreading.
-- **Firefox compatibility matrix** (`.github/workflows/e2e.yml`) — runs the
-  full e2e suite against release and a focused RDP-surface suite against the
-  moving ESR, beta, and Nightly channels. This avoids multiplying the known
-  attach-setup flake across four full runs while still exercising actor
-  discovery, attach, stepping, workers, navigation, traps, JS evaluation, and
-  source maps. A weekly scheduled run files or updates one deduplicated GitHub
-  issue when a channel fails, and closes it after the matrix recovers.
-
-**Every significant change must land with an e2e test that exercises it.** A
-feature or fix the suite doesn't cover is treated as unverified.
-
-## Vendoring & patches
-
-See `vendor/gdbstub-component/MODIFICATIONS.md`. The vendored Rust edits are
-committed source (never auto-clobbered). A single jco-generated patch (a jco
-1.24 `currentSubtask` codegen bug) is reapplied idempotently by
-`scripts/patch-generated.mjs`, wired into `npm run component:transpile`.
-
-The source-map → DWARF converter is vendored as the in-tree Rust crate
-`vendor/source-map-dwarf` and its component wrapper
-`vendor/source-map-dwarf-component`. `npm run sourcemap` builds and jco-transpiles
-it into `src/sourcemap/generated/`; `npm run test:rust` runs the crate's tests.
-
-## Multithreading
-
-Firefox exposes each emscripten pthread worker as a separate RDP target with its
-own `threadActor`. The session watches both `frame` and `worker` target types. On
-each `target-available-form` the session assigns a gdbstub TID (TID 1 = top-level
-frame, TID 2+ = workers). All-stop is implemented by the host: when any thread
-fires a `paused` event, the host sends `interrupt` to all others and awaits their
-acks before emitting a unified `stopped` event to the component.
-
-Threads and source actors are also scoped to a monotonically increasing
-top-level **target generation**. A navigation retires the old generation as one
-unit (page plus workers), while the replacement inherits the page's stable LLDB
-TID. This handles both destroy-before-available and available-before-destroy RDP
-ordering without exposing two page threads or letting late source replies
-repopulate actor caches. Pause ownership is explicit session state rather than
-being inferred from EventEmitter listener counts, and an all-stop interrupt wait
-settles immediately when its target is destroyed.
-
-RDP facts confirmed experimentally:
-
-- `watchTargets("worker")` surfaces emscripten pthread workers as targets.
-- `observeWasm` is propagated automatically to all workers via watcher session-data.
-- `interrupt` reliably pauses any thread (including idle/Atomics.wait threads) in
-  < 10 ms — no timeout strategy needed.
-- Breakpoints must be set per-thread actor; the watcher does not broadcast.
-- Breakpoints are buffered and replayed to new workers as they arrive.
-- The same wasm module URL appears on every thread; modules are deduped by URL
-  (one `module_id` slot in the address space, one library-list entry).
-
-## Known limitations
-
-- **Operand stack** (`qWasmStackValue` → empty) — SpiderMonkey does not expose
-  the wasm value stack yet.
-- **Expression evaluation** (`expr` / `p`) works only for expressions LLDB's IR
-  interpreter can fold without running code in the target: arithmetic,
-  comparisons, casts, and temp vars over existing variables (`p n + 1`,
-  `expr (int)n + 1`, `expr int $x = n * n; $x`). Anything that requires calling a
-  function in the target (`expr foo(3)`) JIT-compiles, which wasm has no support
-  for, and fails with "Interpreter doesn't handle one of the expression's
-  opcodes". Variables can also be inspected via the SB value API
-  (`frame.FindVariable`, `GetChildMemberWithName`, `Dereference`), which reads
-  DWARF + linear memory directly.
-- **Stepping across the JS/wasm boundary at step-in** — `thread step-in` from a
-  JS frame at a wasm call site does cross the boundary and enter the wasm function.
-  The inverse (step-in from wasm into a JS caller) is not supported.
-- **JS step-in degrades to step-over within JS** — inside a JS frame, stepping
-  uses RDP `{type:"next"}` (step-over by source line), so `thread step-in` cannot
-  descend into a called _JS_ function. Single-subprogram synthetic modules can't
-  distinguish JS functions anyway (`GetFunctionName()` returns the filename), so
-  there is nothing finer to step into. Stepping into a _wasm_ callee from JS does
-  work (LLDB's step-in plan overrides the RDP granularity at the boundary).
-- **Local/global type inference** is heuristic — RDP reports values as plain JS
-  numbers without wasm types. Integer numbers are treated as i32, non-integers as
-  f64, bigints as i64.
-- **JS locals/variable inspection through LLDB** — JS values don't map cleanly to
-  wasm types, so the synthetic-module DWARF path exposes no JS locals to LLDB
-  itself (`frame variable` on a JS frame is empty). Instead, the REPL's `js`
-  commands bypass LLDB and query Firefox over RDP directly: `js bt` prints the JS
-  backtrace, `js frame <n>` prints a JS frame with its arguments and locals (via
-  the frame's `getEnvironment` bindings), and `js p <expr>` evaluates an
-  expression in the stopped JS frame's scope (or page scope if not paused).
-  Similarly `console on`/`console off` toggle live streaming of the page's
-  `console.*` output and uncaught errors. These are REPL features of
-  `firefox-lldb` only — they are not available through an external native lldb.
-- **Per-function JS names** — each JS source is one synthetic module with one subprogram; the subprogram name is taken from `callee.displayName` of the innermost active JS frame, so the first JS caller correctly shows its function name instead of the filename. Outer JS frames from the same file (which Firefox reports at the same source line, see next bullet) still show the innermost function name. A full fix (distinct name per frame) requires multi-subprogram modules with per-depth unique ids, which needs a Rust change.
-- **Duplicate frame IDs for recursive JS frames** — `qWasmCallStack` reports only
-  PCs; LLDB's wasm plugin derives `GetFrameID()` from the PC alone (no FP/SP
-  equivalent for wasm). Multiple JS frames at the same source line (e.g., a
-  recursive call where every frame is at `math.js:725`) all report the same PC →
-  LLDB assigns them the same frame ID. Native debugging avoids this because the
-  frame pointer distinguishes each call frame even when the PC is identical. The
-  clean fix is per-depth virtual module IDs (unique `module_id` per (url, depth)
-  in the `WasmAddr`), but that requires a Rust change to register those modules in
-  `update_on_stop()` before `frame_to_pc()` runs. Alternatively, fixing LLDB's
-  wasm plugin to use the call-stack index rather than the PC as the frame ID would
-  solve it upstream.
+Run `npm test`, `npm run check`, and `npm run test:e2e`. Regenerate with
+`npm run component` and `npm run sourcemap`; both use locked Cargo dependencies
+and pinned Rust/jco versions. Patches validate expected generated anchors and
+fail closed. CI regenerates and checks the diff. Logging replay and complete
+debug-session benchmarks live in `scripts/benchmark-logging.mjs` and
+`scripts/benchmark-debug-session.mjs`; the latter measures producer work as well
+as transcript writes and reports its baseline limitations.
