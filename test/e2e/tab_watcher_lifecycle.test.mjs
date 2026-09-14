@@ -5,6 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { setTimeout as delay } from "node:timers/promises";
+import { getEventListeners, once } from "node:events";
 import { launchFirefox } from "../../src/core/firefox.ts";
 import { verifyFirefoxLaunchToken, watchAndPrimeFirefoxTabs } from "../../src/rdp/browser.ts";
 import { RdpClient, RdpRequestError } from "../../src/rdp/client.ts";
@@ -27,7 +28,7 @@ async function browser(t) {
     trace.close();
   });
   await verifyFirefoxLaunchToken(port, "127.0.0.1", firefox.launchToken);
-  return { port, trace };
+  return { port, trace, token: firefox.launchToken };
 }
 
 for (const mode of ["initial-query", "priming", "coalescing"]) {
@@ -125,5 +126,57 @@ test("RDP startup deadline closes a withheld real greeting", { timeout: 20_000 }
   );
   await gate.held;
   await rejected;
+  await gate.peersClosed();
+});
+
+test("refused RDP attempts release their shared abort listener", { timeout: 20_000 }, async (t) => {
+  const abort = new AbortController();
+  const unusedPort = await freePort();
+  for (let i = 0; i < 12; i++) {
+    await assert.rejects(RdpClient.connect(unusedPort, "127.0.0.1", { signal: abort.signal }), {
+      code: "ECONNREFUSED",
+    });
+    assert.equal(getEventListeners(abort.signal, "abort").length, 0);
+  }
+  const { port, trace } = await browser(t);
+  const client = await RdpClient.connect(port, "127.0.0.1", {
+    signal: abort.signal,
+    logger: trace,
+  });
+  t.after(() => client.close());
+  assert.equal(getEventListeners(abort.signal, "abort").length, 1);
+  const closed = once(client, "close");
+  client.close();
+  await closed;
+  assert.equal(getEventListeners(abort.signal, "abort").length, 0);
+});
+
+test("cold-launch identity allows a slow real Firefox reply", { timeout: 45_000 }, async (t) => {
+  const { port, trace, token } = await browser(t);
+  let hold = true;
+  const gate = await packetGate(port, (_packet, method) => hold && method === "getRoot");
+  const abort = new AbortController();
+  let verifying;
+  t.after(async () => {
+    abort.abort();
+    await gate.close();
+    await verifying?.catch(() => {});
+  });
+  verifying = verifyFirefoxLaunchToken(
+    gate.port,
+    "127.0.0.1",
+    token,
+    undefined,
+    abort.signal,
+    trace
+  );
+  void verifying.catch(() => {});
+  await gate.held;
+  // Exercise the actual cold-launch budget, just beyond the former 20s limit.
+  await delay(20_250);
+  hold = false;
+  gate.release();
+  const runtime = await verifying;
+  assert.ok(runtime.version);
   await gate.peersClosed();
 });

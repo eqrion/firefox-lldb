@@ -19,13 +19,25 @@ jobs:
       - name: Regenerate gdbstub from locked Rust and jco inputs
         run: npm run component
       - name: Verify checked-in bindings and wasm match their sources
-        run: git diff --exit-code -- src/gdb/generated
+        run: |
+          git diff --exit-code -- src/gdb/generated
+          test -z "$(git ls-files --others --exclude-standard -- src/gdb/generated)"
       - name: Regenerate source-map converter from locked inputs
         run: npm run sourcemap
       - name: Verify source-map bindings and wasm match their sources
-        run: git diff --exit-code -- src/sourcemap/generated
+        run: |
+          git diff --exit-code -- src/sourcemap/generated
+          test -z "$(git ls-files --others --exclude-standard -- src/sourcemap/generated)"
       - name: Test source-map conversion
         run: npm run test:rust
+      - name: Retain regenerated output on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: regenerated-components
+          path: |
+            src/gdb/generated
+            src/sourcemap/generated
 
   ci:
     runs-on: ubuntu-latest

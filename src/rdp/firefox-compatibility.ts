@@ -19,7 +19,7 @@ import {
 } from "./protocol.js";
 
 export const MIN_SUPPORTED_FIREFOX_MAJOR = 140;
-export const MAX_SUPPORTED_FIREFOX_MAJOR = 157;
+export const MAX_SUPPORTED_FIREFOX_MAJOR = 158;
 
 export interface FirefoxRuntime {
   version: string;

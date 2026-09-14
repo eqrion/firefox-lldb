@@ -2,7 +2,7 @@
 
 This ledger records why integration-specific behavior exists and what evidence
 would allow its removal. The runtime Firefox gate currently accepts majors
-140–157; the scheduled channel matrix tests beyond that gate. Dependency
+140–158; the scheduled channel matrix tests beyond that gate. Dependency
 versions below describe this checkout, not upstream's latest releases.
 
 Runtime dependencies are pinned to the versions exercised here: lldb-wasm
@@ -10,6 +10,16 @@ Runtime dependencies are pinned to the versions exercised here: lldb-wasm
 consumers do not inherit this repository's lockfile. Update these pins
 deliberately with the relevant E2E and component regeneration checks. Build
 inputs use jco 1.24.3, Rust 1.88.0 and committed Cargo lockfiles.
+
+The September 11, 2026 [channel run](https://github.com/eqrion/firefox-lldb/actions/runs/34638631613)
+passed all 20 behavioral compatibility cases on Nightly 158.0a1; its only
+Nightly failure was the explicit range-review assertion. The reviewed ceiling
+is now 158; the next major still requires review.
+
+Component builds normalize Cargo/checkout paths and use one codegen unit and
+one linker thread. The converter's sibling library shares its workspace to
+avoid [Cargo's absolute-path dependency hashing](https://github.com/rust-lang/cargo/issues/7645).
+CI still compares every regenerated file, retaining outputs on failure.
 
 | Contract                                                                                  | Evidence / regression                                                                                                                                                                                            | Removal criterion                                                                                                                |
 | ----------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
@@ -29,6 +39,23 @@ inputs use jco 1.24.3, Rust 1.88.0 and committed Cargo lockfiles.
 The working REPL interrupt path calls the session's real RDP interrupt operation.
 It is not evidence that LLDB's protocol interrupt path works. Keep these two
 claims separate when changing execution coordination.
+
+## September 11 CI startup and navigation failures
+
+The same run's Release transcripts exposed two timing failures. Cold browser
+startup consumed almost the entire 20-second identity budget before the final
+version query; launch verification now has a 30-second total budget, while
+ordinary RDP startup retains 20 seconds. `tab_watcher_lifecycle.test.mjs` holds
+a real Firefox reply beyond the old budget and checks deadline cancellation
+and abort-listener release across refused connections.
+
+Consecutive navigation completed its initial library resync before the new
+wasm module compiled. The adapter now also schedules a resync when RDP reports
+a previously unknown top-level wasm URL. It still uses a real pause and source
+query, not an invented module or stop. `nav_consecutive.test.mjs` withholds the
+replacement wasm until LLDB consumes the empty library list and resumes. It
+also waits for the first grace timer to expire while LLDB is idle: resync
+intent must survive until a later continue/step arms an execution wait.
 
 ## Missing replacement-target announcement during startup
 

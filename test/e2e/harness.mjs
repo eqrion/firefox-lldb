@@ -180,7 +180,7 @@ export function startStaticServer(
 ) {
   const dir = path.join(REPO, pageDir);
   let debuggerFetchCount = 0;
-  const server = http.createServer((req, res) => {
+  const server = http.createServer(async (req, res) => {
     const rel =
       decodeURIComponent((req.url ?? "/").split("?")[0]).replace(/^\/+/, "") || "index.html";
     // Tagged by session.ts's fetchModuleBytes — the debugger's own
@@ -200,7 +200,7 @@ export function startStaticServer(
     }
     try {
       const original = readFileSync(path.join(dir, mapPath ? mapPath(rel) : rel));
-      const body = transformResponse ? transformResponse(rel, original, req) : original;
+      const body = transformResponse ? await transformResponse(rel, original, req) : original;
       res.writeHead(200, {
         "Content-Type": MIME[path.extname(rel)] ?? "application/octet-stream",
         ...(requireAuth && path.extname(rel) === ".html"

@@ -1062,43 +1062,54 @@ async function advertiseWasm(
   await session.wasmSources();
 }
 
-test("setWasmBreakpoint buffers breakpoint and applies it to new workers", async () => {
-  const srv = new FakeRdpServer();
-  await srv.listen();
-  const session = await srv.acceptSession();
+test(
+  "setWasmBreakpoint buffers breakpoint and applies it to new workers",
+  { timeout: 5000 },
+  async (t) => {
+    const srv = new FakeRdpServer();
+    await srv.listen();
+    const session = await srv.acceptSession();
+    t.after(() => {
+      session.close();
+      srv.close();
+    });
 
-  // Respond to all setBreakpoint requests.
-  srv.onAll(
-    (r) => r.type === "setBreakpoint",
-    (r) => ({ from: r.to as string })
-  );
-  // #applyBreakpoints polls the new target's sources before snapping (see
-  // its own test below); answer with none so the poll exhausts quickly
-  // instead of hitting its per-attempt timeout on every retry.
-  srv.onAll(
-    (r) => r.type === "sources",
-    (r) => ({ from: r.to as string, sources: [] })
-  );
+    let breakpointReceived!: () => void;
+    const applied = new Promise<void>((resolve) => {
+      breakpointReceived = resolve;
+    });
+    srv.onAll(
+      (r) => r.type === "setBreakpoint",
+      (r) => {
+        breakpointReceived();
+        return { from: r.to as string };
+      }
+    );
+    // Source discovery is event-driven; the explicit query below supplies wasm.
+    srv.onAll(
+      (r) => r.type === "sources",
+      (r) => ({ from: r.to as string, sources: [] })
+    );
 
-  // Set a breakpoint before any workers appear.
-  await session.setWasmBreakpoint("http://host/mod.wasm", 1234);
+    // Set a breakpoint before any workers appear.
+    await session.setWasmBreakpoint("http://host/mod.wasm", 1234);
 
-  // Now a new worker appears.
-  srv.targetAvailable("workerT", { consoleActor: "consoleW" });
-  await sleep(20);
-  await advertiseWasm(srv, session, "workerT", 1234);
-  await sleep(700);
+    // Observe registration before querying, then observe replay before asserting.
+    // A timer cannot establish either ordering on a loaded CI runner.
+    const target = once(session, "target");
+    srv.targetAvailable("workerT", { consoleActor: "consoleW" });
+    await target;
+    await advertiseWasm(srv, session, "workerT", 1234);
+    await applied;
 
-  // The setBreakpoint request should have been sent to workerT.
-  const bps = srv.received.filter((r) => r.type === "setBreakpoint" && r.to === "workerT");
-  assert.ok(bps.length >= 1, "setBreakpoint sent to new worker");
-  const loc = bps[0].location as { sourceUrl: string; line: number; column: number };
-  assert.equal(loc.sourceUrl, "http://host/mod.wasm");
-  assert.equal(loc.column, 1);
-
-  session.close();
-  srv.close();
-});
+    // The setBreakpoint request should have been sent to workerT.
+    const bps = srv.received.filter((r) => r.type === "setBreakpoint" && r.to === "workerT");
+    assert.ok(bps.length >= 1, "setBreakpoint sent to new worker");
+    const loc = bps[0].location as { sourceUrl: string; line: number; column: number };
+    assert.equal(loc.sourceUrl, "http://host/mod.wasm");
+    assert.equal(loc.column, 1);
+  }
+);
 
 test("setWasmBreakpoint sends to all existing threads at call time", async () => {
   const srv = new FakeRdpServer();

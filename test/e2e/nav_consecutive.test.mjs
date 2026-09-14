@@ -9,13 +9,34 @@
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { Session, continueUntilBreakpoint, sleep } from "./harness.mjs";
 
 let s;
+let requestedModule, releaseModule;
+const moduleRequested = new Promise((resolve) => (requestedModule = resolve));
+const moduleResponse = new Promise((resolve) => (releaseModule = resolve));
+
+async function waitForTrace(pattern, message) {
+  for (let i = 0; i < 400; i++) {
+    if (pattern.test(readFileSync(s.transcriptPath(), "utf8"))) return;
+    await sleep(25);
+  }
+  assert.fail(`${message}; transcript: ${s.transcriptPath()}`);
+}
 before(async () => {
-  s = await Session.stoppedAtBreakpoint("navigation");
+  s = await Session.stoppedAtBreakpoint("navigation", {
+    async transformResponse(rel, body) {
+      if (rel === "math2.wasm") {
+        requestedModule();
+        await moduleResponse;
+      }
+      return body;
+    },
+  });
 });
 after(async () => {
+  releaseModule();
   await s?.shutdown();
 });
 
@@ -44,7 +65,23 @@ test("a second navigation discards an unwitnessed pause from the replaced target
   assert.ok(s.topLevelGeneration() > page2Generation, "page 3 must be a new target generation");
   assert.equal(s.topLevelTid(), stableTid, "the second replacement reuses the same tid");
 
+  // The initial grace can expire while LLDB still retains the old stop. Its
+  // resync intent must survive until the next execution wait is armed.
+  await waitForTrace(
+    new RegExp(`resync-deferred generation=${s.topLevelGeneration()} tid=${stableTid}`),
+    "the target resync must be deferred while LLDB is idle"
+  );
   const continued = continueUntilBreakpoint(s);
+  // Observe rejection immediately while the test waits for the resync barrier.
+  void continued.catch(() => {});
+  await moduleRequested;
+  // Do not release wasm until LLDB has consumed the empty library list and
+  // resumed. This reproduces the CI ordering without a page-load sleep.
+  await waitForTrace(
+    /<library-list><\/library-list>[\s\S]*LLDB->TCP RSP \$vCont;c/,
+    "LLDB must resync before the replacement wasm is available"
+  );
+  releaseModule();
   const trigger = setInterval(() => s.evaluate("runFactorial()"), 500);
   let st;
   try {

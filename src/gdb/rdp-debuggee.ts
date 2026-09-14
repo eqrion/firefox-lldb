@@ -14,6 +14,7 @@ import type {
   StoppedEvent,
   StopOperation,
   ThreadInfo,
+  WasmSourceEvent,
 } from "../rdp/session.js";
 import { RetiredStopError } from "../rdp/session.js";
 import { buildSyntheticModule } from "../symbols/synthetic-module.js";
@@ -140,6 +141,7 @@ export class RdpDebuggee {
   // when a new top-level target arrives while a continue is outstanding (see
   // #scheduleResyncCheck).
   #resyncTimer: ReturnType<typeof setTimeout> | null = null;
+  #resyncTid: number | undefined;
   #disposed = false;
   #generation = new AbortController();
   #unsubscribe: (() => void)[] = [];
@@ -154,8 +156,8 @@ export class RdpDebuggee {
     this.#debugFiles = opts?.debugFiles;
 
     const onStopped = (e: StoppedEvent) => {
-      this.#clearResyncTimer();
       if (this.#stop.operation?.id !== e.stopId) return;
+      this.#clearResync();
       this.#stop.reason = this.#stop.hostInterruptPending
         ? "signal"
         : this.#stop.forcingResync
@@ -169,7 +171,7 @@ export class RdpDebuggee {
 
     const onClose = () => {
       this.#generation.abort(new Error("debuggee session closed"));
-      this.#clearResyncTimer();
+      this.#clearResync();
       // Unblock any pending EventFuture.finish / primeStop so the gdbstub
       // worker thread doesn't hang when the RDP connection drops mid-session.
       this.#stop.operation?.cancel(new Error("session closed"));
@@ -195,6 +197,23 @@ export class RdpDebuggee {
     };
     session.on("target", onTarget);
     this.#unsubscribe.push(() => session.off("target", onTarget));
+
+    // Compilation may finish after the target's initial resync found no wasm.
+    // Announce that later module through a real stop and a fresh source query.
+    const onWasmSource = ({ thread, url }: WasmSourceEvent) => {
+      if (
+        thread.isTopLevel &&
+        thread.generation === session.topLevelGeneration() &&
+        !this.#moduleByUrl.has(url)
+      ) {
+        this.#logger.debug(
+          `[debuggee] module-discovered generation=${thread.generation} tid=${thread.tid} url=${url}`
+        );
+        this.#scheduleResyncCheck(thread.tid);
+      }
+    };
+    session.on("wasm-source", onWasmSource);
+    this.#unsubscribe.push(() => session.off("wasm-source", onWasmSource));
 
     this.logState("created");
   }
@@ -227,7 +246,7 @@ export class RdpDebuggee {
     this.#stop.operation?.cancel(new Error("debuggee disposed"));
     this.#generation.abort(new Error("debuggee disposed"));
     for (const unsubscribe of this.#unsubscribe.splice(0)) unsubscribe();
-    this.#clearResyncTimer();
+    this.#clearResync();
     for (const map of [
       this.#moduleByUrl,
       this.#moduleById,
@@ -1189,9 +1208,9 @@ export class RdpDebuggee {
   triggerInterrupt(): void {
     // A real interrupt supersedes any in-flight resync check: cancel it so
     // it can't later fire into an unrelated wait this triggerInterrupt() (or
-    // whatever comes after it) arms. #clearResyncTimer() is a no-op if
+    // whatever comes after it) arms. #clearResync() is a no-op if
     // nothing is armed.
-    this.#clearResyncTimer();
+    this.#clearResync();
     this.#stop.hostInterruptPending = true;
     this.#stop.forcingResync = false;
     if (this.#stop.operation?.pending) this.#interruptForHost();
@@ -1199,6 +1218,11 @@ export class RdpDebuggee {
 
   #armStopped(): void {
     this.#stop.operation = this.#session.armAllStop();
+    // Target/source arrival may precede LLDB's next command by arbitrarily
+    // long. Keep the resync intent when its grace timer finds no active wait.
+    if (this.#resyncTid !== undefined && !this.#resyncTimer) {
+      this.#scheduleResyncCheck(this.#resyncTid);
+    }
   }
 
   #interruptForHost(): void {
@@ -1206,7 +1230,8 @@ export class RdpDebuggee {
     if (tid !== undefined) this.#session.interrupt(tid);
   }
 
-  #clearResyncTimer(): void {
+  #clearResync(): void {
+    this.#resyncTid = undefined;
     if (this.#resyncTimer) {
       clearTimeout(this.#resyncTimer);
       this.#resyncTimer = null;
@@ -1217,10 +1242,16 @@ export class RdpDebuggee {
    * before forcing a re-sync stop. Do not interrupt an idle replacement just
    * because LLDB retains an old stop; Firefox may have no frame to step. */
   #scheduleResyncCheck(tid: number): void {
-    this.#clearResyncTimer();
+    this.#clearResync();
+    this.#resyncTid = tid;
     this.#resyncTimer = setTimeout(() => {
       this.#resyncTimer = null;
-      if (!this.#stop.operation?.pending) return;
+      if (!this.#stop.operation?.pending) {
+        this.#logger.debug(
+          `[debuggee] resync-deferred generation=${this.#session.topLevelGeneration()} tid=${tid}`
+        );
+        return;
+      }
       const live = this.#session.listTids();
       if (live.length === 0) return; // nothing left to interrupt — a genuine close, not a swap
       if (this.#session.hasUnwitnessedPause()) {
@@ -1241,6 +1272,7 @@ export class RdpDebuggee {
   // Retire the adapter's generation-owned handles and symbols. New module IDs
   // make LLDB observe a reload even when the URL is unchanged.
   #onNavigated(): void {
+    this.#clearResync();
     this.#generation.abort(new Error("debuggee generation retired by navigation"));
     this.#generation = new AbortController();
     this.#bytecodeByUrl.clear();

@@ -179,6 +179,9 @@ per-thread snapshot; it does not reconstruct pause state from event-listener cou
 Resume releases interrupted workers before the thread that triggered the stop.
 This preserves pthread synchronization progress. Navigation during a pending
 execution wait can force a bounded re-sync stop so LLDB reloads its module list.
+Target/source arrivals retain that intent while LLDB is idle; the next
+execution wait rearms it. A wasm module announced after the initial empty
+library scan schedules another real stop and source query.
 The REPL's Ctrl-C calls this real RDP interrupt path. Upstream DAP pause and
 running-disconnect remain separate limitations; no DAP-only RDP bypass is added.
 
@@ -269,8 +272,13 @@ See the [E2E guide](test/e2e/README.md) and [manual MCP guide](HARNESS.md).
 
 Run `npm test`, `npm run check`, and `npm run test:e2e`. Regenerate with
 `npm run component` and `npm run sourcemap`; both use locked Cargo dependencies
-and pinned Rust/jco versions. Patches validate expected generated anchors and
-fail closed. CI regenerates and checks the diff. Logging replay and complete
+and pinned Rust/jco versions. `scripts/build-component.mjs` normalizes source
+paths and fixes codegen/linker parallelism; custom Rust flags are rejected.
+The converter crates share `vendor/Cargo.toml` and its lockfile so Cargo does
+not hash an out-of-workspace dependency's absolute path into crate identities.
+The independently vendored gdbstub retains its own workspace and lockfile.
+Patches validate expected generated anchors and fail closed. CI regenerates
+and checks the diff. Logging replay and complete
 debug-session benchmarks live in `scripts/benchmark-logging.mjs` and
 `scripts/benchmark-debug-session.mjs`; the latter measures producer work as well
 as transcript writes and reports its baseline limitations.

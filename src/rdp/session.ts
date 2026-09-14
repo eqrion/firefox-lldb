@@ -72,6 +72,11 @@ export interface ThreadInfo {
   isTopLevel: boolean;
 }
 
+export interface WasmSourceEvent {
+  thread: ThreadInfo;
+  url: string;
+}
+
 /** An inspection cannot use the stop snapshot it captured. */
 export class RetiredStopError extends Error {
   constructor(stopId: number) {
@@ -854,7 +859,10 @@ export class RdpWasmSession extends EventEmitter {
             if (!owner || owner.generation === 0) continue;
             for (const source of group[1] as SourceForm[]) {
               if (!source.actor || !this.#reportUsableSource(source)) continue;
+              const newModule =
+                source.introductionType === "wasm" && !this.#wasmActorByUrl.has(source.url);
               this.#rememberSource(source, owner.generation);
+              if (newModule) this.emit("wasm-source", { thread: owner, url: source.url });
             }
             this.#observeBreakpointSources(owner, group[1] as SourceForm[]);
           } else if (group[0] === "document-event") {

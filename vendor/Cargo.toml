@@ -1,0 +1,9 @@
+# Keep the converter's path dependency inside its workspace: Cargo otherwise
+# hashes its absolute checkout path into crate identities (cargo#7645).
+[workspace]
+members = ["source-map-dwarf", "source-map-dwarf-component"]
+exclude = ["gdbstub-component"]
+resolver = "2"
+
+[profile.release]
+opt-level = "s"

@@ -84,13 +84,27 @@ export class RdpTransport extends EventEmitter {
   ): Promise<RdpTransport> {
     return new Promise((resolve, reject) => {
       signal?.throwIfAborted();
-      // The socket owns the abort subscription for its entire lifetime, including
-      // TCP connect and the root greeting before an RDP client is available.
-      const socket = net.createConnection({ port, host, signal }, () => {
+      // Own this explicitly: Node 20 can retain net's built-in signal listener
+      // after a refused connection. Repeated startup attempts share one signal.
+      const socket = net.createConnection({ port, host }, () => {
         socket.setNoDelay(true);
         resolve(new RdpTransport(socket, logger));
       });
-      socket.once("error", reject);
+      const cancel = () => {
+        socket.destroy(
+          Object.assign(new Error("RDP connection cancelled", { cause: signal?.reason }), {
+            code: "ABORT_ERR",
+          })
+        );
+      };
+      const cleanup = () => signal?.removeEventListener("abort", cancel);
+      socket.once("error", (error) => {
+        cleanup();
+        reject(error);
+      });
+      socket.once("close", cleanup);
+      signal?.addEventListener("abort", cancel, { once: true });
+      if (signal?.aborted) cancel();
     });
   }
 

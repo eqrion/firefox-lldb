@@ -54,7 +54,8 @@ bypassing its CLI or transport plumbing.
 - `runtime_failure.test.mjs` — idle RDP loss, published worker failure and fatal
   exception cleanup terminate the owned real browser and retain evidence.
 - `tab_watcher_lifecycle.test.mjs` — coalesced refresh, priming cancellation,
-  classified startup retries and greeting deadlines.
+  classified startup retries, greeting deadlines, cold-launch budget and
+  abort-listener release across refused connections.
 - `startup_target_recovery.test.mjs` — one same-tab startup reacquisition after
   confirmed target loss, with rollback, retry exhaustion and shutdown coverage.
 - `startup_retry_log.test.mjs` — all three CLI frontends retain recovered startup

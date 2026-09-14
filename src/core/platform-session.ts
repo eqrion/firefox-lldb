@@ -192,7 +192,7 @@ export async function startPlatformServer(
         args.rdpPort,
         "127.0.0.1",
         firefox.launchToken,
-        80,
+        undefined,
         opts.signal,
         logger
       );

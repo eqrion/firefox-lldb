@@ -1,4 +1,5 @@
 node_modules/
+vendor/target/
 **__pycache__**
 dist/
 *.log

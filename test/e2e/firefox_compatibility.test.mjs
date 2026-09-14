@@ -10,7 +10,10 @@ import assert from "node:assert/strict";
 import { launchFirefox } from "../../src/core/firefox.ts";
 import { verifyFirefoxLaunchToken } from "../../src/rdp/browser.ts";
 import { freePort } from "../../src/platform/gdb-server-spawner.ts";
-import { firefoxCompatibilityError } from "../../src/rdp/firefox-compatibility.ts";
+import {
+  firefoxCompatibilityError,
+  MAX_SUPPORTED_FIREFOX_MAJOR,
+} from "../../src/rdp/firefox-compatibility.ts";
 import { Session } from "./harness.mjs";
 
 test("detects the launched Firefox version over RDP", async () => {
@@ -29,6 +32,16 @@ test("detects the launched Firefox version over RDP", async () => {
       firefoxCompatibilityError(runtime),
       undefined,
       "CI bypasses the runtime gate to exercise new builds, but the validated range still needs review"
+    );
+    // Reviewing a new Nightly advances the boundary; it must not disable the
+    // review gate for the next major, even when CI bypasses runtime rejection.
+    assert.match(
+      firefoxCompatibilityError({
+        ...runtime,
+        version: `${MAX_SUPPORTED_FIREFOX_MAJOR + 1}.0a1`,
+        major: MAX_SUPPORTED_FIREFOX_MAJOR + 1,
+      }),
+      /newer than/
     );
   } finally {
     await firefox.close();

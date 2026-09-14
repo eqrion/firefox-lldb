@@ -38,7 +38,7 @@ export async function verifyFirefoxLaunchToken(
   port: number,
   host: string,
   expectedToken: string,
-  attempts = 80,
+  attempts = 120,
   signal?: AbortSignal,
   logger?: Logger
 ): Promise<FirefoxRuntime> {
@@ -66,7 +66,9 @@ export async function verifyFirefoxLaunchToken(
         client.close();
       }
     },
-    { signal, logger, attempts }
+    // Cold browser launch is slower than attaching to an already-running RDP
+    // server. Keep one bounded budget, including identity and version replies.
+    { signal, logger, attempts, timeoutMs: 30_000 }
   );
 }
 

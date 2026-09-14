@@ -15,7 +15,7 @@ test("Firefox version parser accepts release, ESR, beta, and Nightly formats", (
   assert.equal(parseFirefoxMajor("154.0.1"), 154);
   assert.equal(parseFirefoxMajor("140.0.4esr"), 140);
   assert.equal(parseFirefoxMajor("155.0b9"), 155);
-  assert.equal(parseFirefoxMajor("157.0a1"), 157);
+  assert.equal(parseFirefoxMajor("158.0a1"), 158);
   assert.equal(parseFirefoxMajor("unknown"), undefined);
 });
 
